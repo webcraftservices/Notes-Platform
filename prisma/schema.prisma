@@ -1,0 +1,897 @@
+// ============================================================================
+// KNOWLEDGE PLATFORM — DATABASE SCHEMA
+// Phase 1 deliverable. PostgreSQL + pgvector for embeddings.
+//
+// Design principles applied throughout:
+//  - Every tenant-scoped row carries a resolvable owner (userId) or
+//    workspaceId/groupId so row-level security policies can be written
+//    against a single predictable column.
+//  - Soft deletion (deletedAt) on user-facing content so Trash/Recovery
+//    (spec §100) works without losing referential history.
+//  - Polymorphic "attachable" materials via optional FKs + a computed
+//    scope, rather than a single rigid parent, per spec §59.
+//  - Enums centralize state machines (processing status, roles, plans)
+//    instead of scattering magic strings across the app.
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ----------------------------------------------------------------------------
+// IDENTITY & ACCESS
+// ----------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String? // null when the user only ever used OAuth
+  name          String?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  profile            Profile?
+  accounts           Account[] // OAuth provider links (NextAuth)
+  sessions           Session[]
+  connectedAccounts  ConnectedAccount[] // Google Drive/Docs etc.
+  workspaces         WorkspaceMember[]
+  ownedWorkspaces    Workspace[]        @relation("WorkspaceOwner")
+  groupMemberships   GroupMember[]
+  ownedGroups        Group[]            @relation("GroupOwner")
+  materials          Material[]
+  notes              Note[]
+  aiConversations    AIConversation[]
+  processingJobs     ProcessingJob[]
+  notifications      Notification[]
+  flashcardDecks     FlashcardDeck[]
+  quizzes            Quiz[]
+  quizAttempts       QuizAttempt[]
+  activityLogs       ActivityLog[]
+  subscription       Subscription?
+  usageRecords       UsageRecord[]
+  favorites          Favorite[]
+
+  @@index([email])
+}
+
+// Public-facing / editable profile data, separated from auth-critical User fields.
+model Profile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio           String?
+  theme         Theme    @default(SYSTEM)
+  timezone      String   @default("UTC")
+  notifyEmail   Boolean  @default(true)
+  notifyPush    Boolean  @default(true)
+  onboardedAt   DateTime?
+  usageIntent   UsageIntent?
+  updatedAt     DateTime @updatedAt
+}
+
+enum Theme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum UsageIntent {
+  STUDY
+  MEETINGS
+  RESEARCH
+  PERSONAL
+  WORK
+}
+
+// NextAuth-standard tables (email/password handled separately via passwordHash).
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expires      DateTime
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Google Drive / Docs / future providers. Tokens are encrypted at rest by the
+// application layer before being written here — see StorageService docs.
+model ConnectedAccount {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider      ConnectedProvider
+  externalId    String // provider account id / email
+  accessToken   String    @db.Text // encrypted
+  refreshToken  String?   @db.Text // encrypted
+  expiresAt     DateTime?
+  scopes        String[]
+  connectedAt   DateTime  @default(now())
+  lastSyncedAt  DateTime?
+  revokedAt     DateTime?
+
+  @@unique([userId, provider, externalId])
+}
+
+enum ConnectedProvider {
+  GOOGLE_DRIVE
+  GOOGLE_DOCS
+}
+
+// ----------------------------------------------------------------------------
+// WORKSPACE (multi-tenant boundary)
+// ----------------------------------------------------------------------------
+
+model Workspace {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  ownerId     String
+  owner       User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  mode        WorkspaceMode @default(STUDY)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  members     WorkspaceMember[]
+  subjects    Subject[]
+  materials   Material[]
+  aiConversations AIConversation[]
+
+  @@index([ownerId])
+}
+
+// STUDY vs MEETING/KNOWLEDGE mode toggles which AI note template + nav
+// labels are used, per spec §2 and §16. Never hard-coded into the schema
+// beyond this discriminator.
+enum WorkspaceMode {
+  STUDY
+  MEETING
+  KNOWLEDGE
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        MemberRole    @default(MEMBER)
+  joinedAt    DateTime      @default(now())
+
+  @@unique([workspaceId, userId])
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ----------------------------------------------------------------------------
+// KNOWLEDGE HIERARCHY: Subject -> Chapter -> Topic
+// ----------------------------------------------------------------------------
+
+model Subject {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  groupId     String? // present if this subject lives inside a shared group
+  group       Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  icon        String? // icon key from the shared icon set
+  color       String? // accent token, e.g. "indigo"
+  coverImage  String?
+  order       Int       @default(0)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  chapters    Chapter[]
+  materials   Material[]
+  aiConversations AIConversation[]
+  favorites   Favorite[]
+
+  @@index([workspaceId])
+  @@index([groupId])
+}
+
+model Chapter {
+  id          String    @id @default(cuid())
+  subjectId   String
+  subject     Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  order       Int       @default(0)
+  status      ChapterStatus @default(NOT_STARTED)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  topics      Topic[]
+  materials   Material[]
+  aiConversations AIConversation[]
+  favorites   Favorite[]
+
+  @@index([subjectId])
+}
+
+enum ChapterStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Topic {
+  id          String    @id @default(cuid())
+  chapterId   String
+  chapter     Chapter   @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  order       Int       @default(0)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  notes        Note[]
+  materials    Material[]
+  transcripts  Transcript[]
+  aiConversations AIConversation[]
+  flashcardDecks FlashcardDeck[]
+  quizzes      Quiz[]
+  favorites    Favorite[]
+
+  @@index([chapterId])
+}
+
+// ----------------------------------------------------------------------------
+// NOTES (rich, block-based, versioned)
+// ----------------------------------------------------------------------------
+
+model Note {
+  id          String    @id @default(cuid())
+  topicId     String?
+  topic       Topic?    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User      @relation(fields: [authorId], references: [id])
+  title       String
+  source      NoteSource @default(MANUAL) // MANUAL | AI_GENERATED | AI_ASSISTED
+  templateKind String?  // "lecture" | "meeting" | null — drives which AI sections render
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  blocks      NoteBlock[]
+  versions    NoteVersion[]
+  favorites   Favorite[]
+
+  @@index([topicId])
+  @@index([authorId])
+}
+
+enum NoteSource {
+  MANUAL
+  AI_GENERATED
+  AI_ASSISTED
+}
+
+// Individual editable sections (Overview, Definition, Formulas, Important
+// Points, etc. per spec §16). Ordered, typed, independently regenerable.
+model NoteBlock {
+  id        String   @id @default(cuid())
+  noteId    String
+  note      Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  kind      NoteBlockKind
+  heading   String?
+  content   Json // rich-text document (ProseMirror/Tiptap JSON)
+  order     Int      @default(0)
+  metadata  Json? // importance tags, source timestamps, etc.
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([noteId])
+}
+
+enum NoteBlockKind {
+  OVERVIEW
+  DEFINITION
+  CORE_CONCEPT
+  EXPLANATION
+  IMPORTANT_POINTS
+  EXAMPLE
+  FORMULA
+  DERIVATION
+  APPLICATION
+  COMMON_MISTAKE
+  EXAM_IMPORTANT
+  QUESTION
+  REFERENCE
+  SUMMARY
+  AGENDA
+  DECISION
+  ACTION_ITEM
+  CUSTOM
+}
+
+// Snapshot-based version history per spec §70. Cheap to store as JSON diffs
+// are avoided in favor of full snapshots for simplicity/reliability.
+model NoteVersion {
+  id        String   @id @default(cuid())
+  noteId    String
+  note      Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  editedById String
+  snapshot  Json // full serialized blocks at this point in time
+  createdAt DateTime @default(now())
+
+  @@index([noteId])
+}
+
+// ----------------------------------------------------------------------------
+// MATERIALS (unified multi-format content)
+// ----------------------------------------------------------------------------
+
+model Material {
+  id          String        @id @default(cuid())
+  ownerId     String
+  owner       User          @relation(fields: [ownerId], references: [id])
+
+  // Attachable to any level of the hierarchy, or left unorganized/inbox —
+  // per spec §3 and §25. Exactly zero or one of these is set.
+  workspaceId String?
+  workspace   Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  subject     Subject?      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterId   String?
+  chapter     Chapter?      @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  topicId     String?
+  topic       Topic?        @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  groupId     String?
+  group       Group?        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  type        MaterialType
+  title       String
+  originalFilename String?
+  storageKey  String? // private object storage key (never a public URL)
+  externalRef Json? // e.g. { provider: "google_docs", fileId, webViewLink }
+  sourceUrl   String? // for link imports
+  mimeType    String?
+  sizeBytes   Int?
+  durationSeconds Int? // for audio/video
+  status      ProcessingStatus @default(UPLOADED)
+  visibility  Visibility    @default(PRIVATE)
+  tags        String[]      @default([])
+  // Cheap, non-AI metadata gathered at upload time — page count, image
+  // dimensions, audio/video duration source, etc. Distinct from AI-derived
+  // understanding (spec §82 "AI Material Summary"), which lands in Phase 5
+  // and will live in its own fields/tables, not here.
+  metadata    Json?
+  archivedAt  DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  transcript  Transcript?
+  chunks      MaterialChunk[]
+  processingJobs ProcessingJob[]
+  favorites   Favorite[]
+
+  @@index([ownerId])
+  @@index([workspaceId])
+  @@index([subjectId])
+  @@index([chapterId])
+  @@index([topicId])
+  @@index([groupId])
+  @@index([status])
+}
+
+enum MaterialType {
+  AUDIO
+  VIDEO
+  PDF
+  DOCX
+  PPTX
+  IMAGE
+  TEXT
+  LINK
+  GOOGLE_DOC
+  GOOGLE_DRIVE_FILE
+  NOTE_EXPORT
+  OTHER
+}
+
+enum ProcessingStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  ANALYZING
+  READY
+  FAILED
+}
+
+enum Visibility {
+  PRIVATE
+  SHARED
+  GROUP
+  PUBLIC
+}
+
+// Chunked + embedded text for RAG (spec §22). One Material fans out into
+// many chunks; each chunk carries its own embedding for semantic retrieval.
+model MaterialChunk {
+  id          String   @id @default(cuid())
+  materialId  String
+  material    Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  content     String   @db.Text
+  order       Int
+  pageNumber  Int? // for PDFs
+  startSeconds Int? // for audio/video, mirrors transcript segment timing
+  endSeconds  Int?
+  tokenCount  Int?
+  embedding   Unsupported("vector(1536)")? // pgvector; dimension matches embedding model
+  createdAt   DateTime @default(now())
+
+  @@index([materialId])
+}
+
+// ----------------------------------------------------------------------------
+// AUDIO / TRANSCRIPTS
+// ----------------------------------------------------------------------------
+
+model Transcript {
+  id          String     @id @default(cuid())
+  materialId  String     @unique
+  material    Material   @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  topicId     String?
+  topic       Topic?     @relation(fields: [topicId], references: [id])
+  language    String?
+  fullText    String?    @db.Text
+  status      ProcessingStatus @default(PROCESSING)
+  provider    String? // which speech-to-text service produced this
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  segments    TranscriptSegment[]
+
+  @@index([topicId])
+}
+
+model TranscriptSegment {
+  id            String     @id @default(cuid())
+  transcriptId  String
+  transcript    Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+  startSeconds  Int
+  endSeconds    Int
+  speakerLabel  String? // "Professor", "Student 1" — null if diarization unavailable
+  text          String     @db.Text
+  detectedTopic String? // AI-suggested topic label for this segment
+  importance    ImportanceTag?
+  order         Int
+
+  @@index([transcriptId])
+}
+
+enum ImportanceTag {
+  EXAM_IMPORTANT
+  KEY_CONCEPT
+  COMMON_MISTAKE
+  FORMULA
+  EXAMPLE
+}
+
+// ----------------------------------------------------------------------------
+// AI CHAT
+// ----------------------------------------------------------------------------
+
+model AIConversation {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Contextual scope — exactly one of these (or none, for workspace/global).
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  subject     Subject?  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterId   String?
+  chapter     Chapter?  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  topicId     String?
+  topic       Topic?    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  groupId     String?
+  group       Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  title       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  messages    AIMessage[]
+  favorites   Favorite[]
+
+  @@index([userId])
+  @@index([workspaceId])
+  @@index([subjectId])
+  @@index([chapterId])
+  @@index([topicId])
+  @@index([groupId])
+}
+
+model AIMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String   @db.Text
+  sources        Json? // [{ materialId, label, timestampSeconds?, page? }]
+  tokensInput    Int?
+  tokensOutput   Int?
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// ----------------------------------------------------------------------------
+// BACKGROUND PROCESSING
+// ----------------------------------------------------------------------------
+
+model ProcessingJob {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  materialId  String?
+  material    Material? @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  type        JobType
+  status      JobStatus @default(QUEUED)
+  progress    Int       @default(0) // 0-100
+  error       String?   @db.Text
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@index([userId])
+  @@index([materialId])
+  @@index([status])
+}
+
+enum JobType {
+  TRANSCRIPTION
+  OCR
+  DOCUMENT_EXTRACTION
+  AI_NOTE_GENERATION
+  SUMMARY_GENERATION
+  QUESTION_GENERATION
+  EMBEDDING
+  FLASHCARD_GENERATION
+  QUIZ_GENERATION
+  LINK_IMPORT
+  GOOGLE_SYNC
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+// ----------------------------------------------------------------------------
+// GROUPS / COLLABORATION
+// ----------------------------------------------------------------------------
+
+model Group {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  ownerId     String
+  owner       User     @relation("GroupOwner", fields: [ownerId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  members       GroupMember[]
+  subjects      Subject[]
+  materials     Material[]
+  aiConversations AIConversation[]
+  activityLogs  ActivityLog[]
+  invitations   GroupInvitation[]
+
+  @@index([ownerId])
+}
+
+model GroupMember {
+  id       String     @id @default(cuid())
+  groupId  String
+  group    Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  @@unique([groupId, userId])
+}
+
+model GroupInvitation {
+  id        String   @id @default(cuid())
+  groupId   String
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  email     String
+  role      MemberRole @default(MEMBER)
+  invitedBy String
+  token     String   @unique
+  status    InvitationStatus @default(PENDING)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([email])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  groupId   String?
+  group     Group?   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String // "material.uploaded" | "note.edited" | "quiz.generated" ...
+  targetType String?
+  targetId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([groupId])
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// STUDY TOOLS
+// ----------------------------------------------------------------------------
+
+model FlashcardDeck {
+  id        String   @id @default(cuid())
+  topicId   String?
+  topic     Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id])
+  title     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cards     Flashcard[]
+
+  @@index([topicId])
+  @@index([ownerId])
+}
+
+model Flashcard {
+  id            String   @id @default(cuid())
+  deckId        String
+  deck          FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  front         String   @db.Text
+  back          String   @db.Text
+  difficulty    Difficulty @default(MEDIUM)
+  timesReviewed Int      @default(0)
+  timesCorrect  Int      @default(0)
+  nextReviewAt  DateTime? // spaced repetition (future)
+  createdAt     DateTime @default(now())
+
+  @@index([deckId])
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+model Quiz {
+  id        String   @id @default(cuid())
+  topicId   String?
+  topic     Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id])
+  title     String
+  quizType  QuizType @default(MIXED)
+  createdAt DateTime @default(now())
+
+  questions QuizQuestion[]
+  attempts  QuizAttempt[]
+
+  @@index([topicId])
+  @@index([ownerId])
+}
+
+enum QuizType {
+  MCQ
+  TRUE_FALSE
+  SHORT_ANSWER
+  MIXED
+}
+
+model QuizQuestion {
+  id            String   @id @default(cuid())
+  quizId        String
+  quiz          Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  prompt        String   @db.Text
+  questionType  QuizType
+  options       Json? // for MCQ: [{ id, text }]
+  correctAnswer Json // string, or option id, depending on type
+  explanation   String?  @db.Text
+  order         Int
+
+  @@index([quizId])
+}
+
+model QuizAttempt {
+  id         String   @id @default(cuid())
+  quizId     String
+  quiz       Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  answers    Json // { questionId: answer }
+  score      Int // percentage 0-100
+  weakTopics String[] @default([])
+  startedAt  DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([quizId])
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// NOTIFICATIONS / FAVORITES
+// ----------------------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String?
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+enum NotificationType {
+  PROCESSING_COMPLETE
+  PROCESSING_FAILED
+  GROUP_INVITATION
+  NEW_GROUP_MATERIAL
+  MENTION
+  AI_GENERATION_COMPLETE
+  STORAGE_WARNING
+  SYSTEM
+}
+
+// Generic favoriting across content types via a discriminated target,
+// avoiding a separate join table per entity (spec §98).
+model Favorite {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId         String?
+  note           Note?    @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  materialId     String?
+  material       Material? @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  topicId        String?
+  topic          Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  subjectId      String?
+  subject        Subject? @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterId      String?
+  chapter        Chapter? @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   AIConversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// BILLING / PLAN CONFIGURATION (payment-ready, not payment-required — §63)
+// ----------------------------------------------------------------------------
+
+model Subscription {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan       PlanTier @default(FREE)
+  status     SubscriptionStatus @default(ACTIVE)
+  externalCustomerId String? // future payment-provider reference
+  currentPeriodEnd DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+enum PlanTier {
+  FREE
+  STUDENT
+  PRO
+  TEAM
+  INSTITUTION
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  TRIALING
+}
+
+// Append-only usage ledger. Aggregate views/materialized rollups are built
+// on top of this table rather than mutating counters in place, so plan
+// limit checks (spec §62) stay auditable.
+model UsageRecord {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      UsageKind
+  quantity  Int // tokens, seconds, bytes, or count, depending on kind
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, kind])
+}
+
+enum UsageKind {
+  AI_TOKENS_INPUT
+  AI_TOKENS_OUTPUT
+  AI_REQUEST
+  RECORDING_SECONDS
+  STORAGE_BYTES
+  PROCESSING_JOB
+}

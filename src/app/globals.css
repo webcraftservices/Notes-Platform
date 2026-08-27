@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-paper text-ink dark:bg-graphite-950 dark:text-white antialiased;
+  }
+
+  ::selection {
+    @apply bg-accent-soft text-ink;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-paper dark:ring-offset-graphite-950;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /**
+   * Signature element: a hand-drawn-feeling highlighter stroke, used ONLY
+   * to mark AI-detected importance (exam-important points, key concepts,
+   * formulas) — never for generic decoration. This is the one visual idea
+   * the whole product is allowed to repeat.
+   */
+  .highlight-mark {
+    background-image: linear-gradient(
+      to right,
+      theme("colors.accent.soft") 0%,
+      theme("colors.accent.soft") 100%
+    );
+    background-repeat: no-repeat;
+    background-size: 100% 40%;
+    background-position: 0 88%;
+  }
+
+  .card {
+    @apply rounded bg-paper-raised dark:bg-graphite-900 border border-line dark:border-line-dark shadow-subtle;
+  }
+}
+
+@layer base {
+  /* Tiptap/ProseMirror editor content inside note blocks. */
+  .prose-note .ProseMirror {
+    outline: none;
+  }
+  .prose-note p.is-editor-empty:first-child::before {
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+    @apply text-ink-faint dark:text-white/20;
+  }
+  .prose-note h3 {
+    @apply mb-1.5 mt-3 font-display text-[14px] font-semibold text-ink dark:text-white;
+  }
+  .prose-note p {
+    @apply mb-2;
+  }
+  .prose-note ul,
+  .prose-note ol {
+    @apply mb-2 pl-5;
+  }
+  .prose-note ul {
+    @apply list-disc;
+  }
+  .prose-note ol {
+    @apply list-decimal;
+  }
+  .prose-note a {
+    @apply text-accent-strong underline underline-offset-2;
+  }
+}
