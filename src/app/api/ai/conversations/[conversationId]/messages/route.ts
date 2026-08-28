@@ -68,7 +68,7 @@ export async function POST(req: Request, { params }: { params: { conversationId:
           conversationId: conversation.id,
           role: "ASSISTANT",
           content: result.content,
-          sources: chunks.length > 0 ? chunksToSources(chunks) : undefined,
+          sources: chunks.length > 0 ? JSON.parse(JSON.stringify(chunksToSources(chunks))) : undefined,
           tokensInput: result.tokensInput,
           tokensOutput: result.tokensOutput,
         },

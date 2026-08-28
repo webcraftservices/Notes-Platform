@@ -26,16 +26,47 @@ export function computeSafeProgress(currentTime: number, duration: number): numb
   return Math.min(1, Math.max(0, p));
 }
 
-export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: string }>(
-  function AudioPlayer({ src, title }, ref) {
+export const AudioPlayer = forwardRef<
+  AudioPlayerHandle,
+  { src: string; title: string; fallbackDurationSeconds?: number | null }
+>(
+  function AudioPlayer({ src, title, fallbackDurationSeconds }, ref) {
     const audioRef = useRef<HTMLAudioElement>(null);
     const [playing, setPlaying] = useState(false);
-    const [duration, setDuration] = useState(0);
+    // Seeded from a reliable server-computed duration (Material.durationSeconds,
+    // extracted from real audio bytes via music-metadata at upload time — see
+    // lib/... upload metadata extraction) when the live element can't report
+    // one yet. This is what keeps the time display / progress fill correct for
+    // recordings made before the webm-duration-fix finalization step existed,
+    // whose own WebM container header never states a finite duration, without
+    // touching HTMLAudioElement.currentTime (still the sole source of truth
+    // for playback position) or the stored file itself. A later real, finite
+    // `durationchange` from the element always overwrites this fallback.
+    const fallbackDuration =
+      typeof fallbackDurationSeconds === "number" && Number.isFinite(fallbackDurationSeconds) && fallbackDurationSeconds > 0
+        ? fallbackDurationSeconds
+        : 0;
+    const [duration, setDuration] = useState(fallbackDuration);
     const [currentTime, setCurrentTime] = useState(0);
     const [volume, setVolume] = useState(1);
     const [muted, setMuted] = useState(false);
     const [speed, setSpeed] = useState(1);
     const [loaded, setLoaded] = useState(false);
+
+    // Mirrors `duration` state into a stable ref so the rAF loop and other
+    // stable-ref-only callbacks below (see the file-level note on
+    // startRaf/stopRaf/updateVisual) can read the current *effective*
+    // duration — live element value when finite, otherwise the fallback —
+    // without needing `duration` in their dependency arrays.
+    const durationRef = useRef(fallbackDuration);
+    useEffect(() => {
+      durationRef.current = duration;
+    }, [duration]);
+
+    /** Live element duration when usable, else the last-known effective duration (which itself started from `fallbackDurationSeconds`). Used everywhere a `d`/duration value feeds a visual update, so old recordings whose WebM header never resolves a finite duration still get a correctly filled progress bar. */
+    function effectiveDuration(liveDuration: number): number {
+      return Number.isFinite(liveDuration) && liveDuration > 0 ? liveDuration : durationRef.current;
+    }
 
     useImperativeHandle(ref, () => ({
       seek: (seconds: number) => {
@@ -49,8 +80,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
         // path (used by transcript-click-to-jump) previously left the
         // bar stale until the next rAF frame, which only happens while
         // already playing. See the root-cause analysis above.
-        const d = audio.duration;
-        if (Number.isFinite(d) && d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
+        const d = effectiveDuration(audio.duration);
+        if (d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
       },
       play: () => {
         const audio = audioRef.current;
@@ -105,9 +136,14 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
         return;
       }
       const t = a.currentTime;
-      const d = a.duration;
       const safeT = Number.isFinite(t) && t >= 0 ? t : 0;
-      const safeD = Number.isFinite(d) && d > 0 ? d : 0;
+      // effectiveDuration falls back to the last-known-good (possibly
+      // server-provided) duration when the live element can't report one —
+      // see the component-scope effectiveDuration() definition above.
+      // Referencing a per-render-redefined function from this stable
+      // (empty-deps) callback is safe here for the same reason updateVisual
+      // already was: it only ever closes over a stable ref (durationRef).
+      const safeD = effectiveDuration(a.duration);
       const progress = safeD > 0 ? Math.min(1, Math.max(0, safeT / safeD)) : 0;
       updateVisual(progress);
       rafRef.current = requestAnimationFrame(loop);
@@ -134,18 +170,22 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
       setCurrentTime(Number.isFinite(t) && t >= 0 ? t : 0);
     };
     const onLoaded = () => {
+      // Never regress to 0 when the live element can't report a duration
+      // yet (e.g. an old recording's unresolved WebM header) — keep
+      // whatever fallback we were seeded with instead. A later genuinely
+      // finite value from the element still always wins.
       const d = audio.duration;
-      setDuration(Number.isFinite(d) && d > 0 ? d : 0);
+      setDuration(Number.isFinite(d) && d > 0 ? d : fallbackDuration);
       setLoaded(true);
     };
     const onDurationChange = () => {
       const d = audio.duration;
-      setDuration(Number.isFinite(d) && d > 0 ? d : 0);
+      setDuration(Number.isFinite(d) && d > 0 ? d : fallbackDuration);
     };
     const onEnd = () => {
       // Ensure exact final state
-      const d = audio.duration;
-      if (Number.isFinite(d) && d > 0) setCurrentTime(d);
+      const d = effectiveDuration(audio.duration);
+      if (d > 0) setCurrentTime(d);
       // visually ensure progress reaches 100%
       try {
         updateVisual(1);
@@ -159,9 +199,9 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
       setPlaying(true);
       // immediate sync before starting the rAF loop
       try {
-        const d = audio.duration;
+        const d = effectiveDuration(audio.duration);
         const t = audio.currentTime;
-        if (Number.isFinite(d) && d > 0 && Number.isFinite(t)) {
+        if (d > 0 && Number.isFinite(t)) {
           const p = Math.min(1, Math.max(0, t / d));
           updateVisual(p);
         }
@@ -174,9 +214,9 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
       setPlaying(false);
       // final sync to ensure visual stops exactly
       try {
-        const d = audio.duration;
+        const d = effectiveDuration(audio.duration);
         const t = audio.currentTime;
-        if (Number.isFinite(d) && d > 0 && Number.isFinite(t)) {
+        if (d > 0 && Number.isFinite(t)) {
           const p = Math.min(1, Math.max(0, t / d));
           updateVisual(p);
         }
@@ -212,9 +252,9 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
 
       // Sync visual immediately if possible
       try {
-        const d = initialDuration;
+        const d = effectiveDuration(initialDuration);
         const t = initialCurrent;
-        if (Number.isFinite(d) && d > 0 && Number.isFinite(t)) {
+        if (d > 0 && Number.isFinite(t)) {
           const p = Math.min(1, Math.max(0, t / d));
           updateVisual(p);
         }
@@ -249,8 +289,11 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
     // Re-run effect whenever src changes so listeners are attached to the
     // new element. startRaf/stopRaf are stable (useCallback, empty deps)
     // so including them here does NOT cause the effect to re-run on every
-    // render — only when src actually changes.
-  }, [src, startRaf, stopRaf]);
+    // render — only when src actually changes. fallbackDuration is a
+    // small derived primitive (from the fallbackDurationSeconds prop) read
+    // inside onLoaded/onDurationChange above — it only actually changes
+    // when the prop does, which already tracks the same material as `src`.
+  }, [src, startRaf, stopRaf, fallbackDuration]);
 
     function togglePlay() {
       const audio = audioRef.current;
@@ -284,8 +327,8 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
       // Sync the visual immediately — don't rely on the rAF loop, which
       // may not be running if playback is paused. This is the fix for
       // the seek-desync gap described in the root-cause analysis above.
-      const d = audio.duration;
-      if (Number.isFinite(d) && d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
+      const d = effectiveDuration(audio.duration);
+      if (d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
     }
 
     function changeSpeed() {
@@ -328,13 +371,20 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, { src: string; title: s
                     </span>
 
                     <div className="relative flex items-center w-full px-2">
-                      {/* Visual progress track */}
-                      <div ref={progressTrackRef} className="relative w-full h-2 rounded-full bg-line overflow-hidden">
-                        <div
-                          ref={progressFillRef}
-                          className="absolute left-0 top-0 bottom-0 origin-left bg-accent will-change-transform"
-                          style={{ transform: "scaleX(0)" }}
-                        />
+                      {/* Visual progress track. No overflow-hidden here — the
+                          12px thumb needs to render fully outside the 8px-tall
+                          track at 0%/100%, uncropped. Clipping is scoped to just
+                          the fill (below) so its scaleX rectangle still respects
+                          the track's rounded corners without also cropping the
+                          thumb. */}
+                      <div ref={progressTrackRef} className="relative w-full h-2 rounded-full bg-line">
+                        <div className="absolute inset-0 overflow-hidden rounded-full">
+                          <div
+                            ref={progressFillRef}
+                            className="absolute left-0 top-0 bottom-0 origin-left bg-accent will-change-transform"
+                            style={{ transform: "scaleX(0)" }}
+                          />
+                        </div>
 
                         <div
                           ref={thumbWrapperRef}

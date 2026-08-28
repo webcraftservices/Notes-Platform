@@ -112,8 +112,7 @@ Drive/Docs file-access scopes (Phase 7) are a separate, later consent step
 - [x] Phase 2 — Dashboard + Subject/Chapter/Topic system
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
-- [ ] Phase 5 — AI notes + RAG + AI chat
-- [ ] Phase 5 — AI notes + RAG + AI chat
+- [x] Phase 5 — AI notes + RAG + AI chat
 - [ ] Phase 6 — Groups + collaboration
 - [ ] Phase 7 — Google Drive/Docs
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor

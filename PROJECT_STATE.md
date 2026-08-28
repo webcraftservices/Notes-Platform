@@ -13,24 +13,71 @@ before trusting anything time-sensitive here — code may have moved on.
 
 ## Current phase
 
-**Phase 5 (AI notes + RAG + AI chat) is complete**, built provider-free by
-explicit user decision — no AI/embedding SDK, no API keys, no fake
-responses. See `docs/ai-setup.md` for how to activate a real provider
-later. Phases 1–4 remain complete and unmodified except for one small,
-behavior-preserving refactor (see "Recent work completed" below).
+**Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed.**
+Built provider-free by explicit user decision — no AI/embedding SDK, no
+API keys, no fake responses. See `docs/ai-setup.md` for how to activate a
+real provider later. Phases 1–4 remain complete and unmodified except for
+one small, behavior-preserving refactor (see "Recent work completed"
+below).
+
+Two known issues were investigated during Phase 5 closeout and are
+recorded below as **explicitly deferred, non-blocking** — see "Known
+deferred issues (Phase 5 closeout)". Neither blocks Phase 6.
+
+**The current codebase (as of this closure) is the baseline for Phase 6.**
+Do not re-open or re-attempt either deferred issue as part of Phase 6 work
+unless the user explicitly asks for it again.
 
 Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 1 — Architecture, database, authentication
 - [x] Phase 2 — Dashboard + Subject/Chapter/Topic system
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
-- [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below)
+- [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
 - [ ] Phase 6 — Groups + collaboration (not started; page placeholders only)
 - [ ] Phase 7 — Google Drive/Docs (not started)
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
 - [ ] Phase 9 — Security + performance + production polish (not started)
 
+## Known deferred issues (Phase 5 closeout)
+
+Both investigated this session. Both are **deferred, not blockers**. Do
+not attempt to fix either without an explicit new request.
+
+1. **Legacy recordings can be inaudible.** Recordings created before the
+   WebM-duration finalization behavior existed can still fail to play in
+   the browser. Transcripts for these recordings remain available and
+   correct. New/current recordings are unaffected: preview, duration,
+   playback, and refresh all work correctly.
+
+   A targeted compatibility fix was already attempted: RFC 7233-compliant
+   Range-header parsing (including suffix byte-ranges) in
+   `/api/storage/read`, unit tests for that parser, and a duration
+   fallback in `AudioPlayer` using the existing server-side
+   `Material.durationSeconds`. This fix is real, tested, and merged (see
+   "Recent work completed" below) — it corrects a genuine spec bug in
+   Range handling and is expected to help in general — but manual browser
+   testing after applying it still showed some old recordings remaining
+   inaudible. The exact remaining cause for those specific files was not
+   further isolated in this session.
+   - Do NOT modify the recording system, storage system, WebM
+     finalization, or `AudioPlayer` to chase this further without an
+     explicit new request.
+   - Do NOT delete or modify the old recordings.
+2. **Audio progress bar visual polish.** Playback for current/new
+   recordings works and the position tracking is correct, but the visual
+   fill still doesn't read as a fully premium continuously-filling bar in
+   all cases. Multiple rAF/transform iterations were already attempted
+   (see "Recent work completed" and "Failed approaches" below).
+   - Do NOT attempt another redesign of the progress animation without an
+     explicit new request. The current implementation is frozen.
+
+Both: new/current recordings are fully functional; the core
+recording → transcription → playback pipeline works; only legacy files
+and cosmetic polish are affected. Neither is a Phase 6 blocker.
+
 ## What's actually implemented (verified in code, not assumed)
+
 
 **Auth**: email/password (bcrypt) + Google OAuth via NextAuth, JWT
 sessions, `middleware.ts` route gating, real registration rate-limiting.
@@ -143,6 +190,73 @@ by explicit Phase 5 scope decision.
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: Legacy-recording playback investigation + Phase 5 closure
+Two issues investigated per user request: old/legacy recordings being
+inaudible, and audio progress-bar visual polish. Full root-cause
+investigation done via code inspection (this sandbox has no real browser
+to reproduce Chromium's media pipeline against — flagged honestly, not
+glossed over).
+
+**Diagnosed root cause (legacy recordings)**: `/api/storage/read` parsed
+the `Range` header with `/bytes=(\d+)-(\d*)/`, which only handles 2 of the
+3 valid RFC 7233 forms. It silently failed on the suffix form
+(`bytes=-N`, "last N bytes") — exactly what Chromium requests when
+probing a WebM file whose container header doesn't state a finite
+duration — and on a failed match fell back to serving the *entire file*
+while still responding `206` with a mismatched `Content-Range`. This is
+spec-invalid and can make Chromium's media pipeline abort the load
+outright. New recordings never trigger this (their WebM header already
+has a finalized duration via `webm-duration-fix`, so no probe is ever
+issued); old recordings (predating that fix) always did. The underlying
+file bytes were never affected — confirmed by the fact that transcription
+(which reads the file directly server-side, bypassing this endpoint)
+always worked.
+
+**Fix implemented and merged**: new `src/lib/http-range.ts` —
+`parseRangeHeader()`, a pure, unit-tested function handling all 3 RFC
+7233 forms correctly — wired into both branches (local + proxied
+backends) of `/api/storage/read/route.ts`, replacing the broken inline
+regex in both places. Also threaded the existing, already-computed
+`Material.durationSeconds` (from `music-metadata` at upload time) into
+`AudioPlayer` as an optional `fallbackDurationSeconds` prop, used only
+when the live `HTMLAudioElement.duration` is non-finite, so old
+recordings' time display/progress fill don't stay stuck at 0 even if the
+browser never resolves the container's own duration. `currentTime`
+remains 100% sourced from the real audio element throughout — no faked
+playback timing. Also fixed a real, separately-discovered layout bug: the
+12px progress-bar thumb was being clipped by the 8px-tall track's
+`overflow-hidden` (needed only to clip the fill's rounded corners) —
+scoped `overflow-hidden` to just the fill so the thumb renders uncropped
+at 0%/100%.
+
+Files touched: `src/lib/http-range.ts` (new), `src/lib/__tests__/http-range.test.ts`
+(new), `src/app/api/storage/read/route.ts`,
+`src/components/materials/audio-player.tsx`,
+`src/components/materials/material-preview.tsx`,
+`src/components/materials/material-transcribe-section.tsx`,
+`src/app/(app)/materials/[materialId]/page.tsx` (last three only to pass
+`durationSeconds` down). No DB/schema change, no re-encoding of stored
+files, no changes to recording/`MediaRecorder`/AssemblyAI/storage-backend
+selection.
+
+**Verified**: 102/102 tests pass (92 baseline + 10 new for
+`http-range.ts`); lint clean (one real `react-hooks/exhaustive-deps`
+warning fixed properly via the dependency array, not suppressed);
+typecheck diffed **line-for-line** against a stashed, untouched checkout
+of the same commit and confirmed **byte-for-byte identical** — 38 errors,
+zero added/removed/changed, same Prisma-generation-cascade baseline as
+before.
+
+**Outcome**: the Range-parsing fix is real, tested, and correct on its
+own terms, and is expected to help in general — but manual browser
+testing after applying it still showed some old recordings remaining
+inaudible; the exact remaining cause for those specific files wasn't
+further isolated this session. Per explicit user instruction, this is now
+recorded as a **deferred, non-blocking** issue rather than pursued
+further — see "Known deferred issues (Phase 5 closeout)" above. The
+progress-bar visual-polish issue is deferred for the same reason; the
+current implementation is frozen as-is.
 
 ### Session: Phase 5 — AI notes + RAG + AI chat (provider-free scaffold)
 Built per explicit user approval with 13 numbered constraints (see git
@@ -304,10 +418,12 @@ against Claude's last-known state:
     `src/lib/services/registry.ts`, which doesn't exist — the actual
     registry functions are `getStorageService()` in `storage.ts` and
     `getSpeechService()` in `speech.ts`.
-  - `/api/storage/read/route.ts`'s top-of-file doc comment says "Only
-    meaningful for the local storage backend," which was true when
-    written but is now **stale** — the same route now also proxies S3
-    (see "Recent work completed"). Not corrected yet.
+- **Legacy WebM recordings can still be inaudible** — see "Known deferred
+  issues (Phase 5 closeout)" at the top of this document. Deferred, not
+  blocking Phase 6. Do not attempt to fix without an explicit new request.
+- **Audio progress-bar visual polish** — see "Known deferred issues (Phase
+  5 closeout)" at the top of this document. Deferred, not blocking Phase
+  6. Do not attempt another redesign without an explicit new request.
 - **`Prisma.MaterialWhereInput` and other Prisma-generated types don't
   resolve in whatever sandbox last ran `tsc`** because `prisma generate`
   couldn't reach `binaries.prisma.sh` from that environment's network
@@ -336,16 +452,28 @@ against Claude's last-known state:
 ## Tests performed and their results (this session, verified live)
 
 ```
-npm run test        →  10 test files, 92/92 tests passed
+npm run test        →  11 test files, 102/102 tests passed
 npm run lint         →  0 errors, 0 warnings
-npm run typecheck    →  38 errors, ALL confirmed as the Prisma-generation
-                         cascade described above (30 pre-existing + 8 new
-                         instances in Phase 5's files, same root cause —
-                         verified by grepping for "@prisma/client",
-                         "Prisma.", and "implicitly has an 'any' type";
-                         every single error line matches one of those
-                         patterns; zero unexplained errors)
+npm run typecheck    →  38 errors, diffed line-for-line against a stashed
+                         untouched checkout of the same commit and
+                         confirmed byte-for-byte identical — zero
+                         added/removed/changed. Same Prisma-generation
+                         cascade described above (confirmed by grepping
+                         for "@prisma/client", "Prisma.", and "implicitly
+                         has an 'any' type"; every error line matches one
+                         of those patterns; zero unexplained errors).
 ```
+
+Also noted for this session: the user reported `npx prisma generate` and
+`npx prisma migrate status` were already run successfully (in an
+environment with real database/network access), with the database
+reporting "Database schema is up to date!" This was **not** independently
+re-run in this sandbox — attempting `npx prisma generate` here reproduces
+the same `binaries.prisma.sh` `403 Forbidden` network restriction already
+documented in "Known bugs / issues" above, so it can't be confirmed from
+here. Recorded as user-reported, not sandbox-verified — flagged
+explicitly rather than presented as something this session confirmed
+directly.
 
 No integration/E2E tests exist in this project — only Vitest unit tests,
 concentrated on Zod validation schemas and pure utility functions. Phase
@@ -358,35 +486,36 @@ during implementation).
 
 ## Current task
 
-Just completed: Phase 5 (AI notes + RAG + AI chat), built provider-free
-per explicit user approval and 13 numbered constraints. See "Recent work
-completed" above for the full file list and verification results.
+Phase 5 is formally closed as of this session. No new application
+behavior was introduced during closure — this task only updated
+documentation, verified the working tree, and committed/pushed the
+already-implemented and already-verified changes described in "Recent
+work completed" above.
 
 ## Exact next steps
 
 Nothing is queued. The next piece of work is whatever the user requests
 next. Likely candidates based on the master prompt's phase order:
 
-1. **Verify Phase 5 against a real database**: run `npm run db:generate`
+1. **Phase 6** (Groups + collaboration) is the next unstarted phase in
+   sequence — but do not start it speculatively; wait for explicit
+   instruction, per `CLAUDE.md`'s phase-discipline rule.
+2. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
    `ingestion.ts`/`retrieval.ts` actually executes against Postgres. This
    is the one thing Phase 5 could not be verified against in this session
    (see "Not yet verified against a real database" above).
-2. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
+3. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
    optional, only if/when the user wants AI features to actually respond
    instead of showing the honest "not configured" state.
-3. **Phase 6** (Groups + collaboration) is the next unstarted phase in
-   sequence — but do not start it speculatively; wait for explicit
-   instruction, per `CLAUDE.md`'s phase-discipline rule.
 4. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
-   `recorder-panel.tsx`; fix the stale doc comment on
-   `/api/storage/read/route.ts`; dedupe the README Phase 5 line. (The
-   `interfaces.ts` → `registry.ts` stale reference noted in earlier
-   versions of this document is now moot — `embedding.ts`/`ai.ts` joined
-   `speech.ts`/`storage.ts` as the real per-area registries, confirming
-   that's the actual pattern, not a single `registry.ts`.)
+   `recorder-panel.tsx`; dedupe the README Phase 5 line.
+
+**Do not re-open either deferred issue** ("Known deferred issues (Phase 5
+closeout)" above) as part of Phase 6 or any other work unless the user
+explicitly asks for it again.
 
 ## How to verify this document
 

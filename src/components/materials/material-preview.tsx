@@ -81,7 +81,9 @@ export function MaterialPreview({ material }: { material: Material }) {
     case "IMAGE":
       return <ImageViewer src={readUrl} alt={material.title} />;
     case "AUDIO":
-      return <AudioPlayer src={readUrl} title={material.title} />;
+      return (
+        <AudioPlayer src={readUrl} title={material.title} fallbackDurationSeconds={material.durationSeconds} />
+      );
     case "VIDEO":
       return <VideoViewer src={readUrl} title={material.title} />;
     case "TEXT":

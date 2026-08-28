@@ -2,18 +2,26 @@ import { NextResponse } from "next/server";
 import { getAccessibleMaterialByStorageKey, getSessionUser, NotAuthorizedError } from "@/lib/access";
 import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
+import { parseRangeHeader } from "@/lib/http-range";
 import { jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 
 /**
- * Only meaningful for the local storage backend. Every request re-checks
- * that the signed-in user can actually access the Material that owns this
- * key (owner, or same workspace/group) — there is no separate token
- * scheme layered on top because the session cookie is already the correct
- * authorization check the rest of the app uses (see lib/access.ts).
+ * Proxies both the local storage backend AND non-local backends (e.g. S3)
+ * — see PROJECT_STATE.md "Recent work completed" for when that was
+ * extended beyond just local. Every request re-checks that the signed-in
+ * user can actually access the Material that owns this key (owner, or
+ * same workspace/group) — there is no separate token scheme layered on
+ * top because the session cookie is already the correct authorization
+ * check the rest of the app uses (see lib/access.ts).
  *
  * Supports HTTP Range requests so <audio>/<video> elements can seek and
  * PDF viewers can fetch byte ranges, instead of always downloading the
- * whole file.
+ * whole file. Range parsing lives in lib/http-range.ts (unit tested) and
+ * handles all three RFC 7233 forms, including the suffix form
+ * (`bytes=-N`) that browsers use to probe for duration/seek metadata in
+ * WebM files whose own header doesn't already state a finite duration —
+ * see that file's doc comment for why getting this right specifically
+ * matters for playing back old audio recordings.
  */
 export async function GET(req: Request) {
   const user = await getSessionUser();
@@ -51,11 +59,10 @@ export async function GET(req: Request) {
     }
 
     const fileSize = stats.size;
+    const range = parseRangeHeader(rangeHeader, fileSize);
 
-    if (rangeHeader) {
-      const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
-      const start = match?.[1] ? parseInt(match[1], 10) : 0;
-      const end = match?.[2] ? parseInt(match[2], 10) : fileSize - 1;
+    if (range) {
+      const { start, end } = range;
       const chunk = await storage.readFile(key, { start, end });
 
       return new NextResponse(new Uint8Array(chunk), {
@@ -92,11 +99,10 @@ export async function GET(req: Request) {
     // app already uses that pattern elsewhere when it needs bytes server-side.
     const fullBuffer = await (storage as any).getObjectBuffer(key);
     const fileSize = fullBuffer.byteLength;
+    const range = parseRangeHeader(rangeHeader, fileSize);
 
-    if (rangeHeader) {
-      const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
-      const start = match?.[1] ? parseInt(match[1], 10) : 0;
-      const end = match?.[2] ? parseInt(match[2], 10) : fileSize - 1;
+    if (range) {
+      const { start, end } = range;
       const slice = fullBuffer.slice(start, end + 1);
       return new NextResponse(new Uint8Array(slice), {
         status: 206,

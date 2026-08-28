@@ -43,6 +43,7 @@ export function MaterialTranscribeSection({
   materialType,
   title,
   readUrl,
+  durationSeconds,
   initialTranscript,
   initialJob,
 }: {
@@ -50,6 +51,7 @@ export function MaterialTranscribeSection({
   materialType: "AUDIO" | "VIDEO";
   title: string;
   readUrl: string;
+  durationSeconds?: number | null;
   initialTranscript: TranscriptData | null;
   initialJob: JobData | null;
 }) {
@@ -111,7 +113,7 @@ export function MaterialTranscribeSection({
   return (
     <div className="space-y-4">
       {materialType === "AUDIO" ? (
-        <AudioPlayer ref={playerRef} src={readUrl} title={title} />
+        <AudioPlayer ref={playerRef} src={readUrl} title={title} fallbackDurationSeconds={durationSeconds} />
       ) : (
         <VideoViewer src={readUrl} title={title} />
       )}

@@ -70,6 +70,7 @@ export default async function MaterialDetailPage({ params }: { params: { materia
                 materialType={material.type as "AUDIO" | "VIDEO"}
                 title={material.title}
                 readUrl={readUrl}
+                durationSeconds={material.durationSeconds}
                 initialTranscript={
                   transcript
                     ? { language: transcript.language, segments: transcript.segments }
