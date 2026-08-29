@@ -1,7 +1,16 @@
 import { getServerSession } from "next-auth";
 import { notFound, redirect } from "next/navigation";
+import type { MemberRole } from "@prisma/client";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { roleMeetsMinimum } from "@/lib/group-role";
+import { assertSubjectScopeInvariant, resolveSubjectOwner, SubjectScopeInvariantError } from "@/lib/subject-scope";
+
+// Re-exported so Phase 6.4+ Subject create/update routes can import the
+// scope invariant from the same place they already import everything else
+// access-related, without needing to know it physically lives in its own
+// pure/testable file — see lib/subject-scope.ts for why it's split out.
+export { assertSubjectScopeInvariant, SubjectScopeInvariantError };
 
 /**
  * Every data-access check in the app funnels through this file. Route
@@ -246,12 +255,42 @@ export interface AIScopeInput {
   topicId?: string;
 }
 
-export interface ResolvedAIScope {
-  workspaceId: string;
-  subjectId: string | null;
-  chapterId: string | null;
-  topicId: string | null;
-}
+/**
+ * A resolved AI scope is owned by exactly one of a personal Workspace or a
+ * Group — mirroring Subject's own workspaceId/groupId invariant (see
+ * lib/subject-scope.ts) — expressed as a discriminated union rather than
+ * two independently-nullable fields, so "both set" or "neither set" is
+ * unrepresentable at the type level, not just runtime-checked. Consumers
+ * (lib/retrieval.ts, /api/ai/conversations) must narrow on `ownerType`
+ * before reading `workspaceId`/`groupId`.
+ *
+ * subjectId/chapterId/topicId narrow *within* whichever owner the scope
+ * belongs to — a group-owned Subject's Topic is still `ownerType: "group"`.
+ *
+ * Phase 6.1 note: nothing here can currently produce `ownerType: "group"`
+ * — `AIScopeInput` has no `groupId` field yet, and every Subject/Chapter/
+ * Topic reachable today is workspace-owned (Phase 6.4 hasn't shipped
+ * group-owned Subjects). The union already models the group case
+ * correctly so Phase 6.5 (group-scoped AI chat) can add a `groupId`
+ * input without another type migration here.
+ */
+export type ResolvedAIScope =
+  | {
+      ownerType: "workspace";
+      workspaceId: string;
+      groupId: null;
+      subjectId: string | null;
+      chapterId: string | null;
+      topicId: string | null;
+    }
+  | {
+      ownerType: "group";
+      workspaceId: null;
+      groupId: string;
+      subjectId: string | null;
+      chapterId: string | null;
+      topicId: string | null;
+    };
 
 /**
  * Resolves + authorizes the scope for an AIConversation: exactly the
@@ -262,17 +301,22 @@ export interface ResolvedAIScope {
  * conversation's stored scope always agrees with how retrieval.ts filters
  * materials — same FK fields, same "narrowest wins" precedence.
  *
- * Group-scoped conversations (AIConversation.groupId) are part of the
- * schema for Phase 6 but intentionally not resolved here — Phase 6
- * (Groups + collaboration) hasn't been built, so there is no group
- * membership path to authorize against yet.
+ * Ownership (`ownerType`/`workspaceId`/`groupId`) is derived from the
+ * resolved Subject itself via `resolveSubjectOwner`, not assumed —
+ * `Subject.workspaceId` is nullable (Phase 6.1) since a Subject can
+ * belong to a Group instead. Group-scoped conversations
+ * (`AIConversation.groupId`, a *bare* group scope with no
+ * subject/chapter/topic underneath it) are part of the schema for Phase 6
+ * but intentionally not resolvable here yet — `AIScopeInput` has no
+ * `groupId` field — because there is no group-content model to authorize
+ * a bare group scope against until Phase 6.4/6.5.
  */
 export async function getAccessibleAIScope(input: AIScopeInput, userId: string): Promise<ResolvedAIScope> {
   if (input.topicId) {
     const topic = await getAccessibleTopic(input.topicId, userId);
     if (!topic) throw new NotAuthorizedError();
     return {
-      workspaceId: topic.chapter.subject.workspaceId,
+      ...resolveSubjectOwner(topic.chapter.subject),
       subjectId: topic.chapter.subjectId,
       chapterId: topic.chapterId,
       topicId: topic.id,
@@ -283,7 +327,7 @@ export async function getAccessibleAIScope(input: AIScopeInput, userId: string):
     const chapter = await getAccessibleChapter(input.chapterId, userId);
     if (!chapter) throw new NotAuthorizedError();
     return {
-      workspaceId: chapter.subject.workspaceId,
+      ...resolveSubjectOwner(chapter.subject),
       subjectId: chapter.subjectId,
       chapterId: chapter.id,
       topicId: null,
@@ -293,11 +337,18 @@ export async function getAccessibleAIScope(input: AIScopeInput, userId: string):
   if (input.subjectId) {
     const subject = await getAccessibleSubject(input.subjectId, userId);
     if (!subject) throw new NotAuthorizedError();
-    return { workspaceId: subject.workspaceId, subjectId: subject.id, chapterId: null, topicId: null };
+    return { ...resolveSubjectOwner(subject), subjectId: subject.id, chapterId: null, topicId: null };
   }
 
   const workspace = await getPrimaryWorkspace(userId);
-  return { workspaceId: workspace.id, subjectId: null, chapterId: null, topicId: null };
+  return {
+    ownerType: "workspace",
+    workspaceId: workspace.id,
+    groupId: null,
+    subjectId: null,
+    chapterId: null,
+    topicId: null,
+  };
 }
 
 /**
@@ -325,4 +376,67 @@ export async function getAccessibleAIConversation(conversationId: string, userId
   );
 
   return conversation;
+}
+
+// ----------------------------------------------------------------------------
+// Groups (Phase 6.1, spec §32-34)
+// ----------------------------------------------------------------------------
+
+/**
+ * Returns the caller's role in a Group, or null if they're not a member.
+ * Distinct from the existing `userIsGroupMember` (boolean-only, used by
+ * `assertScopeAccess` for Subject/Chapter/Topic/Material) — Phase 6.1's
+ * permission matrix (spec §34) needs the actual role, not just membership,
+ * to tell OWNER/ADMIN apart from MEMBER/VIEWER.
+ */
+export async function getGroupRole(groupId: string, userId: string): Promise<MemberRole | null> {
+  const membership = await db.groupMember.findUnique({
+    where: { groupId_userId: { groupId, userId } },
+  });
+  return membership?.role ?? null;
+}
+
+/**
+ * Throws NotAuthorizedError unless the caller's role in the group meets
+ * `minimum` in the OWNER > ADMIN > MEMBER > VIEWER hierarchy (see
+ * lib/group-role.ts). Returns the GroupMember row itself so callers that
+ * also want `role`/`joinedAt` don't need a second query.
+ */
+export async function requireGroupRole(groupId: string, userId: string, minimum: MemberRole) {
+  const membership = await db.groupMember.findUnique({
+    where: { groupId_userId: { groupId, userId } },
+  });
+  if (!membership || !roleMeetsMinimum(membership.role, minimum)) {
+    throw new NotAuthorizedError();
+  }
+  return membership;
+}
+
+/**
+ * A Group is only accessible to its members (any role, including VIEWER)
+ * — unlike Subject/Chapter/Topic, there's no "workspace" fallback, since a
+ * Group has no workspace of its own. Returns null if the group doesn't
+ * exist at all; throws NotAuthorizedError if it exists but the caller
+ * isn't a member — same null-vs-throw split as `getAccessibleSubject` and
+ * friends, so route handlers can map each case to the right status code
+ * (404 vs 403) while `requireGroup` below collapses both into a 404 for
+ * server components.
+ */
+export async function getAccessibleGroup(groupId: string, userId: string) {
+  const group = await db.group.findUnique({ where: { id: groupId, deletedAt: null } });
+  if (!group) return null;
+  const role = await getGroupRole(groupId, userId);
+  if (!role) throw new NotAuthorizedError();
+  return group;
+}
+
+export async function requireGroup(groupId: string, userId: string) {
+  try {
+    const group = await getAccessibleGroup(groupId, userId);
+    if (!group) notFound();
+    return group;
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) notFound();
+    throw err;
+  }
 }

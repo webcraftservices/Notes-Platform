@@ -461,8 +461,12 @@ built-in refetch prop.
   small, additive change (reuse `AIChatPanel` with a different `scope`
   prop) once/if those pages grow tabs for another reason.
 - **Group-scoped AI conversations are schema-only.**
-  `AIConversation.groupId` exists but `getAccessibleAIScope` doesn't
-  resolve it — there's no group membership model yet (Phase 6).
+  `AIConversation.groupId` exists but `getAccessibleAIScope` still
+  doesn't resolve it. A group membership/role model *does* now exist
+  (`lib/access.ts`'s `getGroupRole`/`requireGroupRole`, Phase 6.1), but
+  wiring it into `getAccessibleAIScope`/`ResolvedAIScope` and
+  `lib/retrieval.ts`'s `materialWhereForScope` is explicitly Phase 6.5
+  work, not done yet.
 - **`db.aIConversation`/`db.aIMessage` property names are unverified
   against a real generated Prisma client** in the session that wrote
   this code (no network access to `binaries.prisma.sh` — same limitation

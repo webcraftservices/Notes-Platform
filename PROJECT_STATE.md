@@ -1,7 +1,7 @@
 # PROJECT_STATE.md — Current State
 
 Last verified against actual code and a real test/lint/typecheck run on
-**2026-08-27**. If you're reading this in a later session, re-run the
+**2026-08-28**. If you're reading this in a later session, re-run the
 verification commands in the "How to verify this document" section
 before trusting anything time-sensitive here — code may have moved on.
 
@@ -13,20 +13,35 @@ before trusting anything time-sensitive here — code may have moved on.
 
 ## Current phase
 
-**Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed.**
-Built provider-free by explicit user decision — no AI/embedding SDK, no
-API keys, no fake responses. See `docs/ai-setup.md` for how to activate a
-real provider later. Phases 1–4 remain complete and unmodified except for
-one small, behavior-preserving refactor (see "Recent work completed"
-below).
+**Phase 6.1 (Groups access layer + CRUD) is COMPLETE.** Three
+architectural decisions were confirmed by the user before implementation
+(see "Recent work completed" below for the full rationale):
+1. A Subject belongs to exactly one scope — Workspace OR Group, never
+   both, never neither (`Subject.workspaceId` is now nullable).
+2. Group AI conversations are private per user, scoped to shared group
+   knowledge — not shared multi-user threads. (Not yet implemented —
+   that's Phase 6.5.)
+3. Invitation acceptance will require the accepting account's email to
+   match the invitation's email. (Not yet implemented — that's Phase 6.2.)
+
+Phase 6.1 scope was deliberately narrow: Group create/read/update/delete
+and the role-hierarchy access layer only. Phase 6.2 (membership +
+invitations), 6.3 (Groups UI), 6.4 (Subjects/Materials attach to Groups),
+6.5 (group-scoped AI chat), 6.6 (activity log + notifications), and 6.7
+(docs/closeout) are **not started**. `/groups` in the UI still renders the
+Phase 5-era placeholder — Phase 6.1 was backend-only, per explicit
+instruction.
+
+Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed. Built
+provider-free by explicit user decision — no AI/embedding SDK, no API
+keys, no fake responses. See `docs/ai-setup.md` for how to activate a
+real provider later. Phases 1–4 remain complete and unmodified.
 
 Two known issues were investigated during Phase 5 closeout and are
 recorded below as **explicitly deferred, non-blocking** — see "Known
-deferred issues (Phase 5 closeout)". Neither blocks Phase 6.
+deferred issues (Phase 5 closeout)". Neither blocks Phase 6, and neither
+was touched during Phase 6.1.
 
-**The current codebase (as of this closure) is the baseline for Phase 6.**
-Do not re-open or re-attempt either deferred issue as part of Phase 6 work
-unless the user explicitly asks for it again.
 
 Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 1 — Architecture, database, authentication
@@ -34,7 +49,7 @@ Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
 - [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
-- [ ] Phase 6 — Groups + collaboration (not started; page placeholders only)
+- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1 Access layer + Group CRUD done; 6.2–6.7 not started; see "Recent work completed")
 - [ ] Phase 7 — Google Drive/Docs (not started)
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
 - [ ] Phase 9 — Security + performance + production polish (not started)
@@ -153,6 +168,19 @@ fully wired end-to-end but will always fail with a clear configuration
 error today** — no `AIService`/`EmbeddingService` implementation exists,
 by explicit Phase 5 scope decision.
 
+**Groups (Phase 6.1, backend-only)**: `Group`/`GroupMember` CRUD is real
+and fully authorized server-side. `POST /api/groups` creates a Group and
+makes the caller its OWNER atomically (one `db.$transaction`);
+`GET /api/groups` lists the caller's groups with role + member count;
+`GET/PATCH/DELETE /api/groups/[groupId]` enforce the OWNER > ADMIN >
+MEMBER > VIEWER hierarchy server-side (`lib/access.ts`, `lib/group-role.ts`)
+— read requires any membership, edit requires ADMIN+, delete requires
+OWNER. `Subject.workspaceId` is now nullable so a future Subject can
+belong to a Group instead of a Workspace (`lib/subject-scope.ts` enforces
+"exactly one of the two," not yet wired into any route). No UI, no
+membership/invitation flow, no group-owned Subjects/Materials, no
+group-scoped AI yet — see "What is explicitly NOT implemented."
+
 ## What is explicitly NOT implemented (don't assume otherwise)
 
 - No concrete `AIService`/`EmbeddingService` implementation (Phase 5 was
@@ -168,10 +196,16 @@ by explicit Phase 5 scope decision.
 - No real streaming for AI chat — `AIService.chat()` is Promise-based; the
   chat UI waits for the full response. Documented as future work in
   `docs/ai-setup.md`, not faked with a client-side typing effect.
-- No Groups/collaboration (Phase 6) — `/groups` is a static placeholder
-  page, no group data model usage beyond the schema existing. Group-scoped
-  AI conversations (`AIConversation.groupId`) are in the schema but
-  intentionally unresolved in `access.ts` until Phase 6 exists.
+- No Groups membership, invitations, UI, or Group-scoped content (Phase
+  6.2–6.7) — `/groups` is still a static placeholder page. Group
+  create/read/update/delete and the role-hierarchy access layer *are*
+  implemented as of Phase 6.1 (`/api/groups`, `/api/groups/[groupId]`,
+  `lib/access.ts`'s `getGroupRole`/`requireGroupRole`/`getAccessibleGroup`/
+  `requireGroup`) — see "Recent work completed" — but nothing yet lets a
+  user reach a Group through the UI, invite anyone, or attach a Subject/
+  Material to one. Group-scoped AI conversations
+  (`AIConversation.groupId`) are still unresolved in `getAccessibleAIScope`
+  until Phase 6.5.
 - No Google Drive/Docs import (Phase 7).
 - No flashcards/quizzes/AI tutor (Phase 8).
 - No production hardening — no Postgres row-level security, no real
@@ -190,6 +224,177 @@ by explicit Phase 5 scope decision.
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: Phase 6.1 follow-up — ResolvedAIScope nullable-workspaceId fix
+The user ran `npm run db:generate`/`db:migrate` for real (Neon +
+real network access) after the Phase 6.1 session below, which cleared all
+38 baseline Prisma-cascade typecheck errors and surfaced exactly the 3
+genuine errors flagged as a forward-compatibility risk at the time:
+`getAccessibleAIScope`'s three `subject.workspaceId` assignment sites no
+longer matched `ResolvedAIScope.workspaceId: string` now that
+`Subject.workspaceId` is really nullable.
+
+**Fix**: `ResolvedAIScope` is now a discriminated union
+(`{ ownerType: "workspace"; workspaceId: string; groupId: null; ... } |
+{ ownerType: "group"; workspaceId: null; groupId: string; ... }`) instead
+of one object with an incorrectly-required `workspaceId: string` — the
+"both set"/"neither set" invalid state is unrepresentable at the type
+level, not just runtime-checked, matching how `Subject` itself is
+constrained. A new pure helper, `resolveSubjectOwner` (added to
+`lib/subject-scope.ts`, next to the invariant it calls first), turns a
+Subject's own `workspaceId`/`groupId` into this discriminant with zero
+`!`/`as` casts — two plain truthiness `if`s narrow each field, so
+TypeScript verifies the return type unaided. `getAccessibleAIScope`'s
+three branches now spread `resolveSubjectOwner(...)` instead of reading
+`subject.workspaceId` directly.
+
+Both downstream consumers of `ResolvedAIScope.workspaceId` were updated
+to handle the union exhaustively rather than assume `ownerType` is always
+`"workspace"`: `lib/retrieval.ts`'s `materialWhereForScope` gained a
+`scope.ownerType === "group"` branch, and
+`/api/ai/conversations/route.ts`'s `scopeFkFields` now sets `groupId`
+alongside `workspaceId` (mutually exclusive, same "narrowest wins"
+shape). Both branches are **currently unreachable** — `AIScopeInput` still
+has no `groupId` field, so nothing can produce `ownerType: "group"` yet —
+but are required for the type to be exhaustively correct rather than
+silently wrong (`{ workspaceId: null }`, matching nothing) the moment
+Phase 6.5 does add that input. No group AI input/route/UI was added; this
+was strictly the type-correctness fix the user asked for.
+
+Files changed: `src/lib/subject-scope.ts` (+`resolveSubjectOwner`),
+`src/lib/__tests__/subject-scope.test.ts` (+4 tests),
+`src/lib/access.ts` (`ResolvedAIScope`, `getAccessibleAIScope`),
+`src/lib/retrieval.ts`, `src/app/api/ai/conversations/route.ts`. No
+schema/migration change, no Phase 5 AI behavior change for the
+workspace-scoped case (byte-identical output — `ownerType` is always
+`"workspace"` today, so `workspaceId` resolves exactly as before and
+`groupId` is always `null`).
+
+**Verified in this sandbox** (still the stub Prisma client — this session
+had no real network access to `binaries.prisma.sh` either): 127/127
+tests pass (123 + 4 new `resolveSubjectOwner` cases); lint clean;
+typecheck still 44 errors, diffed line-for-line against the pre-fix
+44-error output — the only two differences are line-number shifts in
+`retrieval.ts` (56→63, 84→91) from the added comment block, same two
+pre-existing cascade errors, nothing new/removed. **Could not reproduce
+the user's exact "3 errors → 0" confirmation here** since this sandbox's
+Prisma client is still the stub — recommend the user re-run
+`npm run typecheck` on their machine (with the real generated client) to
+confirm the 3 reported errors are gone.
+
+### Session: Phase 6.1 — Groups access layer + CRUD
+Implemented per explicit scope: Group create/read/update/delete and the
+role-hierarchy access layer only. Repository re-cloned and re-inspected
+fresh from GitHub at the start of this session (not assumed from a prior
+session's summary), confirming `PROJECT_STATE.md`/`ARCHITECTURE.md` were
+accurate and that `Group`/`GroupMember`/`GroupInvitation`/`ActivityLog`
+were already fully defined in `prisma/schema.prisma` and already present
+in the single existing migration — Phase 6.1 needed one new migration
+(below), not a from-scratch schema design.
+
+**Three architectural decisions confirmed by the user** (a Phase 6 planning
+pass in the previous session had flagged these as open questions):
+1. **Subject scope** — a Subject belongs to exactly one of Workspace or
+   Group, never both, never neither. Implemented by making
+   `Subject.workspaceId` nullable (previously required) and adding a pure,
+   unit-tested invariant check (`lib/subject-scope.ts`) rather than a
+   dummy placeholder workspaceId. Not yet wired into any Subject
+   create/update route — that's Phase 6.4, since no route can create a
+   group-owned Subject yet.
+2. **Group AI** — private-per-user conversations, shared group knowledge
+   as the retrieval scope. Decision recorded here for Phase 6.5;
+   nothing AI/retrieval-related was touched this session.
+3. **Invitations** — acceptance will require the accepting account's email
+   to match the invitation's email. Decision recorded here for Phase 6.2;
+   no invitation code exists yet.
+
+**Database**: new migration
+`prisma/migrations/20260828054500_subject_scope_nullable_workspace/`
+— `ALTER TABLE "Subject" ALTER COLUMN "workspaceId" DROP NOT NULL`. Zero
+data risk: no Subject row anywhere has ever had `groupId` set (Phase 6
+Subject-to-Group attachment doesn't exist until Phase 6.4), so every
+existing row already satisfies "workspaceId is set." **Could not be run
+via `prisma migrate dev`/`npx prisma generate`** in this sandbox —
+`binaries.prisma.sh` returns `403 Forbidden` here, the same
+already-documented blocker from Phase 5 (see "Known bugs / issues"
+below). Instead: installed PostgreSQL 16 + the `postgresql-16-pgvector`
+package locally in this sandbox (both reachable via the allowed
+`archive.ubuntu.com` mirror), applied the existing initial migration's
+raw SQL by hand, seeded a representative pre-existing personal Subject
+row, then applied this migration's raw SQL by hand and confirmed: the
+pre-existing row is untouched, the column is genuinely nullable
+(`information_schema.columns`), and a new group-owned Subject row
+(`workspaceId = NULL`, `groupId` set) inserts successfully. This is
+hands-on verification of the actual SQL against a real running Postgres +
+pgvector instance — more direct verification than Phase 5 had available,
+even though the Prisma *tooling* itself couldn't run.
+**Action needed from the user**: run `npm run db:generate && npm run
+db:migrate` in an environment with real network access to
+`binaries.prisma.sh` to regenerate the Prisma Client and register this
+migration in Prisma's own tracking table (`prisma migrate status` could
+not be run here for the same reason).
+
+**Backend — new files**:
+- `src/lib/subject-scope.ts` — `assertSubjectScopeInvariant` (Decision 1).
+  Pure, zero imports, unit-tested.
+- `src/lib/group-role.ts` — `roleMeetsMinimum`, the OWNER > ADMIN > MEMBER
+  > VIEWER hierarchy comparator. Pure (type-only Prisma import, erased at
+  compile time), unit-tested.
+- `src/lib/validation/groups.ts` — `createGroupSchema`/`updateGroupSchema`,
+  mirroring `updateSubjectSchema`'s existing convention that an empty
+  PATCH body is a valid no-op rather than an error.
+- `src/app/api/groups/route.ts` — `GET` (list caller's groups with role +
+  member count), `POST` (create; Group + OWNER GroupMember created inside
+  one `db.$transaction`, so the "exactly one OWNER" invariant is never
+  even briefly broken).
+- `src/app/api/groups/[groupId]/route.ts` — `GET` (member-only, 403 for a
+  non-member vs 404 for a truly nonexistent group, matching the existing
+  Subject/Chapter/Topic API convention exactly), `PATCH` (ADMIN+), `DELETE`
+  (OWNER only, soft-delete). `DELETE` intentionally does **not** cascade
+  to any descendant content — Phase 6.1 has no group-owned
+  Subjects/Materials to cascade to yet (Phase 6.4). This is documented
+  in-code as a limitation to revisit once 6.4 ships, not silently glossed
+  over.
+
+**Backend — `src/lib/access.ts` additions** (purely additive; existing
+functions untouched): `getGroupRole`, `requireGroupRole`,
+`getAccessibleGroup`, `requireGroup`, following the file's existing
+`getAccessibleX`/`requireX` pattern exactly. Not unit-tested directly —
+same reason `retrieval.ts`/`materials-scope.ts` have no test files:
+`lib/db.ts` constructs `PrismaClient` at import time, which throws
+immediately in this sandbox (confirmed by direct test:
+`new PrismaClient()` → `"@prisma/client did not initialize yet"`), so
+anything importing `lib/access.ts` or `lib/db.ts` can't be exercised here
+regardless of whether the specific function under test touches the DB.
+Verified instead by full inspection against the schema and the existing
+`assertScopeAccess`/`getAccessibleSubject` precedent it mirrors.
+
+**Forward-compatibility note for Phase 6.4/6.5 (flagged, not fixed —
+explicitly out of this session's scope)**: `getAccessibleAIScope`'s
+`ResolvedAIScope` interface currently types `workspaceId` as required
+`string`. Three assignment sites there (`topic.chapter.subject.workspaceId`
+etc.) will need `workspaceId: string | null` once the Prisma Client is
+regenerated against the now-nullable column — grepped the whole `src/`
+tree for `.workspaceId` usage to confirm this is the *only* place
+affected (every other usage already types it as `string | null`, e.g.
+`assertScopeAccess`'s existing parameter type). Zero current impact: no
+route can create a group-owned Subject yet, so no `workspaceId: null` row
+exists for this code to ever actually see. Do not fix this preemptively
+by touching `retrieval.ts`/`ai-chat.ts`/AI conversation code — that's
+explicitly Phase 6.5 territory.
+
+**Verified**: 123/123 tests pass (102 baseline + 21 new: 6 for
+`subject-scope.ts`, 4 for `group-role.ts`, 11 for `validation/groups.ts`).
+Lint clean (zero output, same as baseline). Typecheck: 44 errors, **+6**
+over the 38-error baseline — all 6 confined to the three Phase 6.1 files
+that reference the `MemberRole` enum or a `db.$transaction` callback, and
+all 6 are the identical "Prisma stub-client cascade" class already
+present 8+ times elsewhere in the untouched baseline (`Module has no
+exported member 'X'` / implicit-`any` on a Prisma-typed callback
+parameter) — not independent bugs. Confirmed by grepping the two error
+sets side by side. `git diff --stat` for tracked files:
+`prisma/schema.prisma` (+11/-2), `src/lib/access.ts` (+72, purely
+additive). Nothing committed or pushed — left for user review.
 
 ### Session: Legacy-recording playback investigation + Phase 5 closure
 Two issues investigated per user request: old/legacy recordings being
@@ -427,13 +632,20 @@ against Claude's last-known state:
 - **`Prisma.MaterialWhereInput` and other Prisma-generated types don't
   resolve in whatever sandbox last ran `tsc`** because `prisma generate`
   couldn't reach `binaries.prisma.sh` from that environment's network
-  (confirmed directly in the Phase 5 session: `npx prisma generate` fails
-  with `403 Forbidden` fetching from `binaries.prisma.sh`, even with
-  `PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1`). This produces 38 typecheck
-  errors (30 pre-existing + 8 new in Phase 5's files) that are NOT real
-  bugs — see `CLAUDE.md` → Testing requirements for how to distinguish
-  this from an actual regression. Resolves by running `npm run db:generate`
-  somewhere with real network access to `binaries.prisma.sh`.
+  (reconfirmed directly in the Phase 6.1 session: `npx prisma generate`
+  fails with `403 Forbidden` fetching from `binaries.prisma.sh`, even with
+  `PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1`; `new PrismaClient()` itself
+  throws `"did not initialize yet"` at construction time). This produces
+  44 typecheck errors (38 pre-existing + 6 new in Phase 6.1's files) that
+  are NOT real bugs — see `CLAUDE.md` → Testing requirements for how to
+  distinguish this from an actual regression. Resolves by running
+  `npm run db:generate` somewhere with real network access to
+  `binaries.prisma.sh`.
+- ~~`ResolvedAIScope.workspaceId` typed as required `string`~~ — **FIXED**
+  in the Phase 6.1 follow-up session (see "Recent work completed").
+  `ResolvedAIScope` is now a discriminated union over `ownerType:
+  "workspace" | "group"`; `lib/retrieval.ts` and
+  `/api/ai/conversations/route.ts` handle both arms exhaustively.
 
 ## Failed approaches / things already tried and rejected
 
@@ -452,17 +664,27 @@ against Claude's last-known state:
 ## Tests performed and their results (this session, verified live)
 
 ```
-npm run test        →  11 test files, 102/102 tests passed
+npm run test        →  14 test files, 123/123 tests passed
+                        (102 baseline + 21 new: subject-scope.test.ts,
+                        group-role.test.ts, validation/groups.test.ts)
 npm run lint         →  0 errors, 0 warnings
-npm run typecheck    →  38 errors, diffed line-for-line against a stashed
-                         untouched checkout of the same commit and
-                         confirmed byte-for-byte identical — zero
-                         added/removed/changed. Same Prisma-generation
-                         cascade described above (confirmed by grepping
-                         for "@prisma/client", "Prisma.", and "implicitly
-                         has an 'any' type"; every error line matches one
-                         of those patterns; zero unexplained errors).
+npm run typecheck    →  44 errors (+6 over the 38-error baseline).
+                         All 6 confined to the three Phase 6.1 files
+                         (access.ts, group-role.ts, api/groups/route.ts)
+                         that reference the MemberRole enum or a
+                         db.$transaction callback — confirmed by grepping
+                         the before/after error sets side by side that
+                         these are the identical "Prisma stub-client
+                         cascade" pattern already present 8+ times
+                         elsewhere in the untouched baseline, not
+                         independent bugs.
 ```
+
+Migration SQL (`20260828054500_subject_scope_nullable_workspace`) verified
+by hand against a real local PostgreSQL 16 + pgvector instance installed
+in this sandbox (see "Recent work completed" for the exact steps) — not
+via `prisma migrate dev`, which still can't run here for the same
+`binaries.prisma.sh` network restriction as before.
 
 Also noted for this session: the user reported `npx prisma generate` and
 `npx prisma migrate status` were already run successfully (in an
@@ -486,30 +708,38 @@ during implementation).
 
 ## Current task
 
-Phase 5 is formally closed as of this session. No new application
-behavior was introduced during closure — this task only updated
-documentation, verified the working tree, and committed/pushed the
-already-implemented and already-verified changes described in "Recent
-work completed" above.
+Phase 6.1 (Groups access layer + CRUD) is implemented and verified as
+described in "Recent work completed" above. **Nothing has been committed
+or pushed** — the working tree contains the Phase 6.1 changes unstaged,
+left for user review per explicit instruction ("do not push directly
+unless I explicitly ask you to").
 
 ## Exact next steps
 
-Nothing is queued. The next piece of work is whatever the user requests
-next. Likely candidates based on the master prompt's phase order:
-
-1. **Phase 6** (Groups + collaboration) is the next unstarted phase in
+1. **User review of Phase 6.1** — nothing is committed yet; review the
+   diff (`prisma/schema.prisma`, `src/lib/access.ts` modified; several new
+   files under `src/lib/`, `src/lib/validation/`, `src/app/api/groups/`,
+   plus the new migration) and commit when satisfied.
+2. **Run `npm run db:generate && npm run db:migrate`** in an environment
+   with real network access to `binaries.prisma.sh` — this both registers
+   the new migration in Prisma's tracking table and clears the 6 new
+   Phase-6.1-specific typecheck errors described above.
+3. **Phase 6.2** (membership + invitations) is the next sub-phase in
    sequence — but do not start it speculatively; wait for explicit
    instruction, per `CLAUDE.md`'s phase-discipline rule.
-2. **Verify Phase 5 against a real database**: run `npm run db:generate`
+4. When Phase 6.4 (Subjects/Materials attach to Groups) starts, wire
+   `assertSubjectScopeInvariant` into `/api/subjects`'s create/update
+   routes (the `ResolvedAIScope` typing itself is already fixed — see
+   "Recent work completed").
+5. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
-   `ingestion.ts`/`retrieval.ts` actually executes against Postgres. This
-   is the one thing Phase 5 could not be verified against in this session
-   (see "Not yet verified against a real database" above).
-3. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
+   `ingestion.ts`/`retrieval.ts` actually executes against Postgres. Still
+   outstanding from before Phase 6.1.
+6. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
    optional, only if/when the user wants AI features to actually respond
    instead of showing the honest "not configured" state.
-4. Small, currently-known, not-yet-actioned cleanups if ever asked for a
+7. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
    `recorder-panel.tsx`; dedupe the README Phase 5 line.
 
@@ -523,7 +753,7 @@ explicitly asks for it again.
 npm install
 npm run test
 npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 38, all Prisma-cascade
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 44, all Prisma-cascade
 ```
 
 If any of these numbers differ from what's recorded above, this document

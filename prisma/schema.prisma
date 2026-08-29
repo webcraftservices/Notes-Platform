@@ -209,8 +209,15 @@ enum MemberRole {
 
 model Subject {
   id          String    @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // A Subject belongs to exactly one scope: a personal Workspace OR a
+  // shared Group, never both, never neither. Both FKs are nullable at the
+  // DB level (Prisma/Postgres have no first-class "exactly one of" column
+  // constraint); the invariant is enforced in application code at every
+  // create/update path — see lib/access.ts's assertSubjectScopeInvariant.
+  // Personal/workspace Subject: workspaceId set, groupId null.
+  // Group Subject:              workspaceId null, groupId set.
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   groupId     String? // present if this subject lives inside a shared group
   group       Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
   name        String

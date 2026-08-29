@@ -9,13 +9,22 @@ import { zodError, UNAUTHORIZED, FORBIDDEN } from "@/lib/api-response";
  * should have: the narrowest level set, everything above/below it null.
  * Shared by the where-filter (GET) and the create data (GET's fallback
  * create + POST) so the two can never drift out of agreement.
+ *
+ * workspaceId/groupId are mutually exclusive, mirroring ResolvedAIScope's
+ * own discriminated union (Phase 6.1) — at most one of them is ever
+ * non-null, and only when nothing narrower is set. `ownerType` can only
+ * be "group" once Phase 6.5 adds a groupId input to AIScopeInput; until
+ * then this always resolves to the workspaceId branch, unchanged from
+ * before.
  */
 function scopeFkFields(scope: ResolvedAIScope) {
+  const narrowed = Boolean(scope.topicId || scope.chapterId || scope.subjectId);
   return {
     topicId: scope.topicId,
     chapterId: scope.topicId ? null : scope.chapterId,
     subjectId: scope.topicId || scope.chapterId ? null : scope.subjectId,
-    workspaceId: scope.topicId || scope.chapterId || scope.subjectId ? null : scope.workspaceId,
+    workspaceId: !narrowed && scope.ownerType === "workspace" ? scope.workspaceId : null,
+    groupId: !narrowed && scope.ownerType === "group" ? scope.groupId : null,
   };
 }
 
