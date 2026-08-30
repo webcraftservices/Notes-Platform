@@ -12,15 +12,28 @@ export interface SubjectCardData {
   _count: { chapters: number; materials: number };
 }
 
-export function SubjectCard({ subject }: { subject: SubjectCardData }) {
+export function SubjectCard({
+  subject,
+  canManage = true,
+}: {
+  subject: SubjectCardData;
+  // Phase 6.4: group Subjects hide rename/archive/delete for MEMBER/VIEWER
+  // (server-enforced in PATCH/DELETE /api/subjects/[subjectId] via
+  // assertSubjectManageAccess — this prop only controls whether the
+  // affordance is shown, never the authorization itself). Defaults to
+  // true so every existing personal/workspace call site is unaffected.
+  canManage?: boolean;
+}) {
   const Icon = getSubjectIcon(subject.icon);
   const palette = getSubjectColor(subject.color);
 
   return (
     <div className="card group relative p-5 transition-shadow hover:shadow-panel">
-      <div className="absolute right-3 top-3 opacity-0 transition-opacity group-hover:opacity-100">
-        <SubjectActionsMenu subject={subject} />
-      </div>
+      {canManage && (
+        <div className="absolute right-3 top-3 opacity-0 transition-opacity group-hover:opacity-100">
+          <SubjectActionsMenu subject={subject} />
+        </div>
+      )}
       <Link href={`/subjects/${subject.id}`} className="block">
         <div className={`flex h-9 w-9 items-center justify-center rounded ${palette.bg}`}>
           <Icon className={`h-[18px] w-[18px] ${palette.text}`} strokeWidth={1.75} />

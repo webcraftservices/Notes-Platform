@@ -23,6 +23,31 @@ describe("createSubjectSchema", () => {
   it("trims whitespace-only names to empty and rejects them", () => {
     expect(createSubjectSchema.safeParse({ name: "   " }).success).toBe(false);
   });
+
+  it("accepts an optional groupId for a group-owned subject", () => {
+    const result = createSubjectSchema.safeParse({
+      name: "Physics",
+      groupId: "clv1a2b3c0000abcdefghijk",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.groupId).toBe("clv1a2b3c0000abcdefghijk");
+    }
+  });
+
+  it("omits groupId when not provided, leaving it undefined (personal/workspace)", () => {
+    const result = createSubjectSchema.safeParse({ name: "Physics" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.groupId).toBeUndefined();
+    }
+  });
+
+  it("rejects a malformed groupId", () => {
+    expect(
+      createSubjectSchema.safeParse({ name: "Physics", groupId: "not-a-cuid" }).success
+    ).toBe(false);
+  });
 });
 
 describe("updateSubjectSchema", () => {
@@ -38,6 +63,20 @@ describe("updateSubjectSchema", () => {
     // Empty updates are technically valid (a no-op PATCH); this just checks
     // that an explicitly empty name string is still rejected if provided.
     expect(updateSubjectSchema.safeParse({ name: "" }).success).toBe(false);
+  });
+
+  it("has no groupId/workspaceId field — scope can't be changed via update (Phase 6.4)", () => {
+    // updateSubjectSchema is a plain (non-strict) zod object, so an
+    // unrecognized key like groupId is silently stripped rather than
+    // rejected — this test locks in that stripping so a future edit that
+    // adds a groupId field to this schema (re-enabling scope switching,
+    // which Phase 6.4 explicitly does not implement) doesn't happen by
+    // accident.
+    const result = updateSubjectSchema.safeParse({ name: "Renamed", groupId: "clv1a2b3c0000abcdefghijk" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect("groupId" in result.data).toBe(false);
+    }
   });
 });
 

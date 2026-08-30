@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getPrimaryWorkspace, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getPrimaryWorkspace,
+  getAccessibleGroup,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { createLinkMaterialSchema, listMaterialsQuerySchema } from "@/lib/validation/materials";
 import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
@@ -13,14 +18,28 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const parsed = listMaterialsQuerySchema.safeParse(Object.fromEntries(searchParams));
   if (!parsed.success) return zodError(parsed.error);
-  const { scope, subjectId, chapterId, topicId, q, tag } = parsed.data;
+  const { scope, groupId, subjectId, chapterId, topicId, q, tag } = parsed.data;
 
-  const workspace = await getPrimaryWorkspace(user.id);
+  const where: Prisma.MaterialWhereInput = { deletedAt: null };
 
-  const where: Prisma.MaterialWhereInput = {
-    workspaceId: workspace.id,
-    deletedAt: null,
-  };
+  try {
+    if (groupId) {
+      // Phase 6.4: the Group Materials tab — list a Group's materials
+      // instead of the caller's personal workspace ones. Same
+      // null-vs-throw / NOT_FOUND-vs-FORBIDDEN split as the Subjects list
+      // route uses for the same reason (don't leak group existence to a
+      // non-member).
+      const group = await getAccessibleGroup(groupId, user.id);
+      if (!group) return NOT_FOUND();
+      where.groupId = group.id;
+    } else {
+      const workspace = await getPrimaryWorkspace(user.id);
+      where.workspaceId = workspace.id;
+    }
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    throw err;
+  }
 
   if (scope === "archived") {
     where.archivedAt = { not: null };
@@ -83,6 +102,7 @@ export async function POST(req: Request) {
     data: {
       ownerId: user.id,
       workspaceId: scope.workspaceId,
+      groupId: scope.groupId,
       subjectId: scope.subjectId,
       chapterId: scope.chapterId,
       topicId: scope.topicId,

@@ -36,6 +36,24 @@ export default async function GroupDetailPage({ params }: { params: { groupId: s
       })
     : [];
 
+  // Phase 6.4: Group Subjects/Materials tabs. Both are already fully
+  // scoped by `group.id` (which requireGroup above already proved the
+  // caller is a member of), so no further per-row access check is needed
+  // here — this mirrors how `members`/`invitations` above are fetched
+  // directly rather than through a second access layer.
+  const [subjects, materials] = await Promise.all([
+    db.subject.findMany({
+      where: { groupId: group.id, deletedAt: null, archivedAt: null },
+      include: { _count: { select: { chapters: true, materials: true } } },
+      orderBy: { updatedAt: "desc" },
+    }),
+    db.material.findMany({
+      where: { groupId: group.id, deletedAt: null, archivedAt: null },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+  ]);
+
   return (
     <>
       <Topbar
@@ -75,6 +93,8 @@ export default async function GroupDetailPage({ params }: { params: { groupId: s
               status: inv.status,
             }))}
             canManage={canManage}
+            subjects={subjects}
+            materials={materials}
           />
         </div>
       </main>

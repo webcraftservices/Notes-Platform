@@ -64,6 +64,7 @@ export async function POST(req: Request) {
       id: materialId,
       ownerId: user.id,
       workspaceId: scope.workspaceId,
+      groupId: scope.groupId,
       subjectId: scope.subjectId,
       chapterId: scope.chapterId,
       topicId: scope.topicId,

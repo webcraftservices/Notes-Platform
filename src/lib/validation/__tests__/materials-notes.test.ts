@@ -3,6 +3,7 @@ import {
   requestUploadSchema,
   createLinkMaterialSchema,
   updateMaterialSchema,
+  listMaterialsQuerySchema,
 } from "@/lib/validation/materials";
 import { noteBlockSchema, saveBlocksSchema, updateNoteSchema } from "@/lib/validation/notes";
 import { resolveMaterialType, guessExtension } from "@/lib/mime";
@@ -79,6 +80,33 @@ describe("updateMaterialSchema", () => {
   it("rejects more than 20 tags", () => {
     const tags = Array.from({ length: 21 }, (_, i) => `tag${i}`);
     expect(updateMaterialSchema.safeParse({ tags }).success).toBe(false);
+  });
+});
+
+describe("listMaterialsQuerySchema", () => {
+  it("accepts an empty query (personal workspace, all materials)", () => {
+    expect(listMaterialsQuerySchema.safeParse({}).success).toBe(true);
+  });
+
+  it("accepts an optional groupId for the Group Materials tab", () => {
+    const result = listMaterialsQuerySchema.safeParse({ groupId: "clv1a2b3c0000abcdefghijk" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.groupId).toBe("clv1a2b3c0000abcdefghijk");
+    }
+  });
+
+  it("rejects a malformed groupId", () => {
+    expect(listMaterialsQuerySchema.safeParse({ groupId: "not-a-cuid" }).success).toBe(false);
+  });
+
+  it("still accepts groupId together with a subject/chapter/topic filter", () => {
+    expect(
+      listMaterialsQuerySchema.safeParse({
+        groupId: "clv1a2b3c0000abcdefghijk",
+        subjectId: "clv1a2b3c0000abcdefghijl",
+      }).success
+    ).toBe(true);
   });
 });
 

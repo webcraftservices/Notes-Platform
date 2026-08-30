@@ -78,8 +78,20 @@ export async function PATCH(req: Request, { params }: { params: { materialId: st
       // Explicit null anywhere in the move payload means "detach entirely"
       // (Unorganized); otherwise resolve whichever id was actually passed.
       const isDetach = subjectId === null && chapterId === null && topicId === null;
+      // Detaching must not silently move a Material between owners
+      // (Phase 6.4 requirement 10): a group Material stays "Unorganized
+      // within its Group" (groupId preserved, workspaceId stays null), a
+      // workspace Material stays "Unorganized within the workspace" —
+      // exactly the pre-Phase-6.4 behavior, unchanged, when existing.groupId
+      // is null.
       const scope = isDetach
-        ? { workspaceId: workspace.id, subjectId: null, chapterId: null, topicId: null }
+        ? {
+            workspaceId: existing.groupId ? null : workspace.id,
+            groupId: existing.groupId,
+            subjectId: null,
+            chapterId: null,
+            topicId: null,
+          }
         : await resolveMaterialScope(
             {
               subjectId: subjectId ?? undefined,

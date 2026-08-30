@@ -442,6 +442,28 @@ export async function requireGroup(groupId: string, userId: string) {
 }
 
 /**
+ * Group Subject mutations (create/rename/archive/delete) require ADMIN+ in
+ * the owning group — master prompt §34's permission matrix, Phase 6.4 §2.
+ * Workspace/personal Subjects have no analogous extra check: reaching one
+ * at all already requires workspace membership (today, a single-member
+ * personal workspace), which getAccessibleSubject/getAccessibleGroup above
+ * already enforce — so this only adds a check for the group branch,
+ * leaving workspace Subject authorization completely unchanged.
+ *
+ * Deliberately NOT extended to Chapter/Topic/Material mutations — the
+ * Phase 6.4 permission matrix only covers Subject-level create/edit/
+ * delete. Chapter/Topic/Material mutations under a group Subject keep
+ * today's existing behavior (any group member, any role); see
+ * PROJECT_STATE.md's "Known limitations" for why this is a deliberate
+ * scope boundary rather than an oversight.
+ */
+export async function assertSubjectManageAccess(scope: { groupId: string | null }, userId: string) {
+  if (scope.groupId) {
+    await requireGroupRole(scope.groupId, userId, "ADMIN");
+  }
+}
+
+/**
  * Finds a User by email, case-insensitively (Phase 6.2). `User.email` is
  * stored exactly as the person typed it at signup (see
  * `api/auth/register/route.ts`) — it is NOT stored pre-normalized — so a

@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleSubject, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleSubject,
+  assertSubjectManageAccess,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { updateSubjectSchema } from "@/lib/validation/hierarchy";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 
@@ -29,6 +34,9 @@ export async function PATCH(req: Request, { params }: { params: { subjectId: str
   try {
     const existing = await getAccessibleSubject(params.subjectId, user.id);
     if (!existing) return NOT_FOUND();
+    // Phase 6.4 §2: renaming/archiving a group Subject requires ADMIN+; a
+    // no-op for workspace/personal Subjects (see assertSubjectManageAccess).
+    await assertSubjectManageAccess(existing, user.id);
 
     const { archived, ...rest } = parsed.data;
     const subject = await db.subject.update({
@@ -52,6 +60,9 @@ export async function DELETE(_req: Request, { params }: { params: { subjectId: s
   try {
     const existing = await getAccessibleSubject(params.subjectId, user.id);
     if (!existing) return NOT_FOUND();
+    // Phase 6.4 §2: deleting a group Subject requires ADMIN+; a no-op for
+    // workspace/personal Subjects (see assertSubjectManageAccess).
+    await assertSubjectManageAccess(existing, user.id);
 
     // Soft delete cascades to children so Trash/Recovery (spec §100) can
     // restore the whole subtree together later without orphaning rows.

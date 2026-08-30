@@ -22,45 +22,58 @@ before trusting anything time-sensitive here — code may have moved on.
 > this file's own opening note warns about — recorded here so it doesn't
 > repeat.
 
+> **Second correction, this session (Phase 6.4)**: the previous revision's
+> "Current phase"/"Current task"/"Exact next steps" sections below said
+> Phase 6.2 and 6.3 were "implemented but NOT YET COMMITTED." That was
+> also stale by the time this session started — a fresh `git clone` shows
+> `main`/`origin/main` at `4c5c016 feat: implement group collaboration and
+> invitations UI`, clean working tree, which already contains both 6.2
+> and 6.3. This document was again just never updated after the commit
+> happened. Re-verified directly this session (173/173 tests passing at
+> that commit per the prior session log, matching what's recorded below)
+> before trusting it. Same failure mode as the first correction note,
+> recorded again so the pattern is visible: **always re-verify `git log`
+> against a fresh clone before trusting this file's "committed" claims.**
+
 ---
 
 ## Current phase
 
-**Phase 6.1 (Groups access layer + CRUD) is COMPLETE, COMMITTED, AND
-PUSHED** to `main` (`bcbeab7 feat: implement phase 6.1 group access and
-crud`). Three architectural decisions were confirmed by the user before
-Phase 6.1 implementation (see "Recent work completed" below for the full
+**Phases 6.1–6.3 are COMPLETE, COMMITTED, AND PUSHED** to `main`
+(`4c5c016 feat: implement group collaboration and invitations UI`, on top
+of `bcbeab7` for 6.1). See the correction note above — this supersedes
+the "not yet committed" language in the rest of this document's older
+sections below, which describes the session that produced 6.2/6.3, not
+their current (committed) status.
+
+**Phase 6.4 (Subjects & Materials attach to Groups) is IMPLEMENTED and
+verified in this sandbox, but NOT YET COMMITTED** — left in the working
+tree for user review, per every prior phase's git-safety rule. See
+"Recent work completed" for the full session log.
+
+Three architectural decisions were confirmed by the user before Phase 6.1
+implementation (see "Recent work completed" below for the full
 rationale):
 1. A Subject belongs to exactly one scope — Workspace OR Group, never
-   both, never neither (`Subject.workspaceId` is now nullable).
+   both, never neither (`Subject.workspaceId` is now nullable). **Now
+   actually wired into `/api/subjects`'s create/update routes as of Phase
+   6.4** — Phase 6.1 only built the invariant helper and the read-path
+   scope resolution; the create/update routes themselves were still
+   workspace-hardcoded until this phase.
 2. Group AI conversations are private per user, scoped to shared group
    knowledge — not shared multi-user threads. (Not yet implemented —
-   that's Phase 6.5.)
+   that's Phase 6.5. Phase 6.4 did not touch AI conversation routes,
+   only confirmed `retrieval.ts`'s existing subject/chapter/topic-scoped
+   resolution already works correctly for group-owned content without
+   modification — see "Recent work completed".)
 3. Invitation acceptance requires the accepting account's email to
-   match the invitation's email — **now implemented as part of Phase
-   6.2** (see below).
+   match the invitation's email — implemented as part of Phase 6.2.
 
-**Phase 6.2 (Membership + Invitations) is IMPLEMENTED and verified in
-this sandbox, but NOT YET COMMITTED** — left in the working tree for
-user review, per the Phase 6.2 doc's git-safety rules (a fresh clone at
-the start of the Phase 6.3 session confirmed `origin/main` is still at
-`bcbeab7`, i.e. Phase 6.2 genuinely hasn't been pushed yet — this
-session continued in the same sandbox working tree rather than losing
-that work). See "Recent work completed" for the full session log.
-
-**Phase 6.3 (Groups UI) is IMPLEMENTED and verified in this sandbox, but
-NOT YET COMMITTED** — built directly on top of the still-uncommitted
-Phase 6.2 working tree (both are staged together in the same working
-tree now; see "Recent work completed"). `/groups` no longer renders the
-Phase 5-era `PhasePlaceholder` — it's a real, working Groups list,
-detail page, and Members experience wired to the actual Phase 6.1/6.2
-APIs.
-
-Phase 6.4 (Subjects/Materials attach to Groups), 6.5 (group-scoped AI
-chat), 6.6 (activity log + notifications), and 6.7 (docs/closeout) are
-**not started**. The Group detail page's Subjects/Materials/Activity/AI
-Assistant tabs are honest `PhasePlaceholder`s naming the phase that will
-implement them — no fake data, no invented endpoints.
+Phase 6.5 (group-scoped AI chat), 6.6 (activity log + notifications), and
+6.7 (docs/closeout) are **not started**. The Group detail page's
+Activity/AI Assistant tabs are still honest `PhasePlaceholder`s naming
+the phase that will implement them; the Subjects/Materials tabs are now
+real (Phase 6.4).
 
 Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed. Built
 provider-free by explicit user decision — no AI/embedding SDK, no API
@@ -70,7 +83,7 @@ real provider later. Phases 1–4 remain complete and unmodified.
 Two known issues were investigated during Phase 5 closeout and are
 recorded below as **explicitly deferred, non-blocking** — see "Known
 deferred issues (Phase 5 closeout)". Neither blocks Phase 6, and neither
-was touched during Phase 6.1.
+was touched during Phase 6.1–6.4.
 
 
 Phases 1–5, per the master prompt's own phase breakdown:
@@ -79,7 +92,7 @@ Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
 - [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
-- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1 Access layer + Group CRUD done; 6.2–6.7 not started; see "Recent work completed")
+- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1–6.3 committed+pushed; 6.4 implemented, uncommitted (this session); 6.5–6.7 not started; see "Recent work completed")
 - [ ] Phase 7 — Google Drive/Docs (not started)
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
 - [ ] Phase 9 — Security + performance + production polish (not started)
@@ -254,6 +267,185 @@ group-scoped AI yet — see "What is explicitly NOT implemented."
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: Phase 6.4 — Subjects & Materials attach to Groups
+Ground-truth audit first (fresh clone, ignored this document's own stale
+claims per its opening warning): confirmed `main`/`origin/main` at
+`4c5c016`, clean tree, and — importantly — that Phase 6.1 had already
+built the schema/invariant groundwork for this phase further ahead than
+expected: `Subject.groupId`/`Material.groupId` columns, FKs, and indexes
+already existed in the initial migration (not a later one), and
+`lib/subject-scope.ts` (`assertSubjectScopeInvariant`,
+`resolveSubjectOwner`) and `lib/access.ts`'s `assertScopeAccess` already
+branched on group vs. workspace scope for every **read** path
+(`getAccessibleSubject/Chapter/Topic/Material`, `getAccessibleAIScope`).
+**No new Prisma migration was needed for this phase** — confirmed by
+inspecting the migrations directory directly rather than assuming.
+
+What was actually missing (verified against the code, not guessed):
+`POST`/`GET /api/subjects` were hardcoded to the personal workspace;
+`PATCH`/`DELETE /api/subjects/[subjectId]` had no role check at all (any
+member, including VIEWER, could rename/delete a group Subject);
+`lib/materials-scope.ts` unconditionally hardcoded `workspaceId` and
+never derived `groupId`, so a Material attached under a group Subject
+would have silently become workspace-owned; `GET /api/materials` had no
+group filter; and the material PATCH's "detach to Unorganized" path
+would have reassigned a group Material back to the personal workspace.
+
+**Changes**:
+- `lib/access.ts` — added `assertSubjectManageAccess(scope, userId)`:
+  ADMIN+ via `requireGroupRole` for group Subjects, no-op for
+  workspace/personal ones. Deliberately not extended to Chapter/Topic/
+  Material mutations — see "Known limitations" below.
+- `lib/materials-scope.ts` — `resolveMaterialScope` now calls
+  `resolveSubjectOwner` on the target Subject/Chapter/Topic instead of
+  always assuming the caller's workspace, so a Material's owner
+  (workspace vs. group) always follows the owner of what it's attached
+  to.
+- `lib/validation/hierarchy.ts` — `createSubjectSchema` gained an
+  optional `groupId: z.string().cuid()`. `updateSubjectSchema`
+  deliberately did NOT gain one — scope switching between
+  workspace/group is not a specified feature, so it stays impossible via
+  PATCH (verified with a test that the field is silently stripped, not
+  accepted).
+- `lib/validation/materials.ts` — `listMaterialsQuerySchema` gained an
+  optional `groupId` for the Group Materials tab.
+- `app/api/subjects/route.ts` — `GET` accepts `?groupId=` (verifies
+  membership via `getAccessibleGroup`, same NOT_FOUND/FORBIDDEN split
+  every other group-scoped read uses); `POST` accepts `groupId` in the
+  body, requires ADMIN+ via `requireGroupRole`, asserts the scope
+  invariant defensively before create. workspaceId is never
+  client-supplied, so "both fields provided" can't happen by
+  construction.
+- `app/api/subjects/[subjectId]/route.ts` — `PATCH`/`DELETE` now call
+  `assertSubjectManageAccess` before mutating.
+- `app/api/materials/route.ts` — `GET` accepts `?groupId=`; `POST` now
+  sets `groupId` on the created row from the resolved scope.
+- `app/api/materials/upload-url/route.ts` — same `groupId` addition on
+  create.
+- `app/api/materials/[materialId]/route.ts` — the detach-to-Unorganized
+  branch now preserves `existing.groupId` instead of hardcoding the
+  caller's personal workspace, so a group Material stays
+  group-owned-but-unattached rather than silently moving to the user's
+  personal workspace.
+- `components/subjects/subject-card.tsx` — new optional `canManage`
+  prop (default `true`, so every existing personal/workspace call site
+  is unaffected) hiding the actions menu for MEMBER/VIEWER in a group
+  context. UI convenience only — the real authorization is server-side.
+- New: `components/groups/create-group-subject-dialog.tsx` — a
+  self-contained dialog (own local `open` state, own trigger button)
+  rather than teaching the global `CreateSubjectDialog`/`ui-store`
+  singleton about an optional `groupId`.
+- New: `components/groups/group-subjects-panel.tsx`,
+  `components/groups/group-materials-panel.tsx` — replace the Phase 6.3
+  `PhasePlaceholder`s in the Subjects/Materials tabs. Data is fetched
+  server-side in `groups/[groupId]/page.tsx` (already proven a group
+  member by `requireGroup`) and passed down as plain props, matching how
+  `GroupMembersPanel` already gets its data — no second client-side
+  fetch/access layer introduced.
+- `components/groups/group-tabs.tsx` — wires the two new panels in;
+  `PhasePlaceholder` still used for Activity/AI Assistant (6.6/6.5,
+  genuinely not started).
+- `app/(app)/groups/[groupId]/page.tsx` — fetches the group's Subjects
+  (with `_count`) and up to 50 most recent Materials, passes to
+  `GroupTabs`.
+- `app/(app)/subjects/[subjectId]/page.tsx` — this page is shared by
+  personal/workspace and group Subjects (`requireSubject` already
+  handled both transparently before this phase). For a group Subject:
+  breadcrumb now points at the owning Group instead of "My Subjects";
+  `EditableHeader`/`SubjectActionsMenu` (rename/archive/delete) are only
+  shown when the caller's role meets ADMIN, computed via `getGroupRole`
+  + `roleMeetsMinimum` (mirrors the exact pattern `groups/[groupId]/
+  page.tsx`'s Overview tab already uses for the same "hide edit UI below
+  ADMIN" purpose). **Deliberately not extended to "New Chapter" /
+  Chapter/Topic actions** — see "Known limitations".
+
+**Tests added** (8 new, all pure/schema-level — no DB-touching function
+was added, so nothing new needed the project's deliberately-avoided DB
+mocking):
+- `validation/__tests__/hierarchy.test.ts`: `createSubjectSchema` accepts
+  a valid `groupId`, treats a missing `groupId` as workspace-scoped,
+  rejects a malformed one; `updateSubjectSchema` silently strips an
+  attempted `groupId` (locks in that scope-switching stays impossible).
+- `validation/__tests__/materials-notes.test.ts`: `listMaterialsQuerySchema`
+  accepts an empty query, accepts a valid `groupId`, rejects a malformed
+  one, and accepts `groupId` alongside a `subjectId`/etc. filter.
+- `assertSubjectScopeInvariant`/`resolveSubjectOwner`
+  (`lib/__tests__/subject-scope.test.ts`) and `roleMeetsMinimum`
+  (`lib/__tests__/group-role.test.ts`) were inspected and already fully
+  covered every case this phase relies on (both/neither invariant,
+  workspace/group resolution, ADMIN/MEMBER/VIEWER boundaries) — no
+  changes needed there.
+- `assertSubjectManageAccess` itself was NOT unit tested — like every
+  sibling DB-touching function in `access.ts` (`assertScopeAccess`,
+  `requireGroupRole`, `getAccessibleSubject`, etc.), it has no unit test
+  today because it hits the database; the project's established
+  convention is to keep pure logic (like `roleMeetsMinimum`, which it
+  delegates to) unit-tested and verify the thin DB-touching wrapper by
+  inspection/manual testing instead, rather than introducing a DB-mocking
+  framework. Consistent with existing practice, not a new gap.
+
+**Verification this session**:
+- `npm install` — clean (added `node_modules`, gitignored; reverted the
+  incidental `package-lock.json` diff `npm install` produced, and removed
+  the `tsconfig.tsbuildinfo` build artifact it left behind, so the final
+  diff only contains intentional Phase 6.4 changes).
+- `npm run test` — **181/181 passing** (173 baseline + 8 new).
+- `npm run lint` — **clean**.
+- `npm run typecheck` — measured the *actual* baseline in this sandbox by
+  `git stash`-ing all Phase 6.4 changes and re-running rather than
+  trusting this document's previously-recorded number: baseline is
+  **60** errors (not the 58 this document previously claimed — some
+  drift since that number was recorded, unrelated to this phase), all
+  the same "Prisma-stub-client cascade" (`prisma generate` blocked by
+  the sandbox's `binaries.prisma.sh` 403, so `@prisma/client` is an
+  un-generated stub with no exported members, cascading into
+  implicit-`any` errors downstream). With Phase 6.4's changes: **61**
+  errors — a net +1, entirely explained by `app/api/subjects/route.ts`
+  gaining an explicit `Prisma.SubjectWhereInput` type annotation where
+  none existed before (the same "no exported member" cascade every other
+  Prisma-typed file already shows, just newly surfaced on this one line
+  because it's a new type annotation, not a new class of error). Every
+  other new error is the same cascade hitting newly-added imports of
+  `MemberRole`/`Material` from `@prisma/client` in the new/edited group
+  UI files. None are genuine logic errors — confirmed by inspecting the
+  full list of new error lines individually, not just the count.
+- `npm run db:generate` — **fails**, expected: 403 on
+  `binaries.prisma.sh`, same known sandbox limitation as every prior
+  Phase 6 session. Not attempted: `npm run db:migrate` (no migration was
+  created this phase, so nothing to run) and `npx prisma migrate status`
+  (requires a reachable database, not available in this sandbox either).
+- **Manual browser verification**: NOT performed — this sandbox cannot
+  run a dev server or reach a database. This is stated plainly rather
+  than assumed fine; see "Exact next steps".
+
+**Known limitations** (deliberate scope boundaries, not oversights):
+1. Chapter/Topic/Material mutation permissions inside a group Subject
+   are unchanged from pre-6.4 behavior: any group member (including
+   VIEWER) can create/rename/delete a Chapter or Topic under a group
+   Subject, and can upload/edit/delete a Material there. The Phase 6.4
+   spec's permission matrix only covers Subject-level create/edit/delete
+   (gated to ADMIN+, implemented above); extending role-gating further
+   down the hierarchy was explicitly out of scope for this phase per the
+   instructions given, and doing so unasked would have been scope creep.
+   Flagged here so it's a visible, deliberate decision for whoever scopes
+   the next phase, not a silently-discovered gap later.
+2. Moving a Material between an existing Subject/Chapter/Topic (the
+   `updateMaterialSchema` "move" path, pre-existing since before Phase
+   6.4) now correctly follows the destination's owner via
+   `resolveMaterialScope` — including, as a natural consequence of that
+   fix, letting a Material move from a personal Subject into a group
+   Subject the user administers, or vice versa, if the user has access
+   to both. This was not a new feature request; it's what "don't let a
+   group Material accidentally become workspace-owned" required fixing
+   for the *existing* move feature to remain correct. Not gated beyond
+   the existing `resolveMaterialScope` accessibility check (must be able
+   to reach the destination) because no additional restriction was
+   specified.
+3. `PROJECT_STATE.md`'s previously-recorded typecheck baseline (58) had
+   already drifted from this sandbox's actual baseline (60) by the start
+   of this session, for reasons unrelated to Phase 6.4 (not
+   investigated — out of scope for this phase to chase down).
 
 ### Session: Phase 6.3 — Groups UI
 Continued in the same sandbox working tree as the Phase 6.2 session
@@ -1005,50 +1197,62 @@ during implementation).
 
 ## Current task
 
-Phase 6.3 (Groups UI) is implemented and verified as described in "Recent
-work completed" above, built on top of the still-uncommitted Phase 6.2
-work. **Nothing has been committed or pushed** — the working tree
-contains both the Phase 6.2 and Phase 6.3 changes unstaged, left for
-user review per explicit instruction ("do not push directly unless I
-explicitly ask you to"). Phase 6.1 itself is already committed and
-pushed (`bcbeab7`) — see the correction note at the top of this document.
+Phase 6.4 (Subjects & Materials attach to Groups) is implemented and
+verified as described in "Recent work completed" above. **Nothing has
+been committed or pushed** — the working tree contains only the Phase
+6.4 changes (Phases 6.1–6.3 are already committed and pushed at
+`4c5c016`, confirmed via a fresh clone at the start of this session —
+see the correction note at the top of this document). `git status`/
+`git diff --stat` at the end of the session showed exactly 15 modified
+files + 3 new files, all directly attributable to Phase 6.4; no
+unrelated file was touched.
 
 ## Exact next steps
 
-1. **User review of Phase 6.2 + 6.3 together** — nothing is committed
-   yet; review the combined diff (`git status`/`git diff` — see
-   "Recent work completed" for the full file list of both sessions) and
-   commit when satisfied. They can be committed together or split into
-   two commits (backend, then UI) — nothing in either session assumed
-   which.
-2. **Run `npm run db:generate && npm run db:migrate`** in an environment
-   with real network access to `binaries.prisma.sh` — registers the
-   Phase 6.2 `GroupInvitation` index migration (Phase 6.1's migration was
-   already confirmed registered by the user) and clears the Prisma-stub
-   typecheck errors described above. Phase 6.3 added no new migration.
-3. **Manual browser verification of Phase 6.3** is still outstanding —
-   this sandbox has no way to run the dev server. Before considering
-   Phase 6.3 fully done, actually click through: create a group, invite
-   someone, accept/decline an invitation as a second account, change a
-   role, remove/leave a member, and check mobile widths.
-4. **Phase 6.4** (Subjects/Materials attach to Groups) is the next
-   sub-phase in sequence — but do not start it speculatively; wait for
-   explicit instruction, per `CLAUDE.md`'s phase-discipline rule. When it
-   starts, wire `assertSubjectScopeInvariant` into `/api/subjects`'s
-   create/update routes (the `ResolvedAIScope` typing itself is already
-   fixed — see "Recent work completed").
-5. **Verify Phase 5 against a real database**: run `npm run db:generate`
+1. **User review of Phase 6.4** — nothing is committed yet; review the
+   diff (see "Recent work completed" for the full file list) and commit
+   when satisfied.
+2. **Manual browser verification of Phase 6.4** is still outstanding —
+   this sandbox has no way to run the dev server or reach a database.
+   Before considering Phase 6.4 fully done, actually click through: as
+   an ADMIN, create a group Subject, chapter, topic, and upload a
+   material to it; as a MEMBER/VIEWER of the same group, confirm you can
+   view but not rename/delete the Subject (and confirm the API itself
+   403s a raw PATCH/DELETE attempt, not just that the button is hidden);
+   as a non-member of the group, confirm `/subjects/<that-id>` and the
+   underlying API both 404; detach a group Material to "Unorganized" and
+   confirm it stays listed under the Group Materials tab rather than
+   disappearing into the personal workspace.
+3. **Run `npm run db:generate && npm run db:migrate`** in an environment
+   with real network access to `binaries.prisma.sh` — no new migration
+   was added this phase, so this just clears the Prisma-stub typecheck
+   cascade (registers nothing new).
+4. **Phase 6.5** (group-scoped AI chat) is the next sub-phase in
+   sequence — but do not start it speculatively; wait for explicit
+   instruction, per `CLAUDE.md`'s phase-discipline rule. When it starts,
+   `retrieval.ts`'s subject/chapter/topic-scoped resolution already works
+   correctly for group-owned content (verified this session, not
+   modified) — the remaining work is the bare-group-scope case (a
+   conversation scoped to "this group" with no specific subject/chapter/
+   topic) and the AI conversation routes themselves.
+5. **Decide on the two "Known limitations" flagged in the Phase 6.4
+   session log** before or during Phase 6.5/6.6 — whether Chapter/Topic/
+   Material mutation inside a group Subject should eventually be
+   role-gated the same way Subject-level mutation now is, and whether
+   Material move-between-owners should stay unrestricted. Neither was a
+   decision this phase was authorized to make.
+6. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
    `ingestion.ts`/`retrieval.ts` actually executes against Postgres. Still
    outstanding from before Phase 6.1.
-6. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
+7. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
    optional, only if/when the user wants AI features to actually respond
    instead of showing the honest "not configured" state.
-7. Small, currently-known, not-yet-actioned cleanups if ever asked for a
+8. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
    `recorder-panel.tsx`; dedupe the README Phase 5 line.
-8. If/when app-wide callback-URL support is ever added, revisit
+9. If/when app-wide callback-URL support is ever added, revisit
    `invitations/[token]/page.tsx`'s email-mismatch/unauthenticated flows
    (see "Known limitations" in the Phase 6.3 session log) — not urgent,
    flagged so it isn't forgotten.
@@ -1063,7 +1267,7 @@ explicitly asks for it again.
 npm install
 npm run test
 npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 58, all Prisma-cascade
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 61, all Prisma-cascade (verified against a git-stash baseline of 60 this session — see the Phase 6.4 session log for why this document's previous "58" was already stale before this phase started)
 ```
 
 If any of these numbers differ from what's recorded above, this document

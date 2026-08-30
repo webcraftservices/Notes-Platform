@@ -5,8 +5,19 @@ export const createSubjectSchema = z.object({
   description: z.string().trim().max(2000).optional(),
   icon: z.string().trim().max(60).optional(),
   color: z.string().trim().max(30).optional(),
+  // Phase 6.4: creates the Subject inside a Group instead of the caller's
+  // personal workspace. Omitted (not present at all) means "personal
+  // workspace" — there is no client-supplied "personal" sentinel, so a
+  // missing groupId is the only way to request the workspace branch.
+  // workspaceId itself is never client-supplied (always resolved
+  // server-side), so a caller can never submit both fields.
+  groupId: z.string().cuid().optional(),
 });
 
+// Scope (workspaceId/groupId) is intentionally NOT updatable here — moving
+// an existing Subject between a personal workspace and a Group is not a
+// specified Phase 6.4 feature, so update only ever touches presentation
+// fields and archive state, never ownership.
 export const updateSubjectSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   description: z.string().trim().max(2000).nullable().optional(),

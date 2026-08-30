@@ -34,6 +34,10 @@ export const updateMaterialSchema = z.object({
 
 export const listMaterialsQuerySchema = z.object({
   scope: z.enum(["all", "unorganized", "archived"]).optional(),
+  // Phase 6.4: list a Group's materials instead of the caller's personal
+  // workspace materials. Omitted means "personal workspace", matching
+  // createSubjectSchema's groupId convention.
+  groupId: z.string().cuid().optional(),
   subjectId: z.string().cuid().optional(),
   chapterId: z.string().cuid().optional(),
   topicId: z.string().cuid().optional(),

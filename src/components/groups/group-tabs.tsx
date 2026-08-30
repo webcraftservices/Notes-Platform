@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderOpen, FileText, Activity, Sparkles } from "lucide-react";
+import { Activity, Sparkles } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { EditableHeader } from "@/components/shared/editable-header";
@@ -12,7 +12,10 @@ import {
   type GroupMemberData,
   type GroupInvitationData,
 } from "@/components/groups/group-members-panel";
-import type { MemberRole } from "@prisma/client";
+import { GroupSubjectsPanel } from "@/components/groups/group-subjects-panel";
+import { GroupMaterialsPanel } from "@/components/groups/group-materials-panel";
+import type { SubjectCardData } from "@/components/subjects/subject-card";
+import type { MemberRole, Material } from "@prisma/client";
 
 export function GroupTabs({
   groupId,
@@ -23,6 +26,8 @@ export function GroupTabs({
   members,
   invitations,
   canManage,
+  subjects,
+  materials,
 }: {
   groupId: string;
   name: string;
@@ -32,6 +37,8 @@ export function GroupTabs({
   members: GroupMemberData[];
   invitations: GroupInvitationData[];
   canManage: boolean;
+  subjects: SubjectCardData[];
+  materials: Material[];
 }) {
   return (
     <Tabs defaultValue="overview">
@@ -103,21 +110,11 @@ export function GroupTabs({
       </TabsContent>
 
       <TabsContent value="subjects">
-        <PhasePlaceholder
-          icon={FolderOpen}
-          title="Group Subjects arrive in Phase 6.4"
-          description="Subjects, chapters, and topics shared with the whole group will live here."
-          phase="Phase 6.4 · Group content"
-        />
+        <GroupSubjectsPanel groupId={groupId} subjects={subjects} canManage={canManage} />
       </TabsContent>
 
       <TabsContent value="materials">
-        <PhasePlaceholder
-          icon={FileText}
-          title="Group Materials arrive in Phase 6.4"
-          description="Recordings, documents, and other materials shared with the group will live here."
-          phase="Phase 6.4 · Group content"
-        />
+        <GroupMaterialsPanel materials={materials} />
       </TabsContent>
 
       <TabsContent value="activity">
