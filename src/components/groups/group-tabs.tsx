@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, Sparkles } from "lucide-react";
+import { Activity } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { EditableHeader } from "@/components/shared/editable-header";
@@ -14,6 +14,7 @@ import {
 } from "@/components/groups/group-members-panel";
 import { GroupSubjectsPanel } from "@/components/groups/group-subjects-panel";
 import { GroupMaterialsPanel } from "@/components/groups/group-materials-panel";
+import { AIChatPanel } from "@/components/ai/ai-chat-panel";
 import type { SubjectCardData } from "@/components/subjects/subject-card";
 import type { MemberRole, Material } from "@prisma/client";
 
@@ -127,11 +128,9 @@ export function GroupTabs({
       </TabsContent>
 
       <TabsContent value="ai-assistant">
-        <PhasePlaceholder
-          icon={Sparkles}
-          title="Group AI arrives in Phase 6.5"
-          description="Ask questions across everything the group has shared, with sources."
-          phase="Phase 6.5 · Group AI"
+        <AIChatPanel
+          scope={{ groupId }}
+          emptyStateHint="Questions are answered using everything this group has shared, with clickable sources."
         />
       </TabsContent>
     </Tabs>

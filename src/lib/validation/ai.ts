@@ -12,6 +12,10 @@ const aiScopeFields = {
   subjectId: z.string().cuid().optional(),
   chapterId: z.string().cuid().optional(),
   topicId: z.string().cuid().optional(),
+  // Phase 6.5: bare group scope — "ask across everything this group has
+  // shared." Same narrowest-wins precedence as the other fields (see
+  // getAccessibleAIScope): ignored if subjectId/chapterId/topicId is set.
+  groupId: z.string().cuid().optional(),
 };
 
 export const aiScopeQuerySchema = z.object(aiScopeFields);

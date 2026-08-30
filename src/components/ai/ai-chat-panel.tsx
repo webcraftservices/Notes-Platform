@@ -24,11 +24,19 @@ interface AIMessage {
 }
 
 /**
- * One scope query param (topicId/chapterId/subjectId) — omit all three for
- * the workspace-level (global) assistant. Matches lib/validation/ai.ts's
- * aiScopeQuerySchema exactly.
+ * One scope query param (topicId/chapterId/subjectId/groupId) — omit all
+ * of them for the workspace-level (global) assistant. Matches
+ * lib/validation/ai.ts's aiScopeQuerySchema exactly. `groupId` (Phase
+ * 6.5) is the bare "ask across everything this group has shared" scope —
+ * distinct from a group-owned Subject/Chapter/Topic, which uses the
+ * matching subjectId/chapterId/topicId scope instead.
  */
-type AIScope = { topicId: string } | { chapterId: string } | { subjectId: string } | Record<string, never>;
+type AIScope =
+  | { topicId: string }
+  | { chapterId: string }
+  | { subjectId: string }
+  | { groupId: string }
+  | Record<string, never>;
 
 function scopeToQuery(scope: AIScope): string {
   const params = new URLSearchParams(scope as Record<string, string>);

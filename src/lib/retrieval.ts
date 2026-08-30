@@ -26,12 +26,10 @@ function materialWhereForScope(scope: ResolvedAIScope) {
   if (scope.topicId) return { topicId: scope.topicId };
   if (scope.chapterId) return { chapterId: scope.chapterId };
   if (scope.subjectId) return { subjectId: scope.subjectId };
-  // Phase 6.1 note: getAccessibleAIScope can't currently produce
-  // ownerType "group" (no groupId input exists yet — that's Phase 6.5),
-  // so this branch is unreachable today. It's here so this function stays
-  // exhaustive and correct for ResolvedAIScope's full type, rather than
-  // silently mis-filtering (`{ workspaceId: null }`, matching nothing) if
-  // a bare group scope is ever resolved before this file is revisited.
+  // Phase 6.5: a bare group scope (ownerType "group" with no
+  // subject/chapter/topic set) retrieves across every Material owned
+  // directly by the group — mirrors Material.groupId, the same field
+  // access.ts's assertScopeAccess already trusts for group-owned content.
   if (scope.ownerType === "group") return { groupId: scope.groupId };
   return { workspaceId: scope.workspaceId };
 }

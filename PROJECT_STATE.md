@@ -1,7 +1,7 @@
 # PROJECT_STATE.md — Current State
 
 Last verified against actual code and a real test/lint/typecheck run on
-**2026-08-29**. If you're reading this in a later session, re-run the
+**2026-08-30**. If you're reading this in a later session, re-run the
 verification commands in the "How to verify this document" section
 before trusting anything time-sensitive here — code may have moved on.
 
@@ -39,41 +39,57 @@ before trusting anything time-sensitive here — code may have moved on.
 
 ## Current phase
 
-**Phases 6.1–6.3 are COMPLETE, COMMITTED, AND PUSHED** to `main`
-(`4c5c016 feat: implement group collaboration and invitations UI`, on top
-of `bcbeab7` for 6.1). See the correction note above — this supersedes
-the "not yet committed" language in the rest of this document's older
-sections below, which describes the session that produced 6.2/6.3, not
-their current (committed) status.
+**Phases 6.1–6.4 are COMPLETE, COMMITTED, AND PUSHED** to `main`
+(`c769f52 feat: attach subjects and materials to groups`, on top of
+`4c5c016` for 6.2/6.3 and `bcbeab7` for 6.1).
 
-**Phase 6.4 (Subjects & Materials attach to Groups) is IMPLEMENTED and
-verified in this sandbox, but NOT YET COMMITTED** — left in the working
-tree for user review, per every prior phase's git-safety rule. See
-"Recent work completed" for the full session log.
+> **Third correction to this document (this session, Phase 6.5)**: the
+> previous revision's "Current phase" section said Phase 6.4 was
+> "IMPLEMENTED and verified in this sandbox, but NOT YET COMMITTED." That
+> was stale by the time this session started — a fresh `git clone` shows
+> `main`/`origin/main` at `c769f52 feat: attach subjects and materials to
+> groups`, clean working tree, which already contains 6.4. This is the
+> exact same failure mode flagged twice before (see the first two
+> correction notes above): the document was never updated after the
+> commit happened. Re-verified directly this session (184/184 tests at
+> the start of this session before any Phase 6.5 changes, lint clean, 61
+> typecheck errors — all three matching what this document already
+> predicted) before trusting it. **Always re-verify `git log` against a
+> fresh clone before trusting this file's "committed" claims** — this is
+> now the third time this exact pattern has occurred; treat every
+> "committed"/"uncommitted" claim in this document as provisional until
+> checked against `git log`/`git status` directly.
+
+**Phase 6.5 (group-scoped AI chat) is IMPLEMENTED and verified in this
+sandbox, but NOT YET COMMITTED** — left in the working tree for user
+review, per every prior phase's git-safety rule. See "Recent work
+completed" for the full session log.
 
 Three architectural decisions were confirmed by the user before Phase 6.1
 implementation (see "Recent work completed" below for the full
 rationale):
 1. A Subject belongs to exactly one scope — Workspace OR Group, never
-   both, never neither (`Subject.workspaceId` is now nullable). **Now
-   actually wired into `/api/subjects`'s create/update routes as of Phase
-   6.4** — Phase 6.1 only built the invariant helper and the read-path
-   scope resolution; the create/update routes themselves were still
-   workspace-hardcoded until this phase.
+   both, never neither (`Subject.workspaceId` is now nullable). Wired
+   into `/api/subjects`'s create/update routes as of Phase 6.4 — Phase
+   6.1 only built the invariant helper and the read-path scope
+   resolution; the create/update routes themselves were still
+   workspace-hardcoded until 6.4.
 2. Group AI conversations are private per user, scoped to shared group
-   knowledge — not shared multi-user threads. (Not yet implemented —
-   that's Phase 6.5. Phase 6.4 did not touch AI conversation routes,
-   only confirmed `retrieval.ts`'s existing subject/chapter/topic-scoped
-   resolution already works correctly for group-owned content without
-   modification — see "Recent work completed".)
+   knowledge — not shared multi-user threads. **Implemented as of Phase
+   6.5**: `getAccessibleAIScope` now resolves a bare group scope
+   (`AIScopeInput.groupId`, no subject/chapter/topic underneath it) by
+   group membership alone (any role), while `AIConversation` ownership
+   stays per-user (`userId` match, unchanged from Phase 5) — so the
+   underlying knowledge is shared but each member's conversation thread
+   is their own, exactly as decided.
 3. Invitation acceptance requires the accepting account's email to
    match the invitation's email — implemented as part of Phase 6.2.
 
-Phase 6.5 (group-scoped AI chat), 6.6 (activity log + notifications), and
-6.7 (docs/closeout) are **not started**. The Group detail page's
-Activity/AI Assistant tabs are still honest `PhasePlaceholder`s naming
-the phase that will implement them; the Subjects/Materials tabs are now
-real (Phase 6.4).
+Phase 6.6 (activity log + notifications) and 6.7 (docs/closeout) are
+**not started**. The Group detail page's Activity tab is still an honest
+`PhasePlaceholder` naming the phase that will implement it; the
+Subjects/Materials tabs (Phase 6.4) and AI Assistant tab (Phase 6.5) are
+now real.
 
 Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed. Built
 provider-free by explicit user decision — no AI/embedding SDK, no API
@@ -83,7 +99,7 @@ real provider later. Phases 1–4 remain complete and unmodified.
 Two known issues were investigated during Phase 5 closeout and are
 recorded below as **explicitly deferred, non-blocking** — see "Known
 deferred issues (Phase 5 closeout)". Neither blocks Phase 6, and neither
-was touched during Phase 6.1–6.4.
+was touched during Phase 6.1–6.5.
 
 
 Phases 1–5, per the master prompt's own phase breakdown:
@@ -92,7 +108,7 @@ Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
 - [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
-- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1–6.3 committed+pushed; 6.4 implemented, uncommitted (this session); 6.5–6.7 not started; see "Recent work completed")
+- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1–6.4 committed+pushed; 6.5 implemented, uncommitted (this session); 6.6–6.7 not started; see "Recent work completed")
 - [ ] Phase 7 — Google Drive/Docs (not started)
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
 - [ ] Phase 9 — Security + performance + production polish (not started)
@@ -267,6 +283,96 @@ group-scoped AI yet — see "What is explicitly NOT implemented."
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: Phase 6.5 — Group-scoped AI chat
+
+Started from a fresh clone at `c769f52` (confirmed via `git log`/`git
+status` — clean tree, Phase 6.4 already committed and pushed, contrary to
+this document's previous "not yet committed" claim; see the third
+correction note at the top of this document).
+
+**Ground-truth audit performed before writing any code**, per the
+session's own instructions: read `PROJECT_STATE.md`, `ARCHITECTURE.md`,
+`CLAUDE.md`, `README.md`, `prisma/schema.prisma`, and the relevant
+existing routes/components/libs, and confirmed via `git log -15`/`git
+status` that the repo, not the document, was the authority for what was
+actually committed.
+
+**Finding: almost all of Phase 6.5's groundwork already existed.** Phase
+6.1's `ResolvedAIScope` discriminated union already modeled
+`ownerType: "group"` correctly; `retrieval.ts`'s `materialWhereForScope`
+already had an `ownerType === "group"` branch (documented as
+unreachable); `conversations/route.ts`'s `scopeFkFields` already wrote
+`groupId` onto new conversations for that ownerType. The *only* missing
+piece across the whole stack was that `AIScopeInput`/`aiScopeQuerySchema`
+had no `groupId` field, so `ownerType: "group"` could never actually be
+produced. This meant **no schema change and no migration** — the
+`AIConversation.groupId` FK and `Group.aiConversations` relation already
+existed from Phase 6.1's schema design.
+
+**Implementation** (8 files, all directly attributable to Phase 6.5; no
+unrelated file touched):
+- `src/lib/access.ts` — added `groupId?: string` to `AIScopeInput`; added
+  a branch in `getAccessibleAIScope` that resolves a bare group scope via
+  the existing `getAccessibleGroup` helper (any group member, any role —
+  matching the "shared knowledge, not manage-gated" decision, the same
+  membership-only rule `assertScopeAccess` already uses for group-owned
+  Subjects/Materials); `getAccessibleAIConversation`'s scope re-check now
+  passes `groupId` through too, so a stored group-scoped conversation is
+  re-authorized on every read/write, not just at creation.
+- `src/lib/validation/ai.ts` — added `groupId: z.string().cuid().optional()`
+  to `aiScopeFields`, same narrowest-wins precedence convention as the
+  other three fields (route/access-layer decides precedence, not the
+  validator).
+- `src/app/api/ai/conversations/route.ts` — `GET` now parses `groupId`
+  from the query string (the existing `scopeFkFields`/`POST` logic needed
+  no changes — they already handled `ownerType: "group"` generically).
+- `src/app/api/ai/conversations/[conversationId]/messages/route.ts` —
+  passes `conversation.groupId` into the scope re-resolution before
+  calling `retrieveRelevantChunks`, so group-scoped retrieval actually
+  filters to that group's materials.
+- `src/lib/retrieval.ts` — comment-only; the group branch is no longer
+  "unreachable," no logic changed.
+- `src/components/ai/ai-chat-panel.tsx` — extended the `AIScope` union
+  with `{ groupId: string }`. `scopeToQuery` (generic
+  `URLSearchParams`-based) and every other code path needed no changes.
+- `src/components/groups/group-tabs.tsx` — replaced the AI Assistant
+  tab's `PhasePlaceholder` with a real `<AIChatPanel scope={{ groupId }}
+  .../>`, reusing the exact same component `TopicTabs` already uses
+  rather than building a second chat UI.
+- `src/lib/validation/__tests__/ai.test.ts` — 4 new tests: valid
+  `groupId`, invalid (non-cuid) `groupId`, and `groupId` accepted
+  alongside a narrower field (route decides precedence, same as the
+  existing `subjectId`+`topicId` test).
+
+**Decision made this session (not previously settled in the repo):**
+group AI chat access is membership-only, not role-gated — a VIEWER can
+ask the group AI questions, same as a VIEWER can already read group
+Subjects/Materials. This mirrors the existing "any group member reaches
+group content" rule (`assertScopeAccess`/`userIsGroupMember`) rather than
+inventing a new ADMIN-only restriction Phase 6.1-6.4's permission matrix
+never specified for AI chat specifically.
+
+**Verification**: 184/184 tests passing (180 pre-session + 4 new), lint
+clean, 61 typecheck errors — verified identical to the pre-session
+baseline via a `git stash`/typecheck/`git stash pop` diff (every error
+matched 1:1 by message, just shifted by the line numbers this session's
+edits introduced; zero new errors). `package-lock.json`'s incidental
+`npm install` churn (`fsevents`'s `"dev": true` flag) and the generated
+`tsconfig.tsbuildinfo` were both reverted/removed before finishing, so
+`git diff --stat` shows exactly the 8 intentional files. `git diff
+--check` clean (no whitespace errors).
+
+**Not touched this session**: Phase 6.6 (activity log/notifications) —
+the Group detail page's Activity tab is still the Phase-6.4-era
+`PhasePlaceholder`, untouched. No Prisma-cascade typecheck errors were
+investigated or "fixed" (same explicit out-of-scope call as every prior
+Phase 6 session).
+
+**Git status at end of session**: `main`/`origin/main` at `c769f52`
+(Phase 6.1–6.4), clean; Phase 6.5's 8 files sit uncommitted in the
+working tree for review, per the git-safety rule every phase in this
+project follows.
 
 ### Session: Phase 6.4 — Subjects & Materials attach to Groups
 Ground-truth audit first (fresh clone, ignored this document's own stale
@@ -1197,50 +1303,45 @@ during implementation).
 
 ## Current task
 
-Phase 6.4 (Subjects & Materials attach to Groups) is implemented and
-verified as described in "Recent work completed" above. **Nothing has
-been committed or pushed** — the working tree contains only the Phase
-6.4 changes (Phases 6.1–6.3 are already committed and pushed at
-`4c5c016`, confirmed via a fresh clone at the start of this session —
-see the correction note at the top of this document). `git status`/
-`git diff --stat` at the end of the session showed exactly 15 modified
-files + 3 new files, all directly attributable to Phase 6.4; no
-unrelated file was touched.
+Phase 6.5 (Group-scoped AI chat) is implemented and verified as described
+in "Recent work completed" above. **Nothing has been committed or
+pushed** — the working tree contains only the Phase 6.5 changes (Phases
+6.1–6.4 are already committed and pushed at `c769f52`, confirmed via a
+fresh clone at the start of this session — see the third correction note
+at the top of this document). `git status`/`git diff --stat` at the end
+of the session showed exactly 8 modified files, all directly
+attributable to Phase 6.5; no unrelated file was touched.
 
 ## Exact next steps
 
-1. **User review of Phase 6.4** — nothing is committed yet; review the
+1. **User review of Phase 6.5** — nothing is committed yet; review the
    diff (see "Recent work completed" for the full file list) and commit
    when satisfied.
-2. **Manual browser verification of Phase 6.4** is still outstanding —
+2. **Manual browser verification of Phase 6.5** is still outstanding —
    this sandbox has no way to run the dev server or reach a database.
-   Before considering Phase 6.4 fully done, actually click through: as
-   an ADMIN, create a group Subject, chapter, topic, and upload a
-   material to it; as a MEMBER/VIEWER of the same group, confirm you can
-   view but not rename/delete the Subject (and confirm the API itself
-   403s a raw PATCH/DELETE attempt, not just that the button is hidden);
-   as a non-member of the group, confirm `/subjects/<that-id>` and the
-   underlying API both 404; detach a group Material to "Unorganized" and
-   confirm it stays listed under the Group Materials tab rather than
-   disappearing into the personal workspace.
+   Before considering Phase 6.5 fully done, actually click through: as
+   any member (including VIEWER) of a group, open the group's AI
+   Assistant tab and confirm a conversation loads/persists per-user; as a
+   non-member, confirm the underlying `/api/ai/conversations?groupId=...`
+   API 403s rather than just the tab being hidden; confirm a question
+   asked in a group's AI chat only retrieves materials attached directly
+   to that group (`Material.groupId`), not materials inside a group-owned
+   Subject/Chapter/Topic (those already use the narrower
+   subject/chapter/topic scope, unchanged from Phase 6.4) and not another
+   group's materials.
 3. **Run `npm run db:generate && npm run db:migrate`** in an environment
    with real network access to `binaries.prisma.sh` — no new migration
-   was added this phase, so this just clears the Prisma-stub typecheck
-   cascade (registers nothing new).
-4. **Phase 6.5** (group-scoped AI chat) is the next sub-phase in
+   was added this phase (or Phase 6.4), so this just clears the
+   Prisma-stub typecheck cascade (registers nothing new).
+4. **Phase 6.6** (activity log + notifications) is the next sub-phase in
    sequence — but do not start it speculatively; wait for explicit
-   instruction, per `CLAUDE.md`'s phase-discipline rule. When it starts,
-   `retrieval.ts`'s subject/chapter/topic-scoped resolution already works
-   correctly for group-owned content (verified this session, not
-   modified) — the remaining work is the bare-group-scope case (a
-   conversation scoped to "this group" with no specific subject/chapter/
-   topic) and the AI conversation routes themselves.
+   instruction, per `CLAUDE.md`'s phase-discipline rule.
 5. **Decide on the two "Known limitations" flagged in the Phase 6.4
-   session log** before or during Phase 6.5/6.6 — whether Chapter/Topic/
+   session log** before or during Phase 6.6 — whether Chapter/Topic/
    Material mutation inside a group Subject should eventually be
    role-gated the same way Subject-level mutation now is, and whether
    Material move-between-owners should stay unrestricted. Neither was a
-   decision this phase was authorized to make.
+   decision Phase 6.4 or 6.5 was authorized to make.
 6. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
@@ -1267,7 +1368,7 @@ explicitly asks for it again.
 npm install
 npm run test
 npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 61, all Prisma-cascade (verified against a git-stash baseline of 60 this session — see the Phase 6.4 session log for why this document's previous "58" was already stale before this phase started)
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 61, all Prisma-cascade (unchanged from Phase 6.4 — verified line-for-line identical against a git-stash baseline this session, see the Phase 6.5 session log)
 ```
 
 If any of these numbers differ from what's recorded above, this document

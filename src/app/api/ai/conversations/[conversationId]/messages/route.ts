@@ -41,6 +41,7 @@ export async function POST(req: Request, { params }: { params: { conversationId:
         topicId: conversation.topicId ?? undefined,
         chapterId: conversation.chapterId ?? undefined,
         subjectId: conversation.subjectId ?? undefined,
+        groupId: conversation.groupId ?? undefined,
       },
       user.id
     );

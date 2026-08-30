@@ -22,6 +22,23 @@ describe("aiScopeQuerySchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts a valid groupId (Phase 6.5 bare group scope)", () => {
+    const result = aiScopeQuerySchema.safeParse({ groupId: "ckgroup00000000000000000000" });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a non-cuid groupId", () => {
+    expect(aiScopeQuerySchema.safeParse({ groupId: "not-a-cuid" }).success).toBe(false);
+  });
+
+  it("accepts groupId alongside a narrower field (route layer decides precedence)", () => {
+    const result = aiScopeQuerySchema.safeParse({
+      groupId: "ckgroup00000000000000000000",
+      topicId: "cktopic0000000000000000000",
+    });
+    expect(result.success).toBe(true);
+  });
 });
 
 describe("sendAIMessageSchema", () => {

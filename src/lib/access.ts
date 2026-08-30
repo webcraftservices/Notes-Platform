@@ -253,6 +253,11 @@ export interface AIScopeInput {
   subjectId?: string;
   chapterId?: string;
   topicId?: string;
+  // Phase 6.5: a bare group scope (no subject/chapter/topic underneath
+  // it) — "ask across everything this group has shared." Ignored if any
+  // of subjectId/chapterId/topicId is also set (same narrowest-wins
+  // precedence as everything else in getAccessibleAIScope).
+  groupId?: string;
 }
 
 /**
@@ -267,12 +272,11 @@ export interface AIScopeInput {
  * subjectId/chapterId/topicId narrow *within* whichever owner the scope
  * belongs to — a group-owned Subject's Topic is still `ownerType: "group"`.
  *
- * Phase 6.1 note: nothing here can currently produce `ownerType: "group"`
- * — `AIScopeInput` has no `groupId` field yet, and every Subject/Chapter/
- * Topic reachable today is workspace-owned (Phase 6.4 hasn't shipped
- * group-owned Subjects). The union already models the group case
- * correctly so Phase 6.5 (group-scoped AI chat) can add a `groupId`
- * input without another type migration here.
+ * Phase 6.5: `ownerType: "group"` is now reachable two ways — a
+ * group-owned Subject/Chapter/Topic (resolved via `resolveSubjectOwner`,
+ * shipped in Phase 6.4), or a *bare* group scope (`AIScopeInput.groupId`
+ * with no subject/chapter/topic set — "ask across everything this group
+ * has shared") resolved directly in `getAccessibleAIScope` below.
  */
 export type ResolvedAIScope =
   | {
@@ -304,12 +308,15 @@ export type ResolvedAIScope =
  * Ownership (`ownerType`/`workspaceId`/`groupId`) is derived from the
  * resolved Subject itself via `resolveSubjectOwner`, not assumed —
  * `Subject.workspaceId` is nullable (Phase 6.1) since a Subject can
- * belong to a Group instead. Group-scoped conversations
- * (`AIConversation.groupId`, a *bare* group scope with no
- * subject/chapter/topic underneath it) are part of the schema for Phase 6
- * but intentionally not resolvable here yet — `AIScopeInput` has no
- * `groupId` field — because there is no group-content model to authorize
- * a bare group scope against until Phase 6.4/6.5.
+ * belong to a Group instead.
+ *
+ * Phase 6.5: a *bare* group scope (`AIScopeInput.groupId`, no
+ * subject/chapter/topic underneath it — "ask across everything this
+ * group has shared") is authorized by group membership alone, mirroring
+ * `assertScopeAccess`'s existing "any group member can reach group
+ * content" rule (see `userIsGroupMember` above) — matches the Phase 6
+ * planning decision that group AI conversations are private-per-user but
+ * scoped to *shared* group knowledge, not gated to a manage-level role.
  */
 export async function getAccessibleAIScope(input: AIScopeInput, userId: string): Promise<ResolvedAIScope> {
   if (input.topicId) {
@@ -338,6 +345,19 @@ export async function getAccessibleAIScope(input: AIScopeInput, userId: string):
     const subject = await getAccessibleSubject(input.subjectId, userId);
     if (!subject) throw new NotAuthorizedError();
     return { ...resolveSubjectOwner(subject), subjectId: subject.id, chapterId: null, topicId: null };
+  }
+
+  if (input.groupId) {
+    const group = await getAccessibleGroup(input.groupId, userId);
+    if (!group) throw new NotAuthorizedError();
+    return {
+      ownerType: "group",
+      workspaceId: null,
+      groupId: group.id,
+      subjectId: null,
+      chapterId: null,
+      topicId: null,
+    };
   }
 
   const workspace = await getPrimaryWorkspace(userId);
@@ -371,6 +391,7 @@ export async function getAccessibleAIConversation(conversationId: string, userId
       topicId: conversation.topicId ?? undefined,
       chapterId: conversation.chapterId ?? undefined,
       subjectId: conversation.subjectId ?? undefined,
+      groupId: conversation.groupId ?? undefined,
     },
     userId
   );

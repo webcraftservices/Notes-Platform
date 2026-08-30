@@ -12,10 +12,10 @@ import { zodError, UNAUTHORIZED, FORBIDDEN } from "@/lib/api-response";
  *
  * workspaceId/groupId are mutually exclusive, mirroring ResolvedAIScope's
  * own discriminated union (Phase 6.1) — at most one of them is ever
- * non-null, and only when nothing narrower is set. `ownerType` can only
- * be "group" once Phase 6.5 adds a groupId input to AIScopeInput; until
- * then this always resolves to the workspaceId branch, unchanged from
- * before.
+ * non-null, and only when nothing narrower is set. `ownerType` is
+ * "group" for a bare group scope (Phase 6.5) or a group-owned
+ * Subject/Chapter/Topic (Phase 6.4); either way exactly one of
+ * workspaceId/groupId ends up set here, never both.
  */
 function scopeFkFields(scope: ResolvedAIScope) {
   const narrowed = Boolean(scope.topicId || scope.chapterId || scope.subjectId);
@@ -45,6 +45,7 @@ export async function GET(req: Request) {
     subjectId: searchParams.get("subjectId") ?? undefined,
     chapterId: searchParams.get("chapterId") ?? undefined,
     topicId: searchParams.get("topicId") ?? undefined,
+    groupId: searchParams.get("groupId") ?? undefined,
   });
   if (!parsed.success) return zodError(parsed.error);
 
