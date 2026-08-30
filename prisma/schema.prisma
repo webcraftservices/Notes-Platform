@@ -676,6 +676,7 @@ model GroupInvitation {
   expiresAt DateTime
 
   @@index([email])
+  @@index([groupId, status])
 }
 
 enum InvitationStatus {

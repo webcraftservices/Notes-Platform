@@ -440,3 +440,21 @@ export async function requireGroup(groupId: string, userId: string) {
     throw err;
   }
 }
+
+/**
+ * Finds a User by email, case-insensitively (Phase 6.2). `User.email` is
+ * stored exactly as the person typed it at signup (see
+ * `api/auth/register/route.ts`) — it is NOT stored pre-normalized — so a
+ * plain `db.user.findUnique({ where: { email } })` against an already
+ * `normalizeEmail()`-lowercased invitation address would silently miss a
+ * user who originally registered as `Test@Example.com`. Postgres's
+ * case-insensitive `mode: "insensitive"` comparison is used instead of
+ * assuming either side is already normalized. Callers should still pass
+ * an already-`normalizeEmail()`-normalized value in for consistency/
+ * readability, but correctness does not depend on it.
+ */
+export async function findUserByNormalizedEmail(email: string) {
+  return db.user.findFirst({
+    where: { email: { equals: email, mode: "insensitive" }, deletedAt: null },
+  });
+}

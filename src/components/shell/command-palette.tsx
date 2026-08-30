@@ -20,6 +20,7 @@ import {
   Loader2,
   FolderOpen,
   Mic,
+  Users,
 } from "lucide-react";
 import { useUIStore } from "@/lib/stores/ui-store";
 
@@ -49,6 +50,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const setCreateSubjectOpen = useUIStore((s) => s.setCreateSubjectOpen);
+  const setCreateGroupOpen = useUIStore((s) => s.setCreateGroupOpen);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -116,8 +118,12 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
               <Item icon={Plus} onSelect={() => { go("/subjects"); setCreateSubjectOpen(true); }}>
                 New Subject
               </Item>
+              <Item icon={Users} onSelect={() => { go("/groups"); setCreateGroupOpen(true); }}>
+                New Group
+              </Item>
               <Item icon={Home} onSelect={() => go("/home")}>Go to Home</Item>
               <Item icon={BookOpen} onSelect={() => go("/subjects")}>Go to Subjects</Item>
+              <Item icon={Users} onSelect={() => go("/groups")}>Go to Groups</Item>
               <Item icon={FolderOpen} onSelect={() => go("/materials")}>Go to Materials</Item>
               <Item icon={Mic} onSelect={() => go("/materials")}>Record Lecture</Item>
               <Item icon={Settings} onSelect={() => go("/settings")}>Go to Settings</Item>

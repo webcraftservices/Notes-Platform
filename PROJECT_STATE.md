@@ -1,36 +1,66 @@
 # PROJECT_STATE.md — Current State
 
 Last verified against actual code and a real test/lint/typecheck run on
-**2026-08-28**. If you're reading this in a later session, re-run the
+**2026-08-29**. If you're reading this in a later session, re-run the
 verification commands in the "How to verify this document" section
 before trusting anything time-sensitive here — code may have moved on.
 
 > Cloned directly from `webcraftservices/Notes-Platform` on GitHub this
 > session — this document is reconciled against the live repo, not a
 > stale local checkout.
+>
+> **Correction to this document's previous revision**: the previous
+> revision said Phase 6.1 was "implemented and verified... nothing has
+> been committed or pushed." That was inaccurate by the time this session
+> started — `git log` on a fresh clone shows Phase 6.1 was in fact
+> committed (`bcbeab7 feat: implement phase 6.1 group access and crud`)
+> and pushed to `origin/main` sometime after that revision was written,
+> and this document was simply never updated to reflect it. Re-verified
+> directly this session (127/127 tests, lint clean, 44 typecheck errors —
+> matching what this document already predicted) before trusting it. This
+> is the exact "document reconciled against the live repo" failure mode
+> this file's own opening note warns about — recorded here so it doesn't
+> repeat.
 
 ---
 
 ## Current phase
 
-**Phase 6.1 (Groups access layer + CRUD) is COMPLETE.** Three
-architectural decisions were confirmed by the user before implementation
-(see "Recent work completed" below for the full rationale):
+**Phase 6.1 (Groups access layer + CRUD) is COMPLETE, COMMITTED, AND
+PUSHED** to `main` (`bcbeab7 feat: implement phase 6.1 group access and
+crud`). Three architectural decisions were confirmed by the user before
+Phase 6.1 implementation (see "Recent work completed" below for the full
+rationale):
 1. A Subject belongs to exactly one scope — Workspace OR Group, never
    both, never neither (`Subject.workspaceId` is now nullable).
 2. Group AI conversations are private per user, scoped to shared group
    knowledge — not shared multi-user threads. (Not yet implemented —
    that's Phase 6.5.)
-3. Invitation acceptance will require the accepting account's email to
-   match the invitation's email. (Not yet implemented — that's Phase 6.2.)
+3. Invitation acceptance requires the accepting account's email to
+   match the invitation's email — **now implemented as part of Phase
+   6.2** (see below).
 
-Phase 6.1 scope was deliberately narrow: Group create/read/update/delete
-and the role-hierarchy access layer only. Phase 6.2 (membership +
-invitations), 6.3 (Groups UI), 6.4 (Subjects/Materials attach to Groups),
-6.5 (group-scoped AI chat), 6.6 (activity log + notifications), and 6.7
-(docs/closeout) are **not started**. `/groups` in the UI still renders the
-Phase 5-era placeholder — Phase 6.1 was backend-only, per explicit
-instruction.
+**Phase 6.2 (Membership + Invitations) is IMPLEMENTED and verified in
+this sandbox, but NOT YET COMMITTED** — left in the working tree for
+user review, per the Phase 6.2 doc's git-safety rules (a fresh clone at
+the start of the Phase 6.3 session confirmed `origin/main` is still at
+`bcbeab7`, i.e. Phase 6.2 genuinely hasn't been pushed yet — this
+session continued in the same sandbox working tree rather than losing
+that work). See "Recent work completed" for the full session log.
+
+**Phase 6.3 (Groups UI) is IMPLEMENTED and verified in this sandbox, but
+NOT YET COMMITTED** — built directly on top of the still-uncommitted
+Phase 6.2 working tree (both are staged together in the same working
+tree now; see "Recent work completed"). `/groups` no longer renders the
+Phase 5-era `PhasePlaceholder` — it's a real, working Groups list,
+detail page, and Members experience wired to the actual Phase 6.1/6.2
+APIs.
+
+Phase 6.4 (Subjects/Materials attach to Groups), 6.5 (group-scoped AI
+chat), 6.6 (activity log + notifications), and 6.7 (docs/closeout) are
+**not started**. The Group detail page's Subjects/Materials/Activity/AI
+Assistant tabs are honest `PhasePlaceholder`s naming the phase that will
+implement them — no fake data, no invented endpoints.
 
 Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed. Built
 provider-free by explicit user decision — no AI/embedding SDK, no API
@@ -225,6 +255,128 @@ group-scoped AI yet — see "What is explicitly NOT implemented."
 
 ## Recent work completed (most recent first)
 
+### Session: Phase 6.3 — Groups UI
+Continued in the same sandbox working tree as the Phase 6.2 session
+(confirmed via a fresh clone that `origin/main` was still at `bcbeab7`,
+i.e. Phase 6.2 was genuinely still unpushed, not just presumed so) —
+built Phase 6.3 on top of the uncommitted Phase 6.2 changes rather than
+re-cloning and losing them. Investigated the existing UI architecture
+first (Subjects list/detail pages, Topic page's Tabs pattern,
+`ui-store.ts`'s Zustand pattern, every `components/ui/*` primitive, the
+command palette, exact Phase 6.1/6.2 API response shapes) before writing
+any component, per the doc's instruction.
+
+**Scope discipline**: no Phase 6.4/6.5/6.6 functionality was implemented
+— the Group detail page's Subjects/Materials/Activity/AI Assistant tabs
+are `PhasePlaceholder`s naming the actual phase that will build them,
+reusing the exact component Topic pages already use for the same
+purpose, not a new placeholder pattern.
+
+**Two decisions not previously established anywhere in the repo**:
+1. **No return-URL/callback convention exists** anywhere in this app —
+   `sign-in-form.tsx` always lands on `/` after login, full stop. Rather
+   than inventing one so `/invitations/[token]` could survive an
+   unauthenticated round-trip through `/sign-in`, `InvitationPage` uses
+   the same plain `requireUser()` every other page uses, and the page
+   itself just tells the person to come back to the same link after
+   signing in. Documented in-code as a deliberate non-invention, per the
+   Phase 6.3 doc's explicit "do not invent a second auth system" rule.
+2. **Group avatar color** — `Group` has no `icon`/`color` field (unlike
+   `Subject`). Rather than adding one or inventing a new palette,
+   `lib/group-style.ts`'s `getGroupColor` deterministically hashes the
+   group id onto the existing `SUBJECT_COLORS` tokens `subject-style.ts`
+   already defines, so a card style always shows the same color per
+   group without any new design tokens or picker UI.
+
+**New pages** (all under the existing `(app)` route group except the
+invitation page, which — like `onboarding/`, the one existing precedent
+for a no-sidebar authenticated page — deliberately isn't):
+- `(app)/groups/page.tsx` — replaces the `PhasePlaceholder`. Direct
+  `db.groupMember.findMany` (server component, no self-fetch of
+  `/api/groups` — matches the Subjects list page's established pattern
+  and the doc's explicit "prefer direct Prisma access" instruction).
+  Grid of `GroupCard`s, `EmptyState` when there are none, `NewGroupButton`
+  opening `CreateGroupDialog` via the same "ui-store dialog trigger"
+  pattern `createSubjectOpen` already established. `loading.tsx` skeleton
+  mirrors Subjects' exactly.
+- `(app)/groups/[groupId]/page.tsx` — `requireGroup()` (existing Phase
+  6.1 helper; 404 for both "doesn't exist" and "not a member," same as
+  Subject/Chapter/Topic). Fetches members via direct Prisma (same shape
+  `GET /api/groups/[groupId]/members` returns, just not round-tripped
+  through the API from a server component); pending invitations are only
+  ever queried — not just hidden client-side — when the caller's role is
+  ADMIN+, mirroring the API route's own gate. Renders `GroupActionsMenu`
+  (Topbar) + `GroupTabs` (Overview/Members/Subjects/Materials/Activity/AI
+  Assistant), the same two-part header+tabs shape the Topic detail page
+  uses. `loading.tsx` skeleton added.
+- `invitations/[token]/page.tsx` — standalone, no sidebar. Reads the
+  invitation directly via Prisma (no new "preview" API route — a
+  read-only page load doesn't need one; only Accept/Decline are actual
+  mutations, and those go through the real Phase 6.2 endpoints).
+  Computes `emailMatches`/`alreadyMember`/`isExpired` server-side from a
+  fresh `db.user` read (never trusts `session.user.email`, same
+  discipline as the Phase 6.2 accept/decline routes) and hands them to
+  the client `InvitationActions` component, which renders the honest
+  state for every case the doc lists: already accepted/declined/expired,
+  email mismatch (with a "sign out" affordance, not a fabricated
+  auto-redirect), already-a-member ("Go to group" instead of
+  accept/decline), and the real Accept/Decline flow.
+
+**New components** (`src/components/groups/`, `src/components/invitations/`,
+plus one shared primitive): `GroupCard`, `CreateGroupDialog`,
+`NewGroupButton`, `GroupActionsMenu` (Delete for OWNER XOR Leave for
+everyone else — mutually exclusive by construction in the UI, though the
+server remains the actual authority either way), `GroupTabs`,
+`GroupMembersPanel` (the real functional piece — role-change dropdown and
+remove/leave buttons are gated using the *actual* `canChangeMemberRole`/
+`canRemoveMember` pure functions from `lib/group-role.ts` imported
+directly into the client component, not a re-derived copy of the
+permission matrix that could drift from the server's), `InviteMemberDialog`
+(deliberately says "Invitation created," never "Email sent" — no email
+provider is configured, per Phase 6.2), `InvitationActions`. Plus
+`components/ui/avatar.tsx`, extracted from the avatar markup
+`shell/user-menu.tsx` already had inline once a third use case
+(member-row avatars, overview-tab avatar stack) made it worth sharing.
+
+**Command palette**: added "New Group" (opens the same `CreateGroupDialog`
+via `setCreateGroupOpen`, identical pattern to the existing "New Subject"
+entry — no duplicate creation logic) and "Go to Groups".
+
+**New pure/testable files**: `lib/group-style.ts` (`getGroupColor`,
+`getGroupInitials`, `formatRoleLabel` — 14 new tests). No route-level UI
+tests were added, consistent with this repo's established convention
+(confirmed again this session: still zero DB-mocked/E2E tests anywhere)
+— per the doc's own "do not introduce a new testing framework" and "only
+add tests where new pure logic is introduced" instructions.
+
+**Verified in this sandbox**: 173/173 tests pass (164 baseline + 9 new,
+all in `group-style.test.ts`). Lint: 2 `react/no-unescaped-entities`
+errors caught and fixed (apostrophes in `invitations/[token]/page.tsx`
+and `group-tabs.tsx`), then clean. Typecheck: 58 errors, **+8** over the
+Phase-6.2 baseline of 50 — all 8 confined to the new Group UI files'
+`.map()` callbacks and `MemberRole` type imports, the identical
+Prisma-stub-cascade class already documented at length above, not
+independent bugs (spot-checked each). No schema/migration change this
+session, so `db:generate`/`db:migrate` weren't re-run (nothing new to
+register). Not manually verified in an actual browser — this sandbox has
+no way to run the dev server and click through it; verification here is
+test/lint/typecheck plus careful reading against the exact API response
+shapes, same limitation every prior sandbox session has had.
+
+**Known limitations / honestly incomplete**: the invitation page's
+email-mismatch/unauthenticated flows lose the token across a sign-in
+redirect (see decision 1 above) — the person has to manually return to
+the link after signing in; this is a real UX rough edge, not a bug, and
+fixing it properly would mean adding app-wide callback-URL support,
+which is out of Phase 6.3's scope. Pending invitations have no "revoke"
+control in the UI — Phase 6.2 never exposed that endpoint, and the doc
+explicitly said not to invent one.
+
+**Git status at end of session**: `main` still at `bcbeab7` (Phase 6.1
+only) on `origin`; Phase 6.2 + Phase 6.3 both sit uncommitted in the same
+working tree. `tsconfig.tsbuildinfo` reappeared after the typecheck run
+and was removed again before finishing. Nothing committed or pushed.
+
 ### Session: Phase 6.1 follow-up — ResolvedAIScope nullable-workspaceId fix
 The user ran `npm run db:generate`/`db:migrate` for real (Neon +
 real network access) after the Phase 6.1 session below, which cleared all
@@ -281,6 +433,150 @@ the user's exact "3 errors → 0" confirmation here** since this sandbox's
 Prisma client is still the stub — recommend the user re-run
 `npm run typecheck` on their machine (with the real generated client) to
 confirm the 3 reported errors are gone.
+
+### Session: Phase 6.2 — Membership + Invitations
+Repository re-cloned fresh from GitHub at the start of this session,
+per standing instruction to never rely on prior-session summary alone.
+`git log` showed Phase 6.1 already committed and pushed
+(`bcbeab7`) — contradicting what the previous revision of this document
+said. Re-verified from scratch before proceeding (see the correction
+note at the top of this document): 127/127 tests, lint clean, 44
+typecheck errors (all the documented Prisma-cascade kind) on that
+commit, so Phase 6.2 was built on a genuinely known-good base.
+
+Implemented the full backend membership + invitation lifecycle described
+in the Phase 6.2 doc, backend-only (no Groups UI, no ActivityLog, no
+group-scoped Subjects/Materials/AI — all explicitly out of scope and
+untouched).
+
+**Database**: new migration
+`prisma/migrations/20260829094000_group_invitation_status_index/` —
+adds `@@index([groupId, status])` to `GroupInvitation`, needed by the new
+invitation-list and duplicate-check queries. Purely additive (an index,
+no column/data changes). **Could not be applied via `prisma migrate
+dev`/`npx prisma generate`** in this sandbox — same `binaries.prisma.sh`
+`403 Forbidden` block as every prior session; written by hand as raw SQL,
+matching the Phase 6.1 migration's precedent, and needs
+`npm run db:generate && npm run db:migrate` in an environment with real
+network access.
+
+**Backend — new files**:
+- `src/lib/email.ts` — `normalizeEmail` (trim + lowercase). New
+  canonical form for invitation email comparisons — the existing
+  auth system (`api/auth/register/route.ts`) stores `User.email` exactly
+  as typed, with no existing normalization convention to inherit, so this
+  was a genuinely new decision, not something already established
+  elsewhere in the repo. Pure, DB-free, unit-tested (6 tests).
+- `src/lib/invitation-token.ts` — `generateInvitationToken` (32
+  cryptographically random bytes, hex-encoded, via Node's
+  `crypto.randomBytes` — not derived from group/user/email data),
+  `invitationExpiryDate`/`INVITATION_TTL_MS` (7-day invitation lifetime).
+  Pure, unit-tested (5 tests).
+- `src/app/api/groups/[groupId]/members/route.ts` — `GET`, any role
+  including VIEWER (spec §3 marks "List members" ✅ for every role).
+- `src/app/api/groups/[groupId]/members/[userId]/route.ts` — `PATCH`
+  (role change, ADMIN/OWNER), `DELETE` (removal by ADMIN/OWNER, or
+  self-removal/"leave" — the doc specifies both flow through the same
+  endpoint).
+- `src/app/api/groups/[groupId]/invitations/route.ts` — `GET` (list
+  PENDING invitations, ADMIN/OWNER; token never included in the
+  response), `POST` (create; ADMIN/OWNER; duplicate-pending and
+  already-a-member checks; creates a `GROUP_INVITATION` Notification when
+  the email belongs to an existing User; in-app only, no email sending —
+  no provider is configured, consistent with `CLAUDE.md`'s "never fake a
+  feature").
+- `src/app/api/invitations/[token]/accept/route.ts` /
+  `.../decline/route.ts` — token lookup, terminal-status check, lazy
+  PENDING→EXPIRED transition on encountering an expired invitation,
+  email-match check against a fresh `db.user` read (never
+  `session.user.email`), then a conditional `updateMany({ where: {
+  token, status: "PENDING" } })` to consume the invitation — see the
+  concurrency note below.
+
+**Backend — `src/lib/access.ts` addition**: `findUserByNormalizedEmail`
+— case-insensitive (`mode: "insensitive"`) lookup against the
+as-stored, non-normalized `User.email` column, so a user who registered
+as `Test@Example.com` still matches an invite sent to
+`test@example.com`. Purely additive; existing functions untouched.
+
+**Backend — `src/lib/group-role.ts` additions**: `canChangeMemberRole`
+and `canRemoveMember`, two pure functions implementing the Phase 6.2
+permission matrix (spec §3), extracted the same way `roleMeetsMinimum`
+already was so the matrix is unit-testable without a database — this
+project's only real precedent for "how do you test authorization logic
+here," since there's no DB-mocking convention anywhere else in the repo
+(confirmed by inspection: `speech-openai.test.ts`, the only other
+service-layer test, tests a pure pre-network guard clause, not a mocked
+DB call). One decision not previously established anywhere in the repo:
+whether ADMIN may modify another ADMIN's role. The Phase 6.2 doc left
+this conditional on "the repository's established policy" but no such
+policy existed (Phase 6.1 shipped no role-change endpoint at all) — the
+matrix only explicitly protects OWNER, so `canChangeMemberRole` allows
+ADMIN-on-ADMIN changes as the simplest rule consistent with the given
+table, documented in-code rather than silently assumed.
+
+**Concurrency**: OWNER-protection races (spec §17, "two admins
+simultaneously target OWNER") are closed *structurally*, not by locking —
+OWNER can never be reassigned through any Phase 6.2 endpoint
+(`updateMemberRoleSchema`/`createInvitationSchema` both exclude OWNER at
+the validation layer, and there's no ownership-transfer feature), so a
+concurrent read of the real owner's role is always `"OWNER"` regardless
+of timing; both `canChangeMemberRole`/`canRemoveMember` reject on sight.
+Invitation-accept races (spec §7) use a conditional
+`updateMany({ where: { token, status: "PENDING" } })` — Postgres
+re-evaluates that WHERE clause against the committed row, so only the
+first of two racing requests can ever match; the second's `count: 0` is
+treated as "already consumed." Duplicate-pending-invitation races (spec
+§16) are the one place a genuine (narrow) gap remains: the check is a
+`findFirst` inside the same `$transaction` as the `create`, under
+Postgres's default READ COMMITTED isolation — this is *not* airtight
+against two truly simultaneous invite requests. A fully airtight version
+would need a partial unique index
+(`UNIQUE (groupId, email) WHERE status = 'PENDING'`), which isn't
+expressible in `schema.prisma`'s declarative syntax and would only exist
+as a hand-written raw-SQL migration outside the schema's source of
+truth — the doc explicitly said not to over-engineer this, so the
+narrower guarantee was kept and the limitation is documented here (and
+in-code) rather than silently glossed over. Worst case: two
+`GroupInvitation` rows for the same group/email, which `accept`/`decline`
+both already handle safely (first one wins; the other stays PENDING but
+is inert).
+
+**Validation**: `src/lib/validation/groups.ts` gained
+`updateMemberRoleSchema` and `createInvitationSchema` (both restrict role
+to `ADMIN | MEMBER | VIEWER`, never `OWNER`, at the validation layer —
+not just in the runtime permission checks); `createInvitationSchema`
+normalizes the email via `.transform(normalizeEmail)` so every downstream
+consumer of `parsed.data.email` is already canonical.
+
+**Tests added** (37 new, all pure-function/Zod, no DB — see "no
+DB-mocking convention" note above for why route handlers themselves
+aren't unit-tested, same as every DB-touching function in this repo):
+`email.test.ts` (6), `invitation-token.test.ts` (5),
+`group-role.test.ts` (+15 for `canChangeMemberRole`/`canRemoveMember`),
+`validation/groups.test.ts` (+11 for the two new schemas).
+
+**Verified in this sandbox**: 164/164 tests pass (127 baseline + 37 new).
+Lint clean. Typecheck: 50 errors, **+6** over the 44-error Phase-6.1
+baseline — all 6 confined to the new route files' `.map`/`db.$transaction`
+callback parameters, the identical Prisma stub-client cascade class
+already documented, not independent bugs (spot-checked each of the 6
+against the pattern). `npm run db:generate`/`npm run db:migrate` both
+reproduce the same `binaries.prisma.sh` `403 Forbidden` already
+documented — not independently confirmable in this sandbox.
+`git diff --stat` for tracked files: `prisma/schema.prisma` (+1),
+`src/lib/access.ts` (+18), `src/lib/api-response.ts` (+1),
+`src/lib/group-role.ts` (+56), `src/lib/validation/groups.ts` (+31), plus
+test-file diffs. New untracked files: the migration directory, the four
+new route files under `src/app/api/groups/[groupId]/members/`,
+`src/app/api/groups/[groupId]/invitations/`, and
+`src/app/api/invitations/[token]/`, plus `src/lib/email.ts`,
+`src/lib/invitation-token.ts`, and their test files. `package-lock.json`
+was touched by this sandbox's own `npm install` (an unrelated `"dev":
+true` flag on `fsevents`) and `tsconfig.tsbuildinfo` was regenerated by
+`tsc` — both reverted/removed before finishing, per the doc's explicit
+"don't stage unrelated generated artifacts" instruction. **Nothing
+committed or pushed** — left for user review.
 
 ### Session: Phase 6.1 — Groups access layer + CRUD
 Implemented per explicit scope: Group create/read/update/delete and the
@@ -636,11 +932,11 @@ against Claude's last-known state:
   fails with `403 Forbidden` fetching from `binaries.prisma.sh`, even with
   `PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1`; `new PrismaClient()` itself
   throws `"did not initialize yet"` at construction time). This produces
-  44 typecheck errors (38 pre-existing + 6 new in Phase 6.1's files) that
-  are NOT real bugs — see `CLAUDE.md` → Testing requirements for how to
-  distinguish this from an actual regression. Resolves by running
-  `npm run db:generate` somewhere with real network access to
-  `binaries.prisma.sh`.
+  58 typecheck errors (38 pre-Phase-6 baseline + 6 from Phase 6.1 + 6 from
+  Phase 6.2 + 8 from Phase 6.3) that are NOT real bugs — see `CLAUDE.md` →
+  Testing requirements for how to distinguish this from an actual
+  regression. Resolves by running `npm run db:generate` somewhere with
+  real network access to `binaries.prisma.sh`.
 - ~~`ResolvedAIScope.workspaceId` typed as required `string`~~ — **FIXED**
   in the Phase 6.1 follow-up session (see "Recent work completed").
   `ResolvedAIScope` is now a discriminated union over `ownerType:
@@ -664,38 +960,39 @@ against Claude's last-known state:
 ## Tests performed and their results (this session, verified live)
 
 ```
-npm run test        →  14 test files, 123/123 tests passed
-                        (102 baseline + 21 new: subject-scope.test.ts,
-                        group-role.test.ts, validation/groups.test.ts)
+npm run test        →  16 test files, 164/164 tests passed
+                        (127 baseline + 37 new: email.test.ts,
+                        invitation-token.test.ts, +15 group-role.test.ts,
+                        +11 validation/groups.test.ts)
 npm run lint         →  0 errors, 0 warnings
-npm run typecheck    →  44 errors (+6 over the 38-error baseline).
-                         All 6 confined to the three Phase 6.1 files
-                         (access.ts, group-role.ts, api/groups/route.ts)
-                         that reference the MemberRole enum or a
-                         db.$transaction callback — confirmed by grepping
-                         the before/after error sets side by side that
-                         these are the identical "Prisma stub-client
-                         cascade" pattern already present 8+ times
-                         elsewhere in the untouched baseline, not
-                         independent bugs.
+npm run typecheck    →  50 errors (+6 over the 44-error Phase-6.1
+                         baseline). All 6 confined to the new Phase 6.2
+                         route files' .map/db.$transaction callback
+                         parameters — confirmed by grepping the
+                         before/after error sets side by side that these
+                         are the identical "Prisma stub-client cascade"
+                         pattern already present 8+ times elsewhere in
+                         the untouched baseline, not independent bugs.
+npm run db:generate  →  binaries.prisma.sh 403 Forbidden (same known
+                         sandbox block; not independently confirmable
+                         here)
+npm run db:migrate   →  same 403 Forbidden
 ```
 
-Migration SQL (`20260828054500_subject_scope_nullable_workspace`) verified
-by hand against a real local PostgreSQL 16 + pgvector instance installed
-in this sandbox (see "Recent work completed" for the exact steps) — not
-via `prisma migrate dev`, which still can't run here for the same
-`binaries.prisma.sh` network restriction as before.
+The `GroupInvitation(groupId, status)` index migration
+(`20260829094000_group_invitation_status_index`) is a plain additive
+`CREATE INDEX`, hand-written the same way the Phase 6.1 migration was —
+not hand-verified against a live Postgres instance this session (unlike
+Phase 6.1's nullable-column change, an index addition carries no data
+risk to independently verify by hand; needs
+`npm run db:generate && npm run db:migrate` in an environment with real
+network access to register it).
 
-Also noted for this session: the user reported `npx prisma generate` and
-`npx prisma migrate status` were already run successfully (in an
-environment with real database/network access), with the database
-reporting "Database schema is up to date!" This was **not** independently
-re-run in this sandbox — attempting `npx prisma generate` here reproduces
-the same `binaries.prisma.sh` `403 Forbidden` network restriction already
-documented in "Known bugs / issues" above, so it can't be confirmed from
-here. Recorded as user-reported, not sandbox-verified — flagged
-explicitly rather than presented as something this session confirmed
-directly.
+Migration SQL from the *previous* session
+(`20260828054500_subject_scope_nullable_workspace`) remains verified by
+hand against a real local PostgreSQL 16 + pgvector instance (see the
+Phase 6.1 session log below for the exact steps) — not re-verified this
+session since nothing about it changed.
 
 No integration/E2E tests exist in this project — only Vitest unit tests,
 concentrated on Zod validation schemas and pure utility functions. Phase
@@ -708,29 +1005,38 @@ during implementation).
 
 ## Current task
 
-Phase 6.1 (Groups access layer + CRUD) is implemented and verified as
-described in "Recent work completed" above. **Nothing has been committed
-or pushed** — the working tree contains the Phase 6.1 changes unstaged,
-left for user review per explicit instruction ("do not push directly
-unless I explicitly ask you to").
+Phase 6.3 (Groups UI) is implemented and verified as described in "Recent
+work completed" above, built on top of the still-uncommitted Phase 6.2
+work. **Nothing has been committed or pushed** — the working tree
+contains both the Phase 6.2 and Phase 6.3 changes unstaged, left for
+user review per explicit instruction ("do not push directly unless I
+explicitly ask you to"). Phase 6.1 itself is already committed and
+pushed (`bcbeab7`) — see the correction note at the top of this document.
 
 ## Exact next steps
 
-1. **User review of Phase 6.1** — nothing is committed yet; review the
-   diff (`prisma/schema.prisma`, `src/lib/access.ts` modified; several new
-   files under `src/lib/`, `src/lib/validation/`, `src/app/api/groups/`,
-   plus the new migration) and commit when satisfied.
+1. **User review of Phase 6.2 + 6.3 together** — nothing is committed
+   yet; review the combined diff (`git status`/`git diff` — see
+   "Recent work completed" for the full file list of both sessions) and
+   commit when satisfied. They can be committed together or split into
+   two commits (backend, then UI) — nothing in either session assumed
+   which.
 2. **Run `npm run db:generate && npm run db:migrate`** in an environment
-   with real network access to `binaries.prisma.sh` — this both registers
-   the new migration in Prisma's tracking table and clears the 6 new
-   Phase-6.1-specific typecheck errors described above.
-3. **Phase 6.2** (membership + invitations) is the next sub-phase in
-   sequence — but do not start it speculatively; wait for explicit
-   instruction, per `CLAUDE.md`'s phase-discipline rule.
-4. When Phase 6.4 (Subjects/Materials attach to Groups) starts, wire
-   `assertSubjectScopeInvariant` into `/api/subjects`'s create/update
-   routes (the `ResolvedAIScope` typing itself is already fixed — see
-   "Recent work completed").
+   with real network access to `binaries.prisma.sh` — registers the
+   Phase 6.2 `GroupInvitation` index migration (Phase 6.1's migration was
+   already confirmed registered by the user) and clears the Prisma-stub
+   typecheck errors described above. Phase 6.3 added no new migration.
+3. **Manual browser verification of Phase 6.3** is still outstanding —
+   this sandbox has no way to run the dev server. Before considering
+   Phase 6.3 fully done, actually click through: create a group, invite
+   someone, accept/decline an invitation as a second account, change a
+   role, remove/leave a member, and check mobile widths.
+4. **Phase 6.4** (Subjects/Materials attach to Groups) is the next
+   sub-phase in sequence — but do not start it speculatively; wait for
+   explicit instruction, per `CLAUDE.md`'s phase-discipline rule. When it
+   starts, wire `assertSubjectScopeInvariant` into `/api/subjects`'s
+   create/update routes (the `ResolvedAIScope` typing itself is already
+   fixed — see "Recent work completed").
 5. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
@@ -742,6 +1048,10 @@ unless I explicitly ask you to").
 7. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
    `recorder-panel.tsx`; dedupe the README Phase 5 line.
+8. If/when app-wide callback-URL support is ever added, revisit
+   `invitations/[token]/page.tsx`'s email-mismatch/unauthenticated flows
+   (see "Known limitations" in the Phase 6.3 session log) — not urgent,
+   flagged so it isn't forgotten.
 
 **Do not re-open either deferred issue** ("Known deferred issues (Phase 5
 closeout)" above) as part of Phase 6 or any other work unless the user
@@ -753,7 +1063,7 @@ explicitly asks for it again.
 npm install
 npm run test
 npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 44, all Prisma-cascade
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 58, all Prisma-cascade
 ```
 
 If any of these numbers differ from what's recorded above, this document

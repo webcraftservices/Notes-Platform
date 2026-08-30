@@ -3,6 +3,8 @@ import { create } from "zustand";
 interface UIStore {
   createSubjectOpen: boolean;
   setCreateSubjectOpen: (open: boolean) => void;
+  createGroupOpen: boolean;
+  setCreateGroupOpen: (open: boolean) => void;
   mobileNavOpen: boolean;
   setMobileNavOpen: (open: boolean) => void;
 }
@@ -17,6 +19,8 @@ interface UIStore {
 export const useUIStore = create<UIStore>((set) => ({
   createSubjectOpen: false,
   setCreateSubjectOpen: (open) => set({ createSubjectOpen: open }),
+  createGroupOpen: false,
+  setCreateGroupOpen: (open) => set({ createGroupOpen: open }),
   mobileNavOpen: false,
   setMobileNavOpen: (open) => set({ mobileNavOpen: open }),
 }));
