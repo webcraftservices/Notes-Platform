@@ -5,6 +5,7 @@ import { updateMaterialSchema } from "@/lib/validation/materials";
 import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
 import { getStorageService } from "@/lib/services/storage";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 export async function GET(_req: Request, { params }: { params: { materialId: string } }) {
   const user = await getSessionUser();
@@ -134,6 +135,17 @@ export async function DELETE(_req: Request, { params }: { params: { materialId: 
     // the row is gone either way and the file is orphaned rather than
     // dangerously left "deleted but still downloadable".
     await db.material.update({ where: { id: params.materialId }, data: { deletedAt: new Date() } });
+
+    if (existing.groupId) {
+      await createActivityLog(db, {
+        groupId: existing.groupId,
+        userId: user.id,
+        action: ActivityAction.MATERIAL_REMOVED,
+        targetType: "material",
+        targetId: existing.id,
+        metadata: { targetName: existing.title },
+      });
+    }
 
     if (existing.storageKey) {
       getStorageService()

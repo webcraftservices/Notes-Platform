@@ -8,6 +8,7 @@ import {
 } from "@/lib/access";
 import { updateSubjectSchema } from "@/lib/validation/hierarchy";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 export async function GET(_req: Request, { params }: { params: { subjectId: string } }) {
   const user = await getSessionUser();
@@ -46,6 +47,18 @@ export async function PATCH(req: Request, { params }: { params: { subjectId: str
         ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
       },
     });
+
+    if (subject.groupId) {
+      await createActivityLog(db, {
+        groupId: subject.groupId,
+        userId: user.id,
+        action: ActivityAction.SUBJECT_UPDATED,
+        targetType: "subject",
+        targetId: subject.id,
+        metadata: { targetName: subject.name },
+      });
+    }
+
     return NextResponse.json({ subject });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
@@ -77,6 +90,17 @@ export async function DELETE(_req: Request, { params }: { params: { subjectId: s
         data: { deletedAt: new Date() },
       }),
     ]);
+
+    if (existing.groupId) {
+      await createActivityLog(db, {
+        groupId: existing.groupId,
+        userId: user.id,
+        action: ActivityAction.SUBJECT_DELETED,
+        targetType: "subject",
+        targetId: existing.id,
+        metadata: { targetName: existing.name },
+      });
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

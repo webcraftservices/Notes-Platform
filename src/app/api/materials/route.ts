@@ -10,6 +10,7 @@ import { createLinkMaterialSchema, listMaterialsQuerySchema } from "@/lib/valida
 import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import type { Prisma } from "@prisma/client";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 export async function GET(req: Request) {
   const user = await getSessionUser();
@@ -112,6 +113,17 @@ export async function POST(req: Request) {
       status: "READY",
     },
   });
+
+  if (material.groupId) {
+    await createActivityLog(db, {
+      groupId: material.groupId,
+      userId: user.id,
+      action: ActivityAction.MATERIAL_ADDED,
+      targetType: "material",
+      targetId: material.id,
+      metadata: { targetName: material.title },
+    });
+  }
 
   return NextResponse.json({ material }, { status: 201 });
 }

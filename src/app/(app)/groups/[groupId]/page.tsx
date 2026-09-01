@@ -54,6 +54,18 @@ export default async function GroupDetailPage({ params }: { params: { groupId: s
     }),
   ]);
 
+  // Phase 6.6: initial Activity tab page, same "no per-row access check
+  // needed" reasoning as subjects/materials above — requireGroup already
+  // proved membership, and this is exactly what
+  // GET /api/groups/[groupId]/activity would return for page 1.
+  const ACTIVITY_PAGE_SIZE = 30;
+  const activityLogs = await db.activityLog.findMany({
+    where: { groupId: group.id },
+    orderBy: { createdAt: "desc" },
+    take: ACTIVITY_PAGE_SIZE,
+    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+  });
+
   return (
     <>
       <Topbar
@@ -95,6 +107,19 @@ export default async function GroupDetailPage({ params }: { params: { groupId: s
             canManage={canManage}
             subjects={subjects}
             materials={materials}
+            activity={activityLogs.map((log) => ({
+              id: log.id,
+              action: log.action,
+              metadata: log.metadata,
+              createdAt: log.createdAt.toISOString(),
+              actor: {
+                id: log.user.id,
+                name: log.user.name,
+                email: log.user.email,
+                image: log.user.image,
+              },
+            }))}
+            activityNextCursor={activityLogs.length === ACTIVITY_PAGE_SIZE ? activityLogs[activityLogs.length - 1]!.id : null}
           />
         </div>
       </main>

@@ -4,6 +4,8 @@ import { getSessionUser, getAccessibleGroup, getGroupRole, NotAuthorizedError } 
 import { canChangeMemberRole, canRemoveMember } from "@/lib/group-role";
 import { updateMemberRoleSchema } from "@/lib/validation/groups";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
+import { createNotification, createNotifications, getGroupAdminUserIds } from "@/lib/notifications";
 
 /**
  * Changes a member's role. Authorization follows the Phase 6.2 matrix via
@@ -46,10 +48,43 @@ export async function PATCH(
         throw new NotAuthorizedError();
       }
 
-      return tx.groupMember.update({
+      const previousRole = target.role;
+      const result = await tx.groupMember.update({
         where: { groupId_userId: { groupId: group.id, userId: params.userId } },
         data: { role: parsed.data.role },
       });
+
+      const targetUser = await tx.user.findUnique({
+        where: { id: params.userId },
+        select: { name: true, email: true },
+      });
+
+      await createActivityLog(tx, {
+        groupId: group.id,
+        userId: user.id,
+        action: ActivityAction.MEMBER_ROLE_CHANGED,
+        targetType: "member",
+        targetId: params.userId,
+        metadata: {
+          targetName: targetUser?.name ?? targetUser?.email,
+          previousRole,
+          newRole: result.role,
+        },
+      });
+
+      // Don't notify the actor about changing their own role (self-demotion
+      // isn't reachable per canChangeMemberRole, but this stays correct if
+      // that ever changes).
+      if (params.userId !== user.id) {
+        await createNotification(tx, {
+          userId: params.userId,
+          type: "GROUP_ROLE_CHANGED",
+          title: `Your role in ${group.name} changed to ${result.role.charAt(0)}${result.role.slice(1).toLowerCase()}`,
+          link: `/groups/${group.id}?tab=members`,
+        });
+      }
+
+      return result;
     });
 
     if (!updated) return NOT_FOUND();
@@ -98,6 +133,41 @@ export async function DELETE(
       await tx.groupMember.delete({
         where: { groupId_userId: { groupId: group.id, userId: params.userId } },
       });
+
+      if (isSelf) {
+        await createActivityLog(tx, {
+          groupId: group.id,
+          userId: user.id,
+          action: ActivityAction.MEMBER_LEFT,
+          targetType: "member",
+          targetId: params.userId,
+        });
+        const adminIds = await getGroupAdminUserIds(tx, group.id, user.id);
+        await createNotifications(tx, adminIds, {
+          type: "GROUP_MEMBER_LEFT",
+          title: `${user.name ?? "A member"} left ${group.name}`,
+          link: `/groups/${group.id}?tab=members`,
+        });
+      } else {
+        const targetUser = await tx.user.findUnique({
+          where: { id: params.userId },
+          select: { name: true, email: true },
+        });
+        await createActivityLog(tx, {
+          groupId: group.id,
+          userId: user.id,
+          action: ActivityAction.MEMBER_REMOVED,
+          targetType: "member",
+          targetId: params.userId,
+          metadata: { targetName: targetUser?.name ?? targetUser?.email },
+        });
+        await createNotification(tx, {
+          userId: params.userId,
+          type: "GROUP_MEMBER_REMOVED",
+          title: `You were removed from ${group.name}`,
+        });
+      }
+
       return target;
     });
 

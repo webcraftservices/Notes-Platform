@@ -3,6 +3,7 @@
 import { Search, Menu } from "lucide-react";
 import { useCommandPalette } from "@/components/shell/command-palette";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { NotificationBell } from "@/components/notifications/notification-bell";
 
 export function Topbar({ children, actions }: { children: React.ReactNode; actions?: React.ReactNode }) {
   const { setOpen } = useCommandPalette();
@@ -22,6 +23,7 @@ export function Topbar({ children, actions }: { children: React.ReactNode; actio
       </div>
       <div className="flex shrink-0 items-center gap-3">
         {actions}
+        <NotificationBell />
         <button
           onClick={() => setOpen(true)}
           className="flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-xs text-ink-faint transition-colors hover:border-ink-faint hover:text-ink-muted dark:border-line-dark dark:hover:text-white/70"

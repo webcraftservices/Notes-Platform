@@ -11,6 +11,7 @@ import {
 import { assertSubjectScopeInvariant } from "@/lib/subject-scope";
 import { createSubjectSchema } from "@/lib/validation/hierarchy";
 import { zodError, UNAUTHORIZED, FORBIDDEN, NOT_FOUND } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 export async function GET(req: Request) {
   const user = await getSessionUser();
@@ -84,6 +85,14 @@ export async function POST(req: Request) {
       assertSubjectScopeInvariant({ workspaceId: null, groupId });
       const subject = await db.subject.create({
         data: { ...rest, groupId, workspaceId: null },
+      });
+      await createActivityLog(db, {
+        groupId,
+        userId: user.id,
+        action: ActivityAction.SUBJECT_CREATED,
+        targetType: "subject",
+        targetId: subject.id,
+        metadata: { targetName: subject.name },
       });
       return NextResponse.json({ subject }, { status: 201 });
     }

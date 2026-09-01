@@ -3,6 +3,8 @@ import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/access";
 import { normalizeEmail } from "@/lib/email";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, CONFLICT } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
+import { createNotifications, getGroupAdminUserIds } from "@/lib/notifications";
 
 /**
  * Declines a Group invitation. Mirrors `accept/route.ts`'s validation
@@ -47,10 +49,31 @@ export async function POST(_req: Request, { params }: { params: { token: string 
     return FORBIDDEN();
   }
 
-  await db.groupInvitation.updateMany({
+  const consumed = await db.groupInvitation.updateMany({
     where: { token: params.token, status: "PENDING" },
     data: { status: "DECLINED" },
   });
+
+  if (consumed.count > 0) {
+    // Same "only log/notify if we actually won the race" guard as
+    // accept/route.ts — a concurrent accept/decline of the same token
+    // shouldn't produce two activity entries for one invitation.
+    await createActivityLog(db, {
+      groupId: invitation.groupId,
+      userId: dbUser.id,
+      action: ActivityAction.INVITATION_DECLINED,
+      targetType: "invitation",
+      targetId: invitation.id,
+      metadata: { email: invitation.email },
+    });
+
+    const adminIds = await getGroupAdminUserIds(db, invitation.groupId);
+    await createNotifications(db, adminIds, {
+      type: "GROUP_INVITATION_DECLINED",
+      title: `${invitation.email} declined your group invitation`,
+      link: `/groups/${invitation.groupId}?tab=members`,
+    });
+  }
 
   return NextResponse.json({ success: true });
 }

@@ -115,7 +115,7 @@ that plainly states which phase implements it — never a fake working UI:
 - Materials upload, storage, previews → **Phase 3**
 - Recording, transcription, timestamps → **Phase 4**
 - AI chat, RAG, structured notes, semantic search → **Phase 5**
-- Groups, invitations, realtime → **Phase 6**
+- Groups, invitations, realtime → ~~Phase 6~~ **done as of Phase 6.6 — see the "Phase 6 — Groups + collaboration" section below** (realtime is the one sub-item still deferred; see that section's Known limitations)
 - Google Drive/Docs import → **Phase 7**
 - Flashcards, quizzes, AI tutor → **Phase 8**
 - Row-level security, production rate limiting, observability → **Phase 9**
@@ -503,3 +503,156 @@ not just here.
       CRUD, command palette, notes editor autosave/versioning, material
       upload/preview/move/archive/delete
 - [ ] `npm run test`, `npm run lint` both pass clean
+
+---
+
+# Phase 6 — Groups + collaboration
+
+> Note: this file has no dedicated Phase 5 section (a pre-existing gap,
+> not something Phase 6.7 closeout is scoped to fix — see
+> `PROJECT_STATE.md` for the authoritative Phase 5 record). This section
+> covers Phase 6 only, added during Phase 6.7 closeout to bring this file
+> in line with the actually-implemented Groups architecture, sub-phases
+> 6.1 through 6.6.
+
+## What was built
+
+- **Group as a second collaboration boundary alongside Workspace**
+  (6.1): `Group`, `GroupMember` (with `MemberRole` — the same
+  OWNER/ADMIN/MEMBER/VIEWER enum `WorkspaceMember` already used),
+  `GroupInvitation`. A `Group` is created with the creator as `OWNER`
+  inside one transaction, so the "exactly one OWNER" invariant is never
+  briefly broken by a partial write.
+- **Subject/Material ownership made mutually exclusive between Workspace
+  and Group** (6.1 invariant, wired into the create/update routes as of
+  6.4): `Subject.workspaceId` became nullable; every Subject and Material
+  resolves to exactly one owning scope, asserted defensively at the point
+  of creation (`assertSubjectScopeInvariant`), not just implied by
+  which fields happen to be set.
+- **Membership + invitations** (6.2): role changes and member removal/
+  leave through one shared pure authorization function each
+  (`canChangeMemberRole`, `canRemoveMember` in `lib/group-role.ts`) so the
+  OWNER-protection rule lives in one place, not duplicated per route.
+  Invitations are token-based, expire, and require the accepting
+  account's email to match the invitation's email (checked against a
+  fresh `db.user` read, not the session) — token possession alone is
+  never sufficient to join.
+- **Groups UI** (6.3): group list, group detail page with tabs
+  (Overview/Members/Subjects/Materials/Activity/AI Assistant), invite/
+  accept/decline flows, member role management UI.
+- **Group-scoped Subjects and Materials** (6.4): the Subjects/Materials
+  tabs list a group's own content; creating/renaming/deleting a group
+  Subject requires ADMIN+ (`assertSubjectManageAccess`); a bare group
+  Material (no subject/chapter/topic) requires only membership to read,
+  mirroring the existing `assertScopeAccess` rule for bare workspace
+  scope.
+- **Group-scoped AI Assistant** (6.5): a group's AI Assistant tab
+  retrieves from everything the group has shared (`ResolvedAIScope`'s
+  `ownerType: "group"` branch), but each member's conversation thread is
+  their own (`AIConversation.userId`, unchanged from Phase 5) — shared
+  knowledge, private threads, never a multi-user shared conversation.
+- **Activity log + notifications** (6.6): `ActivityLog` (group-scoped,
+  actor + stable `action` string + optional metadata) and `Notification`
+  (per-user, typed, with read state) — both models existed in the schema
+  since Phase 1 but were unwired until this sub-phase. Now wired into
+  group creation, invite/accept/decline, role change, member remove/
+  leave, group Subject create/update/delete, and group Material add/
+  remove. `NotificationBell` in the shell Topbar (global, every
+  authenticated page) and a real `GroupActivityPanel` on the group page's
+  Activity tab (paginated, newest first) replaced the Phase 6.3
+  `PhasePlaceholder`.
+
+## Key decisions
+
+- **Membership-gated vs. management-gated, applied consistently.** Bare
+  group access (viewing the group, its Members/Subjects/Materials/
+  Activity lists, its AI Assistant) requires only membership — any role,
+  including VIEWER. *Mutating* group-owned structure (creating/renaming/
+  deleting a group Subject, changing a member's role, removing a member,
+  sending an invitation) requires ADMIN or OWNER. Removing yourself
+  ("leave") is the one exception allowed at any role below OWNER, since
+  self-removal isn't a privilege escalation risk the way removing someone
+  else is. OWNER can never be removed or have their role changed by
+  anyone, including themselves via this path.
+- **Activity/notification writes are atomic with the mutation they
+  describe wherever both happen in the same transaction** (e.g. removing
+  a member and logging `member.removed` either both commit or both roll
+  back) — `lib/activity.ts`/`lib/notifications.ts`'s helpers accept
+  either the shared `db` client or an active `tx` for exactly this
+  reason.
+- **Notification recipients are always derived server-side**, never from
+  a client-supplied `userId` — invite/role-change/removal notifications
+  go to the specific affected user; join/leave/decline notifications go
+  to the group's current OWNER/ADMIN members (looked up fresh at write
+  time), excluding the actor so nobody is notified about their own
+  action.
+- **No realtime layer was built for Phase 6** (spec §36's "Rahul uploaded
+  Lecture.mp3" live-update behavior). `NotificationBell` polls
+  `GET /api/notifications?unread=true` every 30 seconds instead of using
+  websockets/SSE — there is no realtime infrastructure anywhere in this
+  codebase yet, and building one for Phase 6 alone would have been a
+  parallel subsystem rather than a continuation of the existing
+  request/response architecture. Polling is the honest minimal behavior;
+  a real realtime layer is a standalone follow-up, not scoped to any
+  Phase 6 sub-phase.
+
+## Known limitations (by design, not oversights)
+
+- **No realtime collaboration** — see "Key decisions" above. Group state
+  (members, activity, notifications) updates on navigation/refresh/poll,
+  not instantly.
+- **Chapter/Topic/Material mutation inside a group Subject was
+  deliberately not expanded beyond Subject-level ADMIN+ gating during
+  Phase 6.4**, and this remains undecided as of Phase 6.6's close. Group
+  Subject creation/rename/delete requires ADMIN+; mutating a Chapter,
+  Topic, or Material *inside* an already-existing group Subject currently
+  follows the narrower existing per-resource access checks, not a
+  blanket ADMIN+ gate. Whether it should be tightened is an open product
+  decision, not yet made by any Phase 6 sub-phase.
+- **Material move-between-owners stays unrestricted**, same open decision
+  as above — not yet addressed.
+- **One documented, narrow invitation race**: the duplicate-pending-
+  invitation check (6.2) runs inside the same transaction as the create,
+  narrowing but not fully eliminating two truly simultaneous invite
+  requests both passing the check before either commits. Worst case is
+  two `GroupInvitation` rows for the same group/email, which
+  accept/decline both handle safely — see the code comment in
+  `src/app/api/groups/[groupId]/invitations/route.ts` for the full
+  reasoning on why a stricter guarantee (a partial unique index) wasn't
+  pursued.
+- **AI provider configuration is independent of Phase 6.** Group AI chat
+  (6.5) uses the same provider-free scaffold as Phase 5 — real retrieval
+  and scoping, no fabricated responses, but no actual model call happens
+  until a real `AI_API_KEY`/provider is configured per `docs/ai-setup.md`.
+  This was true before Phase 6 and nothing in Phase 6 changes it.
+- **Prisma engine binaries are unreachable in this sandbox**
+  (`binaries.prisma.sh` returns 403 — not on the environment's allowed-
+  domains list), which blocks `npx prisma generate`/`migrate dev`/
+  `migrate status` here. This is an environment limitation carried across
+  every Phase 6 sub-phase, not something introduced by or specific to
+  Phase 6 — see `PROJECT_STATE.md`'s "How to verify this document" for
+  the exact typecheck-error-count consequence and the local command to
+  clear it.
+- **No manual browser/live-database verification has been performed for
+  any Phase 6 sub-phase**, including 6.6 — this sandbox has no dev server
+  or reachable database. All verification below is `test`/`lint`/
+  `typecheck` only; see `PROJECT_STATE.md`'s "Exact next steps" for the
+  manual click-through checklist still outstanding.
+
+## Phase 6 verification checklist
+
+- [ ] As a group OWNER, invite a new member by email, then accept from
+      that account — role, activity log entry, and admin notification
+      all appear correctly
+- [ ] As a VIEWER, confirm you can read the group's Subjects/Materials/
+      Activity/AI Assistant tabs but every mutating action (invite, role
+      change, remove, create Subject) is hidden/rejected
+- [ ] Remove a member as ADMIN — the removed user's next session shows a
+      `GROUP_MEMBER_REMOVED` notification; a member leaving voluntarily
+      instead notifies the group's admins, not the leaver
+- [ ] Open the notification bell — unread badge count matches, clicking a
+      notification marks it read and navigates to the linked page
+- [ ] Confirm a non-member gets 403/404 from
+      `GET /api/groups/[groupId]/activity`, not just a hidden tab
+- [ ] `npm run test`, `npm run lint`, `npm run typecheck` — see
+      `PROJECT_STATE.md` for the exact currently-expected numbers

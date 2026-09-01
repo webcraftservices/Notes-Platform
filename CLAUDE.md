@@ -143,17 +143,24 @@ quietly building a partial version of it.
   npm run lint         # eslint
   npm run typecheck    # tsc --noEmit
   ```
-- **Typecheck currently has ~38 pre-existing errors — this is expected,
-  not a regression to fix.** They all stem from `@prisma/client` not
+- **Typecheck has pre-existing errors — this is expected, not a
+  regression to fix.** The exact count has grown across phases as the
+  schema has grown (some errors reference newly-added models/enums); as
+  of the Phase 6.5 commit it's 62. Always get the current number from
+  `PROJECT_STATE.md`'s "How to verify this document" section rather than
+  trusting a number in this file, since this file is updated far less
+  often than `PROJECT_STATE.md`. They all stem from `@prisma/client` not
   having been generated in whatever sandbox last ran `tsc` (no network
   route to `binaries.prisma.sh` in that environment) — every single one
   is either `Module '"@prisma/client"' has no exported member 'X'` or an
   implicit-`any` parameter cascading from that. Before treating a
-  typecheck error as new, run `npx tsc --noEmit` and diff against this
-  baseline; if the error references a Prisma-generated type/enum/model or
-  is an implicit-any parameter whose type traces back to a Prisma query
-  result, it's the same known issue. **In a real dev environment, run
-  `npm run db:generate` first — this makes the cascade disappear.**
+  typecheck error as new, run `npx tsc --noEmit` and diff against a
+  freshly re-verified baseline (`git stash -u` on a clean clone, not a
+  number copied from a prior session) — if the error references a
+  Prisma-generated type/enum/model or is an implicit-any parameter whose
+  type traces back to a Prisma query result, it's the same known issue.
+  **In a real dev environment, run `npm run db:generate` first — this
+  makes the cascade disappear.**
 - Never claim "tests pass" or "lint is clean" without having actually run
   the commands in this session and read the output.
 

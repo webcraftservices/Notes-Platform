@@ -3,6 +3,8 @@ import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/access";
 import { normalizeEmail } from "@/lib/email";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, CONFLICT } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
+import { createNotifications, getGroupAdminUserIds } from "@/lib/notifications";
 
 /**
  * Accepts a Group invitation.
@@ -50,7 +52,7 @@ export async function POST(_req: Request, { params }: { params: { token: string 
 
   const dbUser = await db.user.findUnique({
     where: { id: sessionUser.id },
-    select: { id: true, email: true },
+    select: { id: true, email: true, name: true },
   });
   if (!dbUser) return UNAUTHORIZED();
 
@@ -89,6 +91,28 @@ export async function POST(_req: Request, { params }: { params: { token: string 
     const member = await tx.groupMember.create({
       data: { groupId: invitation.groupId, userId: dbUser.id, role: invitation.role },
     });
+
+    await createActivityLog(tx, {
+      groupId: invitation.groupId,
+      userId: dbUser.id,
+      action: ActivityAction.MEMBER_JOINED,
+      targetType: "member",
+      targetId: dbUser.id,
+    });
+
+    // Admins/owners get a personal notification that someone joined;
+    // the joining user isn't notified about their own action (spec §7).
+    const group = await tx.group.findUnique({
+      where: { id: invitation.groupId },
+      select: { name: true },
+    });
+    const adminIds = await getGroupAdminUserIds(tx, invitation.groupId, dbUser.id);
+    await createNotifications(tx, adminIds, {
+      type: "GROUP_MEMBER_JOINED",
+      title: `${dbUser.name ?? dbUser.email} joined ${group?.name ?? "your group"}`,
+      link: `/groups/${invitation.groupId}?tab=members`,
+    });
+
     return { alreadyMember: false as const, member };
   });
 

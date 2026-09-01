@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/access";
 import { createGroupSchema } from "@/lib/validation/groups";
 import { zodError, UNAUTHORIZED } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 /** Lists every Group the caller belongs to, with their role and member count. */
 export async function GET() {
@@ -53,6 +54,16 @@ export async function POST(req: Request) {
     });
     await tx.groupMember.create({
       data: { groupId: created.id, userId: user.id, role: "OWNER" },
+    });
+    // No notification here: the owner is the only member so far, and per
+    // spec §7 an actor is never notified about their own action.
+    await createActivityLog(tx, {
+      groupId: created.id,
+      userId: user.id,
+      action: ActivityAction.GROUP_CREATED,
+      targetType: "group",
+      targetId: created.id,
+      metadata: { targetName: created.name },
     });
     return created;
   });

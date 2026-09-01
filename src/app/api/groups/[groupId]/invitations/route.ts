@@ -10,6 +10,8 @@ import {
 import { createInvitationSchema } from "@/lib/validation/groups";
 import { generateInvitationToken, invitationExpiryDate } from "@/lib/invitation-token";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, CONFLICT } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
+import { createNotification } from "@/lib/notifications";
 
 /**
  * Lists a group's pending invitations. ADMIN/OWNER only (spec §5) — the
@@ -115,16 +117,23 @@ export async function POST(req: Request, { params }: { params: { groupId: string
       });
 
       if (invitedUser) {
-        await tx.notification.create({
-          data: {
-            userId: invitedUser.id,
-            type: "GROUP_INVITATION",
-            title: `You've been invited to join ${group.name}`,
-            body: `${user.name ?? "Someone"} invited you to join "${group.name}" as ${role.toLowerCase()}.`,
-            link: `/invitations/${invitation.token}`,
-          },
+        await createNotification(tx, {
+          userId: invitedUser.id,
+          type: "GROUP_INVITATION",
+          title: `You've been invited to join ${group.name}`,
+          body: `${user.name ?? "Someone"} invited you to join "${group.name}" as ${role.toLowerCase()}.`,
+          link: `/invitations/${invitation.token}`,
         });
       }
+
+      await createActivityLog(tx, {
+        groupId: group.id,
+        userId: user.id,
+        action: ActivityAction.MEMBER_INVITED,
+        targetType: "invitation",
+        targetId: invitation.id,
+        metadata: { email, role },
+      });
 
       return { conflict: false as const, invitation };
     });

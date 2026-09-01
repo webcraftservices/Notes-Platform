@@ -1,8 +1,6 @@
 "use client";
 
-import { Activity } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { EditableHeader } from "@/components/shared/editable-header";
 import { Badge } from "@/components/ui/badge";
 import { Avatar } from "@/components/ui/avatar";
@@ -14,6 +12,7 @@ import {
 } from "@/components/groups/group-members-panel";
 import { GroupSubjectsPanel } from "@/components/groups/group-subjects-panel";
 import { GroupMaterialsPanel } from "@/components/groups/group-materials-panel";
+import { GroupActivityPanel, type GroupActivityEntry } from "@/components/groups/group-activity-panel";
 import { AIChatPanel } from "@/components/ai/ai-chat-panel";
 import type { SubjectCardData } from "@/components/subjects/subject-card";
 import type { MemberRole, Material } from "@prisma/client";
@@ -29,6 +28,8 @@ export function GroupTabs({
   canManage,
   subjects,
   materials,
+  activity,
+  activityNextCursor,
 }: {
   groupId: string;
   name: string;
@@ -40,6 +41,8 @@ export function GroupTabs({
   canManage: boolean;
   subjects: SubjectCardData[];
   materials: Material[];
+  activity: GroupActivityEntry[];
+  activityNextCursor: string | null;
 }) {
   return (
     <Tabs defaultValue="overview">
@@ -119,11 +122,10 @@ export function GroupTabs({
       </TabsContent>
 
       <TabsContent value="activity">
-        <PhasePlaceholder
-          icon={Activity}
-          title="Activity arrives in Phase 6.6"
-          description="A feed of who uploaded, edited, or invited what will live here."
-          phase="Phase 6.6 · Activity & notifications"
+        <GroupActivityPanel
+          groupId={groupId}
+          initialActivity={activity}
+          initialNextCursor={activityNextCursor}
         />
       </TabsContent>
 

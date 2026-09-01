@@ -5,6 +5,23 @@ import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
 import { extractMetadata } from "@/lib/metadata-extraction";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, jsonError } from "@/lib/api-response";
+import { ActivityAction, createActivityLog } from "@/lib/activity";
+
+/** Logs "material.added" once a group Material actually reaches READY (not on FAILED). */
+async function logMaterialAddedIfGroup(
+  material: { id: string; groupId: string | null; title: string },
+  userId: string,
+) {
+  if (!material.groupId) return;
+  await createActivityLog(db, {
+    groupId: material.groupId,
+    userId,
+    action: ActivityAction.MATERIAL_ADDED,
+    targetType: "material",
+    targetId: material.id,
+    metadata: { targetName: material.title },
+  });
+}
 
 export async function POST(_req: Request, { params }: { params: { materialId: string } }) {
   const user = await getSessionUser();
@@ -46,6 +63,7 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
             : { pageCount: metadata.pageCount, width: metadata.width, height: metadata.height },
         },
       });
+      await logMaterialAddedIfGroup(updated, user.id);
       return NextResponse.json({ material: updated });
     } catch {
       const updated = await db.material.update({
@@ -57,5 +75,6 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
   }
 
   const updated = await db.material.update({ where: { id: material.id }, data: { status: "READY" } });
+  await logMaterialAddedIfGroup(updated, user.id);
   return NextResponse.json({ material: updated });
 }

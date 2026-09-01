@@ -700,6 +700,11 @@ model ActivityLog {
 
   @@index([groupId])
   @@index([userId])
+  // Phase 6.6: every activity read is "this group's log, newest first"
+  // (GET /api/groups/[groupId]/activity) — the existing bare @@index([groupId])
+  // only helps the equality filter, not the ORDER BY createdAt DESC that
+  // follows it on every single call site. Additive, no data change.
+  @@index([groupId, createdAt])
 }
 
 // ----------------------------------------------------------------------------
@@ -813,6 +818,13 @@ model Notification {
   createdAt DateTime @default(now())
 
   @@index([userId])
+  // Phase 6.6: GET /api/notifications always filters by userId and orders
+  // by createdAt DESC; the notification bell's unread count filters by
+  // userId + readAt IS NULL. Two composite indexes cover both access
+  // patterns without duplicating the plain @@index([userId]) above (kept
+  // since some existing/future queries may filter by userId alone).
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
 }
 
 enum NotificationType {
@@ -824,6 +836,15 @@ enum NotificationType {
   AI_GENERATION_COMPLETE
   STORAGE_WARNING
   SYSTEM
+  // Phase 6.6: group activity events that need to reach a specific user
+  // personally (as opposed to ActivityLog, which is group-scoped history
+  // anyone with group access can read). Naming follows the existing
+  // GROUP_INVITATION / NEW_GROUP_MATERIAL convention (GROUP_<event>).
+  GROUP_MEMBER_JOINED
+  GROUP_MEMBER_LEFT
+  GROUP_MEMBER_REMOVED
+  GROUP_ROLE_CHANGED
+  GROUP_INVITATION_DECLINED
 }
 
 // Generic favoriting across content types via a discriminated target,

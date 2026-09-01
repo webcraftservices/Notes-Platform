@@ -1,9 +1,10 @@
 # PROJECT_STATE.md — Current State
 
 Last verified against actual code and a real test/lint/typecheck run on
-**2026-08-30**. If you're reading this in a later session, re-run the
-verification commands in the "How to verify this document" section
-before trusting anything time-sensitive here — code may have moved on.
+**2026-09-01** (Phase 6.7 closeout session). If you're reading this in a
+later session, re-run the verification commands in the "How to verify
+this document" section before trusting anything time-sensitive here —
+code may have moved on.
 
 > Cloned directly from `webcraftservices/Notes-Platform` on GitHub this
 > session — this document is reconciled against the live repo, not a
@@ -39,9 +40,11 @@ before trusting anything time-sensitive here — code may have moved on.
 
 ## Current phase
 
-**Phases 6.1–6.4 are COMPLETE, COMMITTED, AND PUSHED** to `main`
-(`c769f52 feat: attach subjects and materials to groups`, on top of
-`4c5c016` for 6.2/6.3 and `bcbeab7` for 6.1).
+**PHASE 6 — GROUP COLLABORATION: STATUS = COMPLETE / CLOSEOUT.**
+
+**Phases 6.1–6.5 are COMPLETE, COMMITTED, AND PUSHED** to `main`
+(`8f58f92 feat: add group-scoped AI chat`, on top of `c769f52` for 6.4,
+`4c5c016` for 6.2/6.3, and `bcbeab7` for 6.1).
 
 > **Third correction to this document (this session, Phase 6.5)**: the
 > previous revision's "Current phase" section said Phase 6.4 was
@@ -60,10 +63,37 @@ before trusting anything time-sensitive here — code may have moved on.
 > "committed"/"uncommitted" claim in this document as provisional until
 > checked against `git log`/`git status` directly.
 
-**Phase 6.5 (group-scoped AI chat) is IMPLEMENTED and verified in this
-sandbox, but NOT YET COMMITTED** — left in the working tree for user
-review, per every prior phase's git-safety rule. See "Recent work
-completed" for the full session log.
+**Phase 6.6 (activity log + notifications) is IMPLEMENTED and verified in
+this sandbox, NOT YET COMMITTED** — left in the working tree for user
+review, per every prior phase's git-safety rule.
+`ActivityLog`/`Notification`/`NotificationType` already existed in the
+schema since Phase 1 but were completely unwired before the Phase 6.6
+session; that session wired them into groups/membership/subjects/
+materials and added the Activity tab + notification bell UI. The Group
+detail page's Activity tab now shows real group activity (newest first,
+paginated) — the `PhasePlaceholder` naming this phase is gone; the
+Subjects/Materials tabs (Phase 6.4) and AI Assistant tab (Phase 6.5) were
+already real. The authenticated shell's Topbar now has a notification
+bell (unread badge, dropdown, mark-as-read, click-to-navigate) on every
+page. See "Recent work completed" for the full session log.
+
+**Phase 6.7 (docs/closeout) is this session.** Its scope is
+documentation only — `PROJECT_STATE.md` (this file), `docs/ARCHITECTURE.md`
+(added a "Phase 6 — Groups + collaboration" section, since none existed;
+fixed one stale "Groups → Phase 6 deferred" bullet), and `CLAUDE.md` (one
+stale typecheck-baseline number corrected). **No application source,
+schema, migration, test, or dependency was touched this session** — the
+only non-documentation files in the working tree are the Phase 6.6
+implementation files carried over unchanged from that session, still
+uncommitted, still awaiting the same review. Phase 6.6's code itself was
+not re-touched or re-designed during 6.7 — only described accurately.
+
+With Phase 6.7 closeout complete (as of this document), **Phase 6 as a
+whole (6.1 through 6.7) is COMPLETE** — 6.1–6.5 are committed/pushed;
+6.6's code and 6.7's documentation are both implemented and verified in
+this sandbox but sit together, uncommitted, for one combined review pass
+covering both. **Phase 7 has NOT been started** — see "Document Phase 7
+boundary" below.
 
 Three architectural decisions were confirmed by the user before Phase 6.1
 implementation (see "Recent work completed" below for the full
@@ -85,12 +115,6 @@ rationale):
 3. Invitation acceptance requires the accepting account's email to
    match the invitation's email — implemented as part of Phase 6.2.
 
-Phase 6.6 (activity log + notifications) and 6.7 (docs/closeout) are
-**not started**. The Group detail page's Activity tab is still an honest
-`PhasePlaceholder` naming the phase that will implement it; the
-Subjects/Materials tabs (Phase 6.4) and AI Assistant tab (Phase 6.5) are
-now real.
-
 Phase 5 (AI notes + RAG + AI chat) is COMPLETE and formally closed. Built
 provider-free by explicit user decision — no AI/embedding SDK, no API
 keys, no fake responses. See `docs/ai-setup.md` for how to activate a
@@ -108,7 +132,7 @@ Phases 1–5, per the master prompt's own phase breakdown:
 - [x] Phase 3 — Notes editor + materials
 - [x] Phase 4 — Audio recording + transcription
 - [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
-- [~] Phase 6 — Groups + collaboration (**IN PROGRESS** — 6.1–6.4 committed+pushed; 6.5 implemented, uncommitted (this session); 6.6–6.7 not started; see "Recent work completed")
+- [~] Phase 6 — Groups + collaboration (**CLOSEOUT COMPLETE** — 6.1–6.5 committed+pushed; 6.6 code + 6.7 docs implemented and verified in this sandbox, both uncommitted, awaiting one combined review; see "Recent work completed")
 - [ ] Phase 7 — Google Drive/Docs (not started)
 - [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
 - [ ] Phase 9 — Security + performance + production polish (not started)
@@ -227,18 +251,32 @@ fully wired end-to-end but will always fail with a clear configuration
 error today** — no `AIService`/`EmbeddingService` implementation exists,
 by explicit Phase 5 scope decision.
 
-**Groups (Phase 6.1, backend-only)**: `Group`/`GroupMember` CRUD is real
-and fully authorized server-side. `POST /api/groups` creates a Group and
-makes the caller its OWNER atomically (one `db.$transaction`);
-`GET /api/groups` lists the caller's groups with role + member count;
-`GET/PATCH/DELETE /api/groups/[groupId]` enforce the OWNER > ADMIN >
-MEMBER > VIEWER hierarchy server-side (`lib/access.ts`, `lib/group-role.ts`)
-— read requires any membership, edit requires ADMIN+, delete requires
-OWNER. `Subject.workspaceId` is now nullable so a future Subject can
-belong to a Group instead of a Workspace (`lib/subject-scope.ts` enforces
-"exactly one of the two," not yet wired into any route). No UI, no
-membership/invitation flow, no group-owned Subjects/Materials, no
-group-scoped AI yet — see "What is explicitly NOT implemented."
+**Groups (Phase 6, COMPLETE through 6.6)**: `Group`/`GroupMember`/
+`GroupInvitation` CRUD, membership, and role hierarchy are real and fully
+authorized server-side. `POST /api/groups` creates a Group and makes the
+caller its OWNER atomically; `GET /api/groups` lists the caller's groups
+with role + member count; `GET/PATCH/DELETE /api/groups/[groupId]`
+enforce OWNER > ADMIN > MEMBER > VIEWER server-side (`lib/access.ts`,
+`lib/group-role.ts`) — read requires any membership, edit requires
+ADMIN+, delete requires OWNER; OWNER can never be demoted/removed via any
+route. `Subject.workspaceId` is nullable and `/api/subjects`'s
+create/update routes resolve to either a Workspace or a Group scope (one
+of the two, never both — Phase 6.4). Token-based invitations with expiry
+and accepting-account email match; a full Groups UI (list, detail page
+with Members/Subjects/Materials/Activity/AI Assistant tabs, invite/
+accept/decline flows) exists (Phase 6.3). Group-scoped Subjects (ADMIN+
+to create/rename/delete) and Materials (bare group Material readable by
+any member) exist (Phase 6.4). Group-scoped AI Assistant — shared group
+knowledge retrieval, private per-user conversation threads — exists
+(Phase 6.5). `ActivityLog`/`Notification` are wired into group create,
+invite/accept/decline, role change, member remove/leave, group Subject
+create/update/delete, and group Material add/remove, with a real Activity
+tab UI and a global `NotificationBell` in the shell Topbar (Phase 6.6).
+**No realtime** (live in-page updates without refresh/poll) — the
+notification bell polls every 30s instead; there is no websocket/SSE
+infrastructure anywhere in this codebase. See `docs/ARCHITECTURE.md`'s
+"Phase 6 — Groups + collaboration" section for the full architecture and
+known limitations.
 
 ## What is explicitly NOT implemented (don't assume otherwise)
 
@@ -255,21 +293,27 @@ group-scoped AI yet — see "What is explicitly NOT implemented."
 - No real streaming for AI chat — `AIService.chat()` is Promise-based; the
   chat UI waits for the full response. Documented as future work in
   `docs/ai-setup.md`, not faked with a client-side typing effect.
-- No Groups membership, invitations, UI, or Group-scoped content (Phase
-  6.2–6.7) — `/groups` is still a static placeholder page. Group
-  create/read/update/delete and the role-hierarchy access layer *are*
-  implemented as of Phase 6.1 (`/api/groups`, `/api/groups/[groupId]`,
-  `lib/access.ts`'s `getGroupRole`/`requireGroupRole`/`getAccessibleGroup`/
-  `requireGroup`) — see "Recent work completed" — but nothing yet lets a
-  user reach a Group through the UI, invite anyone, or attach a Subject/
-  Material to one. Group-scoped AI conversations
-  (`AIConversation.groupId`) are still unresolved in `getAccessibleAIScope`
-  until Phase 6.5.
+- No Groups Phase 6.7+ functionality beyond documentation/closeout — 6.1
+  through 6.6 (backend, membership/invitations, UI, group-scoped
+  Subjects/Materials, group-scoped AI, activity/notifications) are all
+  implemented; see the "Groups" entry in "What's actually implemented"
+  above for the accurate, current state and `docs/ARCHITECTURE.md`'s
+  "Phase 6" section for the architecture and known limitations.
 - No Google Drive/Docs import (Phase 7).
 - No flashcards/quizzes/AI tutor (Phase 8).
 - No production hardening — no Postgres row-level security, no real
   distributed rate limiting (in-memory only), no observability/logging
   infra (Phase 9).
+- **No realtime collaboration anywhere in this codebase** — Phase 6.6's
+  notification bell polls every 30s rather than pushing live updates; a
+  group member uploading a material does not appear to other members
+  without a refresh/poll. No websocket/SSE infrastructure exists. See
+  `docs/ARCHITECTURE.md`'s "Phase 6" section, "Known limitations."
+- **Group Chapter/Topic/Material mutation *inside* an existing group
+  Subject is not role-gated beyond the existing per-resource checks** —
+  only group Subject create/rename/delete itself requires ADMIN+ (Phase
+  6.4). Whether to tighten this further is an open, undecided product
+  question, not yet addressed by any Phase 6 sub-phase including 6.6.
 - No client-side audio chunking for the Whisper provider (AssemblyAI
   doesn't need it; Whisper-path long files just fail with a clear error
   telling the user to switch providers).
@@ -283,6 +327,267 @@ group-scoped AI yet — see "What is explicitly NOT implemented."
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: Phase 6.7 — Documentation / closeout
+
+**Ground-truth audit**: fresh clone, `git log` confirms HEAD =
+`8f58f92 feat: add group-scoped AI chat`, `git status` shows the Phase
+6.6 working-tree changes exactly as the prior session left them (12
+modified + 12 new files, nothing committed) — matches this document's
+own "Current phase" claims exactly, so no correction note was needed
+this time (contrast with the four prior sessions, each of which found
+this document out of sync with `git log`).
+
+**Scope**: documentation only, per the phase brief. No application
+source, Prisma schema, migration, test, or dependency file was touched.
+Confirmed by `git status --short` before finishing: every changed file
+is either `PROJECT_STATE.md`, `docs/ARCHITECTURE.md`, `CLAUDE.md`, or a
+Phase 6.6 file carried over unmodified from the prior session.
+
+**Files changed this session**: `PROJECT_STATE.md` (this file — see
+below for what was corrected), `docs/ARCHITECTURE.md` (added a
+"Phase 6 — Groups + collaboration" section — none existed before, despite
+Phase 6.1–6.6 all being implemented; fixed one stale bullet in the
+Phase-1-era "What's deliberately deferred" list that still said Groups
+was fully future work), `CLAUDE.md` (corrected one stale typecheck
+baseline figure, "~38" → a pointer to the live number in
+`PROJECT_STATE.md`, since that figure has drifted across every phase
+since Phase 1/2 and this file is updated far less often).
+
+**What was corrected in `PROJECT_STATE.md`**:
+- "Current phase" section restructured: removed a now-redundant
+  duplicate "Phase 6.5 COMPLETE COMMITTED PUSHED" paragraph (the header
+  already states it), replaced the old "Phase 6.6 implemented / Phase 6.7
+  not started" closing paragraph with an accurate one reflecting that
+  6.7 is *this* session, and added the top-line "PHASE 6 — GROUP
+  COLLABORATION: STATUS = COMPLETE / CLOSEOUT" statement the 6.7 brief
+  asked for.
+- The "Groups" entry under "What's actually implemented" was **still
+  describing the Phase 6.1-only state** ("No UI, no membership/
+  invitation flow, no group-owned Subjects/Materials, no group-scoped AI
+  yet") despite 6.2 through 6.6 having been implemented and committed/
+  verified in the sessions since — the single most stale claim found
+  this session. Rewritten to describe the actual, current, all-of-6.1–6.6
+  state.
+- The matching bullet under "What is explicitly NOT implemented" ("No
+  Groups membership, invitations, UI, or Group-scoped content (Phase
+  6.2–6.7)") was equally stale and equally false by now — replaced with
+  an accurate pointer to the rewritten "What's actually implemented"
+  entry, plus the two genuinely-still-true limitations (no realtime; the
+  undecided Chapter/Topic/Material-inside-group-Subject role-gating
+  question) called out explicitly rather than buried in a phase-range
+  bullet that no longer meant what it used to.
+- "Tests performed" section: the existing content was a **stale Phase
+  6.2-session snapshot** (164/164 tests, 50 typecheck errors — both long
+  superseded) still sitting under a heading that read as current. Kept
+  for historical record (this document's own established pattern is to
+  preserve prior sessions' logs, not delete them) but relabeled
+  "Historical: Phase 6.2 session (kept for record, do not treat as
+  current)", with a freshly-run, clearly-current verification block added
+  above it for this session.
+- "Exact next steps": updated to reflect 6.7 being done and Phase 7 being
+  the explicitly-not-started next phase, carried forward every
+  still-genuinely-outstanding item unchanged (Prisma generate, manual
+  browser verification of 6.5/6.6, the two undecided Phase 6.4/6.6
+  permission questions, Phase 5 real-database verification, AI provider
+  activation, small cleanups), and added one new item noting the
+  realtime gap as a candidate for future work.
+- The `- [~] Phase 6 — Groups + collaboration (...)` line in the phase
+  checklist near the top of this document updated from "IN PROGRESS" to
+  "CLOSEOUT COMPLETE."
+
+**Verification** (re-run fresh this session, not assumed from the prior
+session's numbers, specifically to confirm the "no code changed" claim
+above): `npm run test` → **199/199 passing** (unchanged from Phase 6.6,
+as expected for a docs-only session). `npm run lint` → **0 errors, 0
+warnings**. `npm run typecheck` → **68 errors**, identical count to the
+Phase 6.6 session's own result, confirming no regression was introduced
+by the documentation edits. `npx prisma migrate status` → blocked, same
+`binaries.prisma.sh` 403 as every prior sandbox session; no database is
+configured/reachable here either, so migration status genuinely cannot
+be checked from this environment regardless of the network block.
+
+**Known limitations** (Phase 6, all sub-phases, restated here per the
+6.7 brief's Step 4 — none invented this session, all carried forward from
+where they were originally documented):
+1. Prisma engine binaries unreachable in this sandbox (every Phase 6
+   sub-phase since 6.1).
+2. No manual browser/live-database verification has been performed for
+   any Phase 6 sub-phase, including 6.6 — this sandbox has no dev server
+   or reachable database.
+3. Chapter/Topic/Material mutation inside a group Subject was
+   deliberately not expanded beyond Subject-level ADMIN+ gating during
+   Phase 6.4, and remains an open, undecided product question as of
+   6.6's close.
+4. The invitation duplicate-pending-request race narrowed (not fully
+   eliminated) by Phase 6.2's in-transaction check — see the code comment
+   in `src/app/api/groups/[groupId]/invitations/route.ts`.
+5. AI provider configuration (Phase 5) remains independent of and
+   unaffected by Phase 6 — Group AI chat (6.5) uses the same
+   provider-free scaffold, real everything except the actual model call.
+6. No realtime collaboration — restated explicitly this session since it
+   was previously only implicit (spec §36 was simply never marked done
+   or not-done anywhere before now). Now explicitly documented in both
+   `PROJECT_STATE.md` and `docs/ARCHITECTURE.md`'s new Phase 6 section.
+
+**Git**: nothing committed, nothing pushed, this session or the prior
+one. `git status --short` at the end of this session shows exactly:
+the Phase 6.6 implementation files (unchanged from that session) plus
+`PROJECT_STATE.md`/`docs/ARCHITECTURE.md`/`CLAUDE.md` (this session's
+documentation edits). **Phase 7 was NOT started** — no Google Drive/Docs
+code, no new routes, no new UI beyond what Phase 6.6 already added.
+
+### Session: Phase 6.6 — Group activity log + notifications
+
+Started from a fresh clone at `8f58f92 feat: add group-scoped AI chat`
+(confirmed via `git log`/`git status` — clean tree). This means Phase 6.5
+**was actually already committed** by the time this session started,
+contrary to this document's then-current "IMPLEMENTED... but NOT YET
+COMMITTED" claim in the "Current phase" section — the same
+never-updated-after-commit failure mode flagged three times already
+above (see the numbered correction notes at the top of this document).
+The "Current phase" section has been corrected accordingly for this
+revision.
+
+**Ground-truth audit performed before writing any code**: read
+`PROJECT_STATE.md`, `CLAUDE.md`, `prisma/schema.prisma`, and every route
+listed in the Phase 6.6 brief (groups CRUD, invitations create/accept/
+decline, members PATCH/DELETE, subjects create/update/delete, materials
+create/complete/delete), plus `lib/access.ts`, `lib/api-response.ts`,
+`lib/group-role.ts`, the existing UI shell/components, and the existing
+test suite's conventions.
+
+**Finding: `ActivityLog`, `Notification`, and `NotificationType` already
+existed in the schema** (added in the Phase 1 schema design, alongside
+every other model in the master ERD) but were **completely unwired** —
+the only prior usage anywhere in the codebase was a single inline
+`tx.notification.create(...)` call inside the Phase 6.2 invitations
+route. No migration was needed for the models themselves; only two
+additive changes were needed: three composite indexes
+(`ActivityLog(groupId, createdAt)`, `Notification(userId, createdAt)`,
+`Notification(userId, readAt)`) for the access patterns this phase's
+reads actually use, and five new `NotificationType` enum values
+(`GROUP_MEMBER_JOINED/LEFT/REMOVED`, `GROUP_ROLE_CHANGED`,
+`GROUP_INVITATION_DECLINED`) for membership events the existing enum had
+no type for.
+
+**Implementation** (18 files — 12 modified, 6 new library/route files,
+plus 3 new UI components and a hand-written migration; no unrelated file
+touched):
+
+*New library helpers:*
+- `src/lib/activity.ts` — `ActivityAction` constants (`"group.created"`,
+  `"member.invited"`, `"member.joined"`, `"member.left"`,
+  `"member.removed"`, `"member.role_changed"`, `"invitation.declined"`,
+  `"subject.created/updated/deleted"`, `"material.added/removed"`,
+  following the dot-separated convention already documented on
+  `ActivityLog.action` in the schema) and `createActivityLog(client,
+  input)`, which accepts either the shared `db` client or an active
+  `tx` so writes can be atomic with the mutation they describe.
+- `src/lib/notifications.ts` — `createNotification`, `createNotifications`
+  (bulk, for "every admin/owner" fan-out), and `getGroupAdminUserIds`
+  (OWNER/ADMIN lookup with optional actor exclusion, so actors are never
+  notified about their own action per spec §7).
+- `src/lib/activity-style.ts` — pure `formatActivityMessage(entry)`,
+  turning an ActivityLog row into a sentence for the UI ("Nishant created
+  the group", "Priya changed Rahul's role to Admin"). Kept pure (no db
+  access) so it's covered by a plain unit test, same reasoning as the
+  existing `group-style.ts`.
+- `src/lib/validation/notifications.ts` — `updateNotificationSchema =
+  z.object({ read: z.boolean() })`, the only mutable field on a
+  Notification from the client's perspective.
+
+*Wired into existing routes* (activity log + notification, where
+applicable, inside the same transaction as the mutation they describe):
+group creation; invite sent; invitation accepted (notifies admins,
+logs `member.joined`); invitation declined (notifies admins, logs
+`invitation.declined`); member role changed (notifies the affected
+member); member removed (notifies the removed user) vs. member left
+(notifies admins) — both through the same `DELETE
+/api/groups/[groupId]/members/[userId]`, branched on `isSelf`; group
+Subject create/update/delete; group Material added (both the LINK-create
+path and the upload `.../complete` path, only once a material actually
+reaches `READY`) and removed. AI conversation routes were deliberately
+left untouched — per spec §6, private per-user AI chat must never leak
+into group activity.
+
+*New API routes:*
+- `GET /api/groups/[groupId]/activity` — group-scoped, membership
+  required (`getAccessibleGroup`, same null-vs-throw/404-vs-403 split
+  every other group-scoped list route already uses), newest first,
+  cursor-paginated (`?cursor=<id>`, 30/page — no other route in this
+  codebase paginates yet, so this is the smallest workable cursor scheme
+  rather than a new convention), actor included via one join (no N+1).
+- `GET /api/notifications` — recipient always derived from the session,
+  never a client param; `?unread=true` filter; same cursor pagination.
+- `PATCH /api/notifications/[notificationId]` — ownership checked against
+  the fetched row's `userId` (404 if missing, 403 if not the owner's);
+  only `readAt` is ever written.
+
+*New UI:*
+- `src/components/notifications/notification-bell.tsx` — bell icon in
+  `Topbar` (so it's on every authenticated page), polls the unread count
+  every 30s (no realtime/websocket infrastructure exists anywhere in this
+  codebase yet, so polling is the correct minimal behavior, not a
+  half-built realtime layer), lazy-loads the full list on open, marks
+  read + navigates on click.
+- `src/components/groups/group-activity-panel.tsx` — replaces the
+  `PhasePlaceholder` on the Group page's Activity tab; receives the first
+  page server-fetched in `page.tsx` (same convention as
+  `GroupMembersPanel`/`GroupMaterialsPanel`) and paginates further pages
+  itself via the new activity API.
+- `src/app/(app)/groups/[groupId]/page.tsx` — fetches the first activity
+  page alongside the existing members/invitations/subjects/materials
+  fetches and passes it to `GroupTabs` → `GroupActivityPanel`.
+
+**Migration**: `prisma/migrations/20260830100000_group_activity_notifications/migration.sql`,
+hand-written (project convention — no `prisma migrate dev` available in
+this sandbox, same as every prior Phase 6 sub-phase), 5 `ALTER TYPE ...
+ADD VALUE` statements followed by 3 `CREATE INDEX` statements. No
+existing migration modified or deleted; no data changes.
+
+**Tests**: 15 new tests — 10 for `formatActivityMessage` (one per action
+type, plus fallback/missing-metadata cases) and 5 for
+`updateNotificationSchema`. Deliberately did not attempt DB-mocked tests
+for the route handlers themselves, matching this project's established
+"pure helpers get unit tests, DB-touching authorization logic doesn't get
+mocked" convention (see `group-role.test.ts`, `subject-scope.test.ts`).
+
+**Verification**:
+- `npx vitest run` → **199/199 passing** (184 existing + 15 new), 0
+  failures.
+- `npx eslint .` → **0 errors, 0 warnings**.
+- `npx tsc --noEmit` → **68 errors**, vs. a freshly re-verified baseline
+  of **62** (confirmed via `git stash -u` + `tsc` on the untouched clone,
+  not assumed from a prior session's stale count). Of the 6 new errors:
+  5 are the exact same `Prisma`-namespace-cascade class already present
+  62 times in baseline (`Module '"@prisma/client"' has no exported member
+  'X'` / `Namespace Prisma has no exported member 'XWhereInput'`) — caused
+  by `npx prisma generate` being blocked in this sandbox (`binaries.prisma.sh`
+  returns 403; it isn't on the environment's allowed-domains list), not by
+  anything wrong in the new code. The 5 new instances are exactly the
+  places new code references `ActivityLog`, `User`, `InputJsonValue`, or
+  `NotificationType` — types/enum-members that are correct in
+  `schema.prisma` but don't exist in the *stale, un-regenerated* client
+  still sitting in `node_modules/.prisma`. **The 1 remaining new error**
+  (`page.tsx`, implicit-any on a `.map((log) => ...)` callback) matches
+  the exact same pre-existing, already-baselined pattern immediately
+  above it in the same file (`.map((m) => ...)`, `.map((inv) => ...)`) —
+  a known JSX-inline-arrow-function inference gap in this codebase's
+  tsconfig, not a new class of problem.
+- `npx prisma generate` / `npx prisma migrate dev` — **blocked**: fetching
+  `https://binaries.prisma.sh/...` returns 403 in this sandbox. Documented
+  here rather than faked; see "Exact next steps" below for the exact
+  command to run locally.
+
+**Git**: nothing committed, nothing pushed. `git diff --stat` confirms
+every changed/new file belongs to Phase 6.6 (or, for `page.tsx`/
+`group-tabs.tsx`, is the minimal touch needed to wire the new Activity
+panel in). `git diff --check` clean (no whitespace errors). A stray
+`package-lock.json` diff produced by this sandbox's own `npm install`
+(an `fsevents` `"dev": true` flag normalization, unrelated to Phase 6.6)
+was reverted with `git checkout -- package-lock.json` before finishing,
+so it doesn't show up in the diff Nishant reviews.
 
 ### Session: Phase 6.5 — Group-scoped AI chat
 
@@ -1257,6 +1562,43 @@ against Claude's last-known state:
 
 ## Tests performed and their results (this session, verified live)
 
+### Verification (Phase 6.7 closeout session) — current, supersedes the numbers below
+
+```
+npm run test          →  19 test files, 199/199 tests passed
+                          (184 baseline through Phase 6.5 + 15 new in
+                          Phase 6.6: activity-style.test.ts,
+                          validation/__tests__/notifications.test.ts)
+npm run lint           →  0 errors, 0 warnings
+npm run typecheck      →  68 errors (62 baseline at the Phase 6.5 commit,
+                           re-verified fresh via `git stash -u` this
+                           session, + 6 new). Of the 6: 5 are the same
+                           Prisma-client-cascade class already present 62
+                           times in baseline — new instances caused by
+                           Phase 6.6 code referencing ActivityLog/User/
+                           InputJsonValue/NotificationType, types/enum
+                           members that are correct in schema.prisma but
+                           absent from the stale, un-regenerated client
+                           still in node_modules/.prisma (prisma generate
+                           is network-blocked here, see below). The 6th
+                           is an implicit-any on a .map() callback in
+                           page.tsx matching the exact same pre-existing,
+                           already-baselined pattern on the two lines
+                           immediately above it in the same file.
+npx prisma migrate status →  Error: binaries.prisma.sh 403 Forbidden
+                              (not on this sandbox's allowed-domains
+                              list) — same block as db:generate/migrate,
+                              confirmed again this session, not assumed
+                              carried over.
+```
+
+This is a **documentation-only session** (Phase 6.7) — no source, schema,
+test, or dependency file was touched, so these numbers are unchanged from
+what the Phase 6.6 session already reported; they were re-run fresh here
+specifically to confirm that claim rather than assume it.
+
+### Historical: Phase 6.2 session (kept for record, do not treat as current)
+
 ```
 npm run test        →  16 test files, 164/164 tests passed
                         (127 baseline + 37 new: email.test.ts,
@@ -1314,49 +1656,66 @@ attributable to Phase 6.5; no unrelated file was touched.
 
 ## Exact next steps
 
-1. **User review of Phase 6.5** — nothing is committed yet; review the
-   diff (see "Recent work completed" for the full file list) and commit
-   when satisfied.
-2. **Manual browser verification of Phase 6.5** is still outstanding —
+1. **User review of Phase 6.6 + Phase 6.7** — nothing is committed yet;
+   review the diff (see "Recent work completed" for the full file list —
+   Phase 6.6 is code, Phase 6.7 is documentation-only) and commit when
+   satisfied, together or separately as preferred. Phases 6.1–6.5 are
+   already committed/pushed.
+2. **Run `npx prisma generate` (then `npx prisma migrate dev`)** in an
+   environment with real network access to `binaries.prisma.sh` — Phase
+   6.6's migration is written and correct but has not been applied to any
+   real database in this sandbox (no database or network access to the
+   Prisma engine binaries here). This also clears all 6 of the
+   Prisma-stub typecheck errors introduced by Phase 6.6's code (see
+   "Tests performed" above) — they're a byproduct of the stale,
+   un-regenerated client, not real bugs.
+3. **Manual browser verification of Phase 6.6** is still outstanding —
    this sandbox has no way to run the dev server or reach a database.
-   Before considering Phase 6.5 fully done, actually click through: as
-   any member (including VIEWER) of a group, open the group's AI
-   Assistant tab and confirm a conversation loads/persists per-user; as a
-   non-member, confirm the underlying `/api/ai/conversations?groupId=...`
-   API 403s rather than just the tab being hidden; confirm a question
-   asked in a group's AI chat only retrieves materials attached directly
-   to that group (`Material.groupId`), not materials inside a group-owned
-   Subject/Chapter/Topic (those already use the narrower
-   subject/chapter/topic scope, unchanged from Phase 6.4) and not another
-   group's materials.
-3. **Run `npm run db:generate && npm run db:migrate`** in an environment
-   with real network access to `binaries.prisma.sh` — no new migration
-   was added this phase (or Phase 6.4), so this just clears the
-   Prisma-stub typecheck cascade (registers nothing new).
-4. **Phase 6.6** (activity log + notifications) is the next sub-phase in
-   sequence — but do not start it speculatively; wait for explicit
-   instruction, per `CLAUDE.md`'s phase-discipline rule.
-5. **Decide on the two "Known limitations" flagged in the Phase 6.4
-   session log** before or during Phase 6.6 — whether Chapter/Topic/
-   Material mutation inside a group Subject should eventually be
-   role-gated the same way Subject-level mutation now is, and whether
-   Material move-between-owners should stay unrestricted. Neither was a
-   decision Phase 6.4 or 6.5 was authorized to make.
-6. **Verify Phase 5 against a real database**: run `npm run db:generate`
+   Before considering Phase 6.6 fully done, actually click through: open
+   a group's Activity tab as a member and confirm real events appear
+   newest-first (invite/accept/decline, role change, remove/leave,
+   subject create/update/delete, material add/remove); confirm a
+   non-member (or a member who left/was removed) gets a 403/404 from
+   `GET /api/groups/[groupId]/activity`, not just a hidden tab; open the
+   notification bell and confirm the unread badge, mark-as-read, and
+   click-to-navigate all work; confirm `PATCH
+   /api/notifications/[notificationId]` 403s when the notification
+   belongs to a different user.
+4. **Manual browser verification of Phase 6.5** is still outstanding too
+   (carried over, unchanged from before this session) — see the Phase 6.5
+   session log below for the exact checklist.
+5. **Phase 6.7 (docs/closeout) is DONE as of this document** — this
+   session. **Phase 7 (Google Drive/Docs import) is the next phase in
+   sequence, and has explicitly NOT been started.** Do not begin any
+   Phase 7 work speculatively; wait for explicit instruction, per
+   `CLAUDE.md`'s phase-discipline rule.
+6. **Decide on the two "Known limitations" flagged in the Phase 6.4
+   session log (and re-flagged, still undecided, at Phase 6.6's close)**
+   — whether Chapter/Topic/Material mutation inside a group Subject
+   should eventually be role-gated the same way Subject-level mutation
+   now is, and whether Material move-between-owners should stay
+   unrestricted. This is a product decision, not something any Phase 6
+   sub-phase (including 6.6/6.7) was authorized to make unilaterally.
+7. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
    `ingestion.ts`/`retrieval.ts` actually executes against Postgres. Still
    outstanding from before Phase 6.1.
-7. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
+8. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
    optional, only if/when the user wants AI features to actually respond
    instead of showing the honest "not configured" state.
-8. Small, currently-known, not-yet-actioned cleanups if ever asked for a
+9. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
    `recorder-panel.tsx`; dedupe the README Phase 5 line.
-9. If/when app-wide callback-URL support is ever added, revisit
-   `invitations/[token]/page.tsx`'s email-mismatch/unauthenticated flows
-   (see "Known limitations" in the Phase 6.3 session log) — not urgent,
-   flagged so it isn't forgotten.
+10. If/when app-wide callback-URL support is ever added, revisit
+    `invitations/[token]/page.tsx`'s email-mismatch/unauthenticated flows
+    (see "Known limitations" in the Phase 6.3 session log) — not urgent,
+    flagged so it isn't forgotten.
+11. **A real realtime layer** (websockets/SSE) for live group updates was
+    explicitly not built in Phase 6 (see `docs/ARCHITECTURE.md`'s Phase 6
+    "Known limitations") — worth considering if/when the polling-based
+    notification bell proves insufficient, but not scoped to any phase
+    yet.
 
 **Do not re-open either deferred issue** ("Known deferred issues (Phase 5
 closeout)" above) as part of Phase 6 or any other work unless the user
@@ -1368,7 +1727,7 @@ explicitly asks for it again.
 npm install
 npm run test
 npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 61, all Prisma-cascade (unchanged from Phase 6.4 — verified line-for-line identical against a git-stash baseline this session, see the Phase 6.5 session log)
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 68 with Phase 6.6 applied: 62 baseline (all Prisma-cascade, unchanged since Phase 6.4) + 6 new — 5 more Prisma-cascade instances (new code referencing ActivityLog/User/InputJsonValue/NotificationType, blocked by `prisma generate` -> binaries.prisma.sh returning 403 in this sandbox) + 1 pre-existing-pattern implicit-any in page.tsx. Run `npm run db:generate` with real network access and re-check before trusting this number long-term.
 ```
 
 If any of these numbers differ from what's recorded above, this document
