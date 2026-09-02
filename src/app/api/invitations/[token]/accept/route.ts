@@ -35,7 +35,7 @@ export async function POST(_req: Request, { params }: { params: { token: string 
   if (!invitation) return NOT_FOUND();
 
   if (invitation.status !== "PENDING") {
-    return CONFLICT("This invitation has already been used.");
+    return CONFLICT("This invitation is no longer available.");
   }
 
   if (invitation.expiresAt < new Date()) {

@@ -65,7 +65,9 @@ export function SignUpForm() {
 
       <div className="my-6 flex items-center gap-3">
         <div className="h-px flex-1 bg-line dark:bg-line-dark" />
-        <span className="text-xs text-ink-faint">or</span>
+        <span className="shrink-0 bg-paper px-2 text-xs text-ink-faint dark:bg-graphite-950">
+          or
+        </span>
         <div className="h-px flex-1 bg-line dark:bg-line-dark" />
       </div>
 

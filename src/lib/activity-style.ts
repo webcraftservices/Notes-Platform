@@ -55,6 +55,14 @@ export function formatActivityMessage(entry: ActivityLogEntry): string {
       const email = metadataString(entry.metadata, "email");
       return email ? `${email} declined the invitation` : `${actor} declined an invitation`;
     }
+    case ActivityAction.INVITATION_CANCELLED: {
+      const email = metadataString(entry.metadata, "email");
+      return email ? `${actor} cancelled the invitation to ${email}` : `${actor} cancelled an invitation`;
+    }
+    case ActivityAction.INVITATION_RESENT: {
+      const email = metadataString(entry.metadata, "email");
+      return email ? `${actor} resent the invitation to ${email}` : `${actor} resent an invitation`;
+    }
     case ActivityAction.SUBJECT_CREATED:
       return target ? `${actor} created "${target}"` : `${actor} created a subject`;
     case ActivityAction.SUBJECT_UPDATED:

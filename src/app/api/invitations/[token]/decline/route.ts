@@ -28,7 +28,7 @@ export async function POST(_req: Request, { params }: { params: { token: string 
     if (invitation.status === "DECLINED") {
       return NextResponse.json({ success: true });
     }
-    return CONFLICT("This invitation has already been used.");
+    return CONFLICT("This invitation is no longer available.");
   }
 
   if (invitation.expiresAt < new Date()) {

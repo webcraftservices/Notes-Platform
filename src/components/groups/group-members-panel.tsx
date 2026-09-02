@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { UserPlus, Mail, Clock } from "lucide-react";
+import { UserPlus, Mail, Clock, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -60,6 +60,8 @@ export function GroupMembersPanel({
   const [removeTarget, setRemoveTarget] = useState<{ userId: string; label: string; isSelf: boolean } | null>(
     null
   );
+  const [cancelTarget, setCancelTarget] = useState<{ id: string; email: string } | null>(null);
+  const [resendingId, setResendingId] = useState<string | null>(null);
 
   async function changeRole(userId: string, role: MemberRole) {
     const res = await fetch(`/api/groups/${groupId}/members/${userId}`, {
@@ -91,6 +93,40 @@ export function GroupMembersPanel({
       router.push("/groups");
     }
     router.refresh();
+  }
+
+  async function handleCancelInvitationConfirmed() {
+    if (!cancelTarget) return;
+    const res = await fetch(`/api/groups/${groupId}/invitations/${cancelTarget.id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      toast.error(body?.error ?? "Couldn't cancel that invitation.");
+      return;
+    }
+    toast.success("Invitation cancelled");
+    router.refresh();
+  }
+
+  async function handleResendInvitation(invitationId: string) {
+    if (resendingId) return; // guard against double-click while one is in flight
+    setResendingId(invitationId);
+    try {
+      const res = await fetch(`/api/groups/${groupId}/invitations/${invitationId}/resend`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        toast.error(body?.error ?? "Couldn't resend that invitation.");
+        return;
+      }
+      const body = await res.json();
+      toast.success(body.delivered ? "Invitation resent" : "Invitation refreshed — they'll see it once they sign up");
+      router.refresh();
+    } finally {
+      setResendingId(null);
+    }
   }
 
   return (
@@ -207,9 +243,26 @@ export function GroupMembersPanel({
                       Expires {new Date(invitation.expiresAt).toLocaleDateString()}
                     </p>
                   </div>
-                  <Badge className="w-fit normal-case tracking-normal">
-                    {formatRoleLabel(invitation.role)}
-                  </Badge>
+                  <div className="flex items-center gap-2 sm:shrink-0">
+                    <Badge className="w-fit normal-case tracking-normal">
+                      {formatRoleLabel(invitation.role)}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      disabled={resendingId === invitation.id}
+                      onClick={() => handleResendInvitation(invitation.id)}
+                    >
+                      <RotateCw className={`h-3.5 w-3.5 ${resendingId === invitation.id ? "animate-spin" : ""}`} />
+                      Resend
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="text-signal-danger hover:text-signal-danger"
+                      onClick={() => setCancelTarget({ id: invitation.id, email: invitation.email })}
+                    >
+                      Cancel invitation
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -231,6 +284,16 @@ export function GroupMembersPanel({
         confirmLabel={removeTarget?.isSelf ? "Leave group" : "Remove member"}
         destructive
         onConfirm={handleRemoveConfirmed}
+      />
+
+      <ConfirmDialog
+        open={!!cancelTarget}
+        onOpenChange={(v) => !v && setCancelTarget(null)}
+        title={`Cancel invitation to ${cancelTarget?.email}?`}
+        description="They'll no longer be able to join using this invitation. You can invite them again at any time."
+        confirmLabel="Cancel invitation"
+        destructive
+        onConfirm={handleCancelInvitationConfirmed}
       />
     </div>
   );

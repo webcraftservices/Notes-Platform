@@ -9,6 +9,7 @@ import { SubjectCard } from "@/components/subjects/subject-card";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import { ProgressRow } from "@/components/dashboard/progress-row";
 import { CreateSubjectDialog } from "@/components/subjects/create-subject-dialog";
+import { CreateGroupDialog } from "@/components/groups/create-group-dialog";
 import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { MaterialCard } from "@/components/materials/material-card";
 import { UploadMaterialDialog } from "@/components/materials/upload-material-dialog";
@@ -171,6 +172,7 @@ export default async function DashboardPage() {
         </div>
       </main>
       <CreateSubjectDialog />
+      <CreateGroupDialog />
     </>
   );
 }

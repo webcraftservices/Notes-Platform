@@ -684,6 +684,13 @@ enum InvitationStatus {
   ACCEPTED
   DECLINED
   EXPIRED
+  // Post-6.6-verification fixes: an admin cancelling a pending invite is
+  // a distinct event from the recipient declining it (DECLINED) — same
+  // reasoning as ActivityAction.INVITATION_CANCELLED in lib/activity.ts.
+  // Reuses the existing status-update pattern DECLINED already
+  // established (no row is ever deleted on decline), rather than
+  // deleting the row, so activity history stays intact.
+  CANCELLED
 }
 
 model ActivityLog {

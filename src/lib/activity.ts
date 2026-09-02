@@ -15,6 +15,13 @@ export const ActivityAction = {
   MEMBER_REMOVED: "member.removed",
   MEMBER_ROLE_CHANGED: "member.role_changed",
   INVITATION_DECLINED: "invitation.declined",
+  // Post-6.6-verification fixes: cancel/resend are distinct from
+  // MEMBER_INVITED (creation) and INVITATION_DECLINED (recipient's own
+  // choice) — an admin revoking or re-sending an invite is a different
+  // actor and a different meaning, and conflating either with an
+  // existing action would misattribute the event in the Activity feed.
+  INVITATION_CANCELLED: "invitation.cancelled",
+  INVITATION_RESENT: "invitation.resent",
   SUBJECT_CREATED: "subject.created",
   SUBJECT_UPDATED: "subject.updated",
   SUBJECT_DELETED: "subject.deleted",

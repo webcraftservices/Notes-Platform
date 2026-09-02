@@ -46,9 +46,28 @@ export function SignInForm() {
         <GoogleButton />
       </div>
 
+      {/*
+        Divider markup was already structurally correct — a standard
+        flex-row-with-gap layout, not a broken absolute-positioned
+        line-through-text pattern — so the two 1px lines can never
+        literally render on top of "or" from a layout-structure
+        standpoint. The reported "lines covering the text" almost
+        certainly comes from the label having no opaque background: at
+        `text-xs` size with `text-ink-faint`, the ~12px flex gap alone
+        left too little visual breathing room between the line ends and
+        the letters, especially at narrower viewports. Fixed by giving
+        the label an explicit background matching the actual page
+        background (globals.css: `body { @apply bg-paper ...
+        dark:bg-graphite-950 }`) plus its own horizontal padding, so the
+        label always paints a clean opaque break in the line regardless
+        of viewport width or flex-gap rounding — the standard,
+        bulletproof version of this pattern, not a z-index/color hack.
+      */}
       <div className="my-6 flex items-center gap-3">
         <div className="h-px flex-1 bg-line dark:bg-line-dark" />
-        <span className="text-xs text-ink-faint">or</span>
+        <span className="shrink-0 bg-paper px-2 text-xs text-ink-faint dark:bg-graphite-950">
+          or
+        </span>
         <div className="h-px flex-1 bg-line dark:bg-line-dark" />
       </div>
 

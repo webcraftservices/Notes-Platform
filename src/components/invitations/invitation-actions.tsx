@@ -37,6 +37,9 @@ export function InvitationActions({
   if (status === "DECLINED") {
     return <StatusMessage text="This invitation has already been declined." />;
   }
+  if (status === "CANCELLED") {
+    return <StatusMessage text="This invitation was cancelled by a group admin. Ask them to send a new one if you still want to join." />;
+  }
   if (status === "EXPIRED" || isExpired) {
     return <StatusMessage text="This invitation has expired. Ask an admin of the group to send a new one." />;
   }

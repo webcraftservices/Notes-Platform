@@ -67,6 +67,32 @@ describe("formatActivityMessage", () => {
     ).toBe("aman@example.com declined the invitation");
   });
 
+  it("formats an invitation cancellation attributed to the cancelling admin, not the invitee", () => {
+    expect(
+      formatActivityMessage({
+        action: ActivityAction.INVITATION_CANCELLED,
+        actorName: "Nishant",
+        metadata: { email: "rahul@example.com" },
+      }),
+    ).toBe("Nishant cancelled the invitation to rahul@example.com");
+  });
+
+  it("falls back gracefully when cancellation metadata is missing", () => {
+    expect(
+      formatActivityMessage({ action: ActivityAction.INVITATION_CANCELLED, actorName: "Nishant" }),
+    ).toBe("Nishant cancelled an invitation");
+  });
+
+  it("formats an invitation resend attributed to the resending admin, not the invitee", () => {
+    expect(
+      formatActivityMessage({
+        action: ActivityAction.INVITATION_RESENT,
+        actorName: "Priya",
+        metadata: { email: "aman@example.com" },
+      }),
+    ).toBe("Priya resent the invitation to aman@example.com");
+  });
+
   it("formats subject/material events using the target name when present", () => {
     expect(
       formatActivityMessage({
