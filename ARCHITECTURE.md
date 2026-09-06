@@ -28,8 +28,8 @@ src/app/
 │   ├── home/               dashboard
 │   ├── subjects/            list → [subjectId] → chapters/[chapterId] → topics/[topicId]
 │   ├── materials/           list + [materialId] detail/preview/transcript
-│   ├── groups/               static placeholder (Phase 6 not built)
-│   ├── assistant/             static placeholder (Phase 5 not built)
+│   ├── groups/               group list + group detail/collaboration UI
+│   ├── assistant/             workspace-scoped AI assistant UI
 │   ├── search/                structural (name-only) search
 │   └── settings/
 ├── onboarding/            two-step flow, NOT inside (app) — no sidebar during onboarding
@@ -94,9 +94,9 @@ Errors go through `lib/api-response.ts`'s shared helpers.
 
 ## Database / Prisma structure
 
-Single `prisma/schema.prisma`, ~35 models. One migration currently exists
-(`prisma/migrations/20260823142337_initial_schema/`) and matches the
-current schema — no drift detected at last inspection.
+Single `prisma/schema.prisma`, ~35 models. The initial migration plus the
+completed additive migrations are tracked under `prisma/migrations/` and
+match the current schema.
 
 **Core hierarchy** (all soft-deletable via `deletedAt`, archivable via
 `archivedAt`): `Workspace` → `Subject` → `Chapter` → `Topic`. A `Material`
@@ -119,13 +119,12 @@ embedding) but nothing writes to it yet — Phase 5 territory.
 `TRANSCRIPTION` and several Phase 5+ job types that don't have
 implementations yet, e.g. `AI_NOTE_GENERATION`, `EMBEDDING`).
 
-**Not yet used by any application code** (schema exists, nothing reads/
-writes it): `Group`/`GroupMember`/`GroupInvitation`/`ActivityLog` (Phase
-6), `FlashcardDeck`/`Flashcard`/`Quiz`/`QuizQuestion`/`QuizAttempt`
-(Phase 8), `AIConversation`/`AIMessage` (Phase 5), `ConnectedAccount`
-(Phase 7), `UsageRecord` (Phase 9 — usage is currently computed via live
-aggregation in `lib/storage-usage.ts`/`lib/recording-usage.ts`, not a
-ledger).
+The Phase 6 group models, Phase 5 AI conversation models, and Phase 7
+`ConnectedAccount` model are used by their corresponding application
+features. `FlashcardDeck`/`Flashcard`/`Quiz`/`QuizQuestion`/`QuizAttempt`
+remain Phase 8 schema scaffolding. `UsageRecord` remains Phase 9 schema
+scaffolding; usage is currently computed via live aggregation in
+`lib/storage-usage.ts`/`lib/recording-usage.ts`, not a ledger.
 
 **Access pattern**: every model that needs authorization has a matching
 pair in `lib/access.ts` — `getAccessibleX(id, userId)` (throws
@@ -179,6 +178,30 @@ means downloading the full object into memory on every read/range request
 — no true byte-range streaming from S3 itself. Uploads remain direct
 browser→S3 (efficient, standard, unaffected by the read-side change).
 
+## Google Drive and Google Docs integration
+
+Google Drive is a separate OAuth connection from Google sign-in. The
+integration uses Google Drive v3 REST endpoints and encrypted stored OAuth
+tokens. `google-import.ts` resolves the caller's material scope, checks the
+plan, detects duplicates through `Material.externalRef`, downloads real Drive
+bytes, stores them through the configured storage service, and starts the
+existing processing path. Transient Google/network/storage errors receive
+bounded retries; permanent failures remain failed.
+
+The Settings Connected Accounts panel manages the connection, and the Add
+Material dialog contains a flat Drive browser. Native Google Docs are
+exported as `text/plain` and stored in `Material.extractedText`; their
+structure is intentionally flattened. Supported binary Drive files include
+PDF, DOCX, PPTX, TXT, images, audio, and video. Google-native Slides are
+currently rejected rather than silently pretending to import them.
+
+Imported PPTX files are served from application storage and rendered by
+`components/materials/presentation-viewer.tsx` using `pptx2html`. The viewer
+supports loading/error states, slide navigation, slide counts, refresh, and
+download. The `patches/pptx2html+0.3.4.patch` compatibility patch changes
+image extraction to the asynchronous JSZip API required by the installed
+runtime.
+
 ## Audio recording & transcription system
 
 **Recording** (`components/materials/recorder-panel.tsx`): browser
@@ -204,7 +227,8 @@ this — see `PROJECT_STATE.md`).
 `SPEECH_PROVIDER`:
 - `AssemblyAISpeechService` — recommended default, real speaker
   diarization, upload→create-transcript→poll REST flow, no practical
-  file-size limit.
+  file-size limit. Prerecorded requests explicitly send
+  `speech_models: ["universal-2"]`; Pro models are not selected.
 - `OpenAIWhisperSpeechService` — segment timestamps via `verbose_json`,
   no diarization, hard-checks the 25MB request limit before ever calling
   the API.
