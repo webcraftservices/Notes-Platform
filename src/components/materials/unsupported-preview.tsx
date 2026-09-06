@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 /**
- * DOCX/PPTX previews would require converting the file server-side (or
+ * DOCX previews would require converting the file server-side (or
  * shipping a heavy client-side renderer) — that's real processing work
  * this phase doesn't do, so this is honest about not rendering it rather
  * than faking a preview. Download still works; the file itself is real

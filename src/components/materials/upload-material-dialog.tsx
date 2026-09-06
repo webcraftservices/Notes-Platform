@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { MaterialUploader } from "@/components/materials/material-uploader";
 import { RecorderPanel } from "@/components/materials/recorder-panel";
+import { GoogleDriveBrowser } from "@/components/integrations/google-drive-browser";
 import type { UploadScope } from "@/lib/hooks/use-material-upload";
 
 export function UploadMaterialDialog({
@@ -19,7 +20,7 @@ export function UploadMaterialDialog({
 }: {
   scope: UploadScope;
   label?: string;
-  defaultTab?: "upload" | "record" | "link";
+  defaultTab?: "upload" | "record" | "link" | "google";
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -58,6 +59,10 @@ export function UploadMaterialDialog({
     router.refresh();
   }
 
+  function handleGoogleImported() {
+    setOpen(false);
+  }
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -72,12 +77,16 @@ export function UploadMaterialDialog({
             <TabsTrigger value="upload">Upload file</TabsTrigger>
             <TabsTrigger value="record">Record</TabsTrigger>
             <TabsTrigger value="link">Add link</TabsTrigger>
+            <TabsTrigger value="google">Google Drive</TabsTrigger>
           </TabsList>
           <TabsContent value="upload">
             <MaterialUploader scope={scope} onUploaded={() => router.refresh()} />
           </TabsContent>
           <TabsContent value="record">
             <RecorderPanel scope={scope} onRecorded={handleRecorded} />
+          </TabsContent>
+          <TabsContent value="google">
+            <GoogleDriveBrowser scope={scope} onImported={handleGoogleImported} />
           </TabsContent>
           <TabsContent value="link">
             <form onSubmit={handleAddLink} className="space-y-4">

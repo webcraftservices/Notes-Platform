@@ -4,6 +4,7 @@ import { getPlanLimits } from "@/lib/plans";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { SettingsForm } from "@/components/settings/settings-form";
+import { ConnectedAccountsPanel } from "@/components/settings/connected-accounts-panel";
 import { SignOutButton } from "@/components/auth/sign-out-button";
 
 export default async function SettingsPage() {
@@ -33,6 +34,8 @@ export default async function SettingsPage() {
             email={user.email ?? ""}
             theme={profile.theme}
           />
+
+          <ConnectedAccountsPanel />
 
           <section className="card p-5">
             <h2 className="font-display text-sm font-semibold text-ink dark:text-white">Plan</h2>

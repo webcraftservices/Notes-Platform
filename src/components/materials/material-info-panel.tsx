@@ -3,6 +3,7 @@ import type { Material } from "@prisma/client";
 import { formatDistanceToNow } from "date-fns";
 import { getMaterialLabel, formatBytes, formatDuration } from "@/lib/material-style";
 import { TagEditor } from "@/components/materials/tag-editor";
+import { GoogleSourceCard } from "@/components/materials/google-source-card";
 
 interface Scope {
   subject: { id: string; name: string } | null;
@@ -12,9 +13,21 @@ interface Scope {
 
 export function MaterialInfoPanel({ material, scope }: { material: Material; scope: Scope }) {
   const metadata = (material.metadata as Record<string, unknown> | null) ?? {};
+  const externalRef = material.externalRef as
+    | { provider: "google_drive"; fileId: string; webViewLink: string | null; modifiedTime: string | null; mimeType: string }
+    | null;
 
   return (
     <div className="space-y-4">
+      {externalRef?.provider === "google_drive" && (
+        <GoogleSourceCard
+          materialId={material.id}
+          materialTitle={material.title}
+          externalRef={externalRef}
+          scope={{ subjectId: scope.subject?.id, chapterId: scope.chapter?.id, topicId: scope.topic?.id }}
+        />
+      )}
+
       <div className="card p-4">
         <h3 className="mb-3 font-mono text-[11px] font-medium uppercase tracking-wide text-ink-faint dark:text-white/30">
           Details

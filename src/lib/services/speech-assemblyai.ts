@@ -3,6 +3,7 @@ import { ServiceNotConfiguredError } from "./interfaces";
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 20 * 60 * 1000; // 20 minutes — generous for a long lecture
+const ASSEMBLYAI_TRANSCRIPTION_MODELS = ["universal-2"];
 
 interface AssemblyAIUtterance {
   speaker: string;
@@ -85,6 +86,7 @@ export class AssemblyAISpeechService implements SpeechService {
       headers: { authorization: this.apiKey, "content-type": "application/json" },
       body: JSON.stringify({
         audio_url: audioUrl,
+        speech_models: ASSEMBLYAI_TRANSCRIPTION_MODELS,
         speaker_labels: true,
         language_code: languageHint,
       }),

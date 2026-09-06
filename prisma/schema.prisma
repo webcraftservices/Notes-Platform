@@ -152,6 +152,14 @@ enum ConnectedProvider {
   GOOGLE_DOCS
 }
 
+// Phase 7 implementation note: a single OAuth consent grants both the
+// drive.readonly and documents.readonly scopes together (see
+// lib/services/google-oauth.ts), so one ConnectedAccount row is written per
+// user under provider = GOOGLE_DRIVE and covers both Drive file access and
+// Docs export. GOOGLE_DOCS is kept in the enum for a future split (e.g. a
+// narrower Docs-only consent) but no code path writes it today — see
+// docs/google-setup.md.
+
 // ----------------------------------------------------------------------------
 // WORKSPACE (multi-tenant boundary)
 // ----------------------------------------------------------------------------
@@ -398,7 +406,16 @@ model Material {
   title       String
   originalFilename String?
   storageKey  String? // private object storage key (never a public URL)
-  externalRef Json? // e.g. { provider: "google_docs", fileId, webViewLink }
+  externalRef Json? // e.g. { provider: "google_docs", fileId, webViewLink, modifiedTime }
+  // Plain-text content extracted from a non-audio source (currently: Google
+  // Docs, via Phase 7's import pipeline). Mirrors Transcript.fullText's role
+  // for audio/video but lives on Material directly since it isn't tied to a
+  // speech-to-text provider or timestamped segments. Nullable and unused for
+  // every material type except GOOGLE_DOC today; runEmbeddingJob (ingestion.ts)
+  // chunks it with the generic chunkText() when present. A future
+  // DocumentProcessingService (PDF/DOCX/PPTX) would populate the same field
+  // rather than inventing a parallel one.
+  extractedText String? @db.Text
   sourceUrl   String? // for link imports
   mimeType    String?
   sizeBytes   Int?

@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { chunkTranscriptSegments } from "@/lib/chunking";
+import { chunkTranscriptSegments, chunkText, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
 import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 
@@ -11,18 +11,23 @@ import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
  * job with an actionable message (CLAUDE.md's "never fake a feature"
  * rule), exactly like runTranscriptionJob.
  *
- * Text source (Phase 5 state): only Transcript segments (audio/video
- * materials) are chunked. DocumentProcessingService (PDF/DOCX/PPTX text
- * extraction) has no concrete implementation yet — see ARCHITECTURE.md —
- * so materials of those types simply have no chunks to embed until that
- * lands; this job intentionally no-ops (SUCCEEDED with zero chunks
- * written) rather than failing for those types, since "nothing to index
- * yet" isn't an error.
+ * Text source: Transcript segments (audio/video materials) when present,
+ * chunked with chunkTranscriptSegments so each chunk keeps its
+ * startSeconds/endSeconds. Otherwise, Material.extractedText (currently
+ * only populated by the Phase 7 Google Docs importer — see
+ * lib/google-import.ts) is chunked with the generic chunkText(), producing
+ * chunks with no timestamps and no page number. DocumentProcessingService
+ * (PDF/DOCX/PPTX text extraction) still has no concrete implementation —
+ * see ARCHITECTURE.md — so materials of those types still have no text to
+ * chunk and this job intentionally no-ops (SUCCEEDED with zero chunks
+ * written) rather than failing, since "nothing to index yet" isn't an
+ * error.
  *
  * Triggered fire-and-forget from runTranscriptionJob immediately after a
- * transcription SUCCEEDED (see transcription.ts) — same execution model
- * and same serverless caveat as transcription jobs (see that file's doc
- * comment).
+ * transcription SUCCEEDED (see transcription.ts), and equivalently from
+ * runGoogleImportJob after a Google Doc's text is extracted (see
+ * lib/google-import.ts) — same execution model and same serverless caveat
+ * as transcription jobs (see that file's doc comment).
  */
 export async function runEmbeddingJob(jobId: string): Promise<void> {
   const job = await db.processingJob.findUnique({ where: { id: jobId } });
@@ -45,19 +50,23 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
           })
         : null;
 
-    // Nothing to chunk yet for this material type/state — a real,
-    // successful no-op, not an error (see doc comment above).
-    if (!transcript || transcript.status !== "READY" || transcript.segments.length === 0) {
+    let chunks: (TextChunk & { startSeconds: number | null; endSeconds: number | null })[];
+
+    if (transcript && transcript.status === "READY" && transcript.segments.length > 0) {
+      chunks = chunkTranscriptSegments(
+        transcript.segments.map((s) => ({ text: s.text, startSeconds: s.startSeconds, endSeconds: s.endSeconds }))
+      );
+    } else if (material.extractedText && material.extractedText.trim().length > 0) {
+      chunks = chunkText(material.extractedText).map((c) => ({ ...c, startSeconds: null, endSeconds: null }));
+    } else {
+      // Nothing to chunk yet for this material type/state — a real,
+      // successful no-op, not an error (see doc comment above).
       await db.processingJob.update({
         where: { id: jobId },
         data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
       });
       return;
     }
-
-    const chunks = chunkTranscriptSegments(
-      transcript.segments.map((s) => ({ text: s.text, startSeconds: s.startSeconds, endSeconds: s.endSeconds }))
-    );
 
     if (chunks.length === 0) {
       await db.processingJob.update({

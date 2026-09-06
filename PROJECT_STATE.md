@@ -1,7 +1,7 @@
 # PROJECT_STATE.md — Current State
 
 Last verified against actual code and a real test/lint/typecheck run on
-**2026-09-01** (Phase 6.7 closeout session). If you're reading this in a
+**2026-09-05** (Phase 7 session). If you're reading this in a
 later session, re-run the verification commands in the "How to verify
 this document" section before trusting anything time-sensitive here —
 code may have moved on.
@@ -40,60 +40,111 @@ code may have moved on.
 
 ## Current phase
 
-**PHASE 6 — GROUP COLLABORATION: STATUS = COMPLETE / CLOSEOUT.**
+**PHASE 7 — GOOGLE DRIVE / DOCS INTEGRATION: IMPLEMENTED, VERIFIED IN THIS
+SANDBOX, NOT YET COMMITTED.**
 
-**Phases 6.1–6.5 are COMPLETE, COMMITTED, AND PUSHED** to `main`
-(`8f58f92 feat: add group-scoped AI chat`, on top of `c769f52` for 6.4,
-`4c5c016` for 6.2/6.3, and `bcbeab7` for 6.1).
+> **Fourth correction to this document, this session (Phase 7)**: the
+> previous revision said "Phase 7 has NOT been started" and "do not begin
+> any Phase 7 work speculatively; wait for explicit instruction." That was
+> accurate when written — the user explicitly requested Phase 7 in this
+> session, following the same fresh-clone-first discipline this document
+> keeps having to re-learn. A fresh `git clone` at the start of this
+> session showed `main`/`origin/main` at `55210db feat: add invitation
+> management and improve app actions`, clean working tree — this again
+> contradicted the *previous* revision's claim that Phase 6.6 was
+> "IMPLEMENTED... NOT YET COMMITTED": both 6.6 (`a5bee44`) and a further
+> post-verification-fixes commit (`55210db`) were already on `main`. This
+> is the same failure mode flagged three times before: **always re-verify
+> `git log` against a fresh clone before trusting this file's
+> "committed"/"uncommitted" claims.**
 
-> **Third correction to this document (this session, Phase 6.5)**: the
-> previous revision's "Current phase" section said Phase 6.4 was
-> "IMPLEMENTED and verified in this sandbox, but NOT YET COMMITTED." That
-> was stale by the time this session started — a fresh `git clone` shows
-> `main`/`origin/main` at `c769f52 feat: attach subjects and materials to
-> groups`, clean working tree, which already contains 6.4. This is the
-> exact same failure mode flagged twice before (see the first two
-> correction notes above): the document was never updated after the
-> commit happened. Re-verified directly this session (184/184 tests at
-> the start of this session before any Phase 6.5 changes, lint clean, 61
-> typecheck errors — all three matching what this document already
-> predicted) before trusting it. **Always re-verify `git log` against a
-> fresh clone before trusting this file's "committed" claims** — this is
-> now the third time this exact pattern has occurred; treat every
-> "committed"/"uncommitted" claim in this document as provisional until
-> checked against `git log`/`git status` directly.
+Phase 7 builds Google Drive + Google Docs import into the existing
+Materials system. Schema scaffolding for this phase (`ConnectedAccount`,
+`ConnectedProvider`, `Material.externalRef`, `MaterialType.GOOGLE_DOC`/
+`GOOGLE_DRIVE_FILE`, `JobType.GOOGLE_SYNC`, `.env.example`'s
+`GOOGLE_DRIVE_CLIENT_ID/SECRET` placeholders, and `plans.ts`'s
+`advancedFeatures.googleDriveSync`) already existed from Phase 1 and was
+completely unwired before this session — the same "pre-existing but
+unwired" pattern `ActivityLog`/`Notification` were in before Phase 6.6.
 
-**Phase 6.6 (activity log + notifications) is IMPLEMENTED and verified in
-this sandbox, NOT YET COMMITTED** — left in the working tree for user
-review, per every prior phase's git-safety rule.
-`ActivityLog`/`Notification`/`NotificationType` already existed in the
-schema since Phase 1 but were completely unwired before the Phase 6.6
-session; that session wired them into groups/membership/subjects/
-materials and added the Activity tab + notification bell UI. The Group
-detail page's Activity tab now shows real group activity (newest first,
-paginated) — the `PhasePlaceholder` naming this phase is gone; the
-Subjects/Materials tabs (Phase 6.4) and AI Assistant tab (Phase 6.5) were
-already real. The authenticated shell's Topbar now has a notification
-bell (unread badge, dropdown, mark-as-read, click-to-navigate) on every
-page. See "Recent work completed" for the full session log.
+What this session implemented (see "Recent work completed" for detail):
 
-**Phase 6.7 (docs/closeout) is this session.** Its scope is
-documentation only — `PROJECT_STATE.md` (this file), `docs/ARCHITECTURE.md`
-(added a "Phase 6 — Groups + collaboration" section, since none existed;
-fixed one stale "Groups → Phase 6 deferred" bullet), and `CLAUDE.md` (one
-stale typecheck-baseline number corrected). **No application source,
-schema, migration, test, or dependency was touched this session** — the
-only non-documentation files in the working tree are the Phase 6.6
-implementation files carried over unchanged from that session, still
-uncommitted, still awaiting the same review. Phase 6.6's code itself was
-not re-touched or re-designed during 6.7 — only described accurately.
+- `lib/crypto.ts` — AES-256-GCM encryption for stored OAuth tokens.
+- `lib/services/google-oauth.ts` + `google-oauth-state.ts` — real REST
+  OAuth flow (no `googleapis` SDK dependency — plain `fetch`, matching
+  `speech-openai.ts`'s existing style) and signed, HMAC-verified `state`
+  for CSRF protection without a database table.
+- `lib/services/google-drive.ts` + `google-docs.ts` — real Drive v3 REST
+  client (list/metadata/download/export) and Docs text extraction via
+  Drive's `text/plain` export.
+- `lib/google-connection.ts` — connection status, token refresh-on-expiry,
+  disconnect (revokes at Google, sets `revokedAt`, never touches imported
+  Materials).
+- `lib/google-file-classifier.ts` — pure, dependency-free classification
+  of a Drive file into `google_doc` / a concrete `MaterialType` / an
+  explicit `unsupported` reason.
+- `lib/google-import.ts` — the import orchestrator: scope resolution
+  (reuses `resolveMaterialScope`, the exact same authorization path
+  uploads use), duplicate detection via `Material.externalRef`, plan
+  gating via `advancedFeatures.googleDriveSync` (newly wired up), and the
+  async `runGoogleImportJob` (mirrors `runTranscriptionJob`'s execution
+  model/serverless caveat exactly).
+- Extended `lib/ingestion.ts`'s `runEmbeddingJob` to also chunk
+  `Material.extractedText` (via the already-existing-but-unused
+  `chunkText()`) when there's no Transcript — this is what makes an
+  imported Google Doc actually RAG-searchable, not just stored.
+- Added `putObjectBuffer` to `storage-s3.ts` (duck-typed, mirrors
+  `getObjectBuffer`) so downloaded Drive bytes can be written directly.
+- One additive schema field, `Material.extractedText String? @db.Text`
+  (migration `20260905090000_material_extracted_text`) — the only schema
+  change this phase needed.
+- 6 API routes under `/api/integrations/google/` (status, connect,
+  callback, disconnect, files, import).
+- UI: a "Google Drive" tab in the existing Add Material dialog
+  (`google-drive-browser.tsx`), a Connected Accounts panel in Settings
+  (`connected-accounts-panel.tsx`), a `GoogleDocViewer` for GOOGLE_DOC
+  materials (no `storageKey` to read — content lives in
+  `extractedText`), and a `GoogleSourceCard` (open-original + re-import)
+  on the material detail page.
+- 43 new tests (crypto roundtrip, file classification, validation
+  schemas, OAuth URL building/config fallback, signed-state sign/verify/
+  tamper/expiry, and mocked-`fetch` tests for the Drive/Docs REST calls).
 
-With Phase 6.7 closeout complete (as of this document), **Phase 6 as a
-whole (6.1 through 6.7) is COMPLETE** — 6.1–6.5 are committed/pushed;
-6.6's code and 6.7's documentation are both implemented and verified in
-this sandbox but sit together, uncommitted, for one combined review pass
-covering both. **Phase 7 has NOT been started** — see "Document Phase 7
-boundary" below.
+See `docs/google-setup.md` for the full Google Cloud setup steps, the
+Drive-file-to-MaterialType mapping table, and the complete list of known
+limitations (flat/non-folder-navigable browsing, no Docs structure
+preservation, no continuous sync, PDF/DOCX/PPTX still not chunkable —
+same pre-existing `DocumentProcessingService` gap as before this phase).
+
+**What was NOT verified**: real Google OAuth/Drive/Docs API connectivity.
+This sandbox has no outbound network access to `accounts.google.com` or
+`googleapis.com` (only the allowlisted npm/GitHub domains), and no test
+Google Cloud OAuth client credentials were available. Every route, service
+method, and error-message branch was written against Google's documented
+REST API contracts and covered by mocked-`fetch` unit tests, but the full
+connect → browse → import → process → READY → AI-retrieval flow has only
+been verified by code inspection, not by an actual browser + real Google
+account. This must happen before Phase 7 is considered fully done — see
+"Exact next steps".
+
+Phases 1–6 remain complete, unmodified, and exactly as described in this
+document's Phase 6 sections below (no Phase 6 file was touched this
+session other than this document itself and `docs/ARCHITECTURE.md`'s
+service-abstraction table, which gained one new row for the Google
+integration and changed nothing else).
+
+Phases 1–7, per the master prompt's own phase breakdown:
+- [x] Phase 1 — Architecture, database, authentication
+- [x] Phase 2 — Dashboard + Subject/Chapter/Topic system
+- [x] Phase 3 — Notes editor + materials
+- [x] Phase 4 — Audio recording + transcription
+- [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
+- [x] Phase 6 — Groups + collaboration — **CLOSED** (committed/pushed through `55210db`)
+- [~] Phase 7 — Google Drive/Docs (**implemented and verified in this sandbox this session, NOT YET COMMITTED** — real Google API connectivity not verified, see above)
+- [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
+- [ ] Phase 9 — Security + performance + production polish (not started)
+
+
 
 Three architectural decisions were confirmed by the user before Phase 6.1
 implementation (see "Recent work completed" below for the full
@@ -124,18 +175,6 @@ Two known issues were investigated during Phase 5 closeout and are
 recorded below as **explicitly deferred, non-blocking** — see "Known
 deferred issues (Phase 5 closeout)". Neither blocks Phase 6, and neither
 was touched during Phase 6.1–6.5.
-
-
-Phases 1–5, per the master prompt's own phase breakdown:
-- [x] Phase 1 — Architecture, database, authentication
-- [x] Phase 2 — Dashboard + Subject/Chapter/Topic system
-- [x] Phase 3 — Notes editor + materials
-- [x] Phase 4 — Audio recording + transcription
-- [x] Phase 5 — AI notes + RAG + AI chat (provider-free scaffold — see below) — **CLOSED**
-- [~] Phase 6 — Groups + collaboration (**CLOSEOUT COMPLETE** — 6.1–6.5 committed+pushed; 6.6 code + 6.7 docs implemented and verified in this sandbox, both uncommitted, awaiting one combined review; see "Recent work completed")
-- [ ] Phase 7 — Google Drive/Docs (not started)
-- [ ] Phase 8 — Flashcards + quizzes + AI tutor (not started)
-- [ ] Phase 9 — Security + performance + production polish (not started)
 
 ## Known deferred issues (Phase 5 closeout)
 
@@ -327,6 +366,164 @@ known limitations.
   wasn't refactored to support that.
 
 ## Recent work completed (most recent first)
+
+### Session: PPTX presentation preview
+
+PPTX materials now render in-app with the MIT-licensed `pptx2html` client
+renderer. The original PPTX remains in private storage and the viewer uses
+the existing authenticated material read URL. Slides are rendered into the
+viewer with Previous/Next navigation and a slide counter; the existing
+download action remains available. Google-native Slides remain explicitly
+unsupported by the existing importer and are not changed by this feature.
+
+### Session: Phase 7 — Google Drive / Docs integration
+
+**Ground-truth audit**: fresh clone, `git log` confirms HEAD = `55210db
+feat: add invitation management and improve app actions`, `git status`
+clean. Confirmed both `a5bee44` (Phase 6.6) and `55210db` were already
+committed/pushed, contradicting the previous revision of this document
+(see the fourth correction note in "Current phase" above). Baseline
+verified before any change: 207/207 tests, lint clean, 70 typecheck
+errors (all pre-existing Prisma-stub-cascade or implicit-any, matching
+this document's prior numbers).
+
+**Schema**: one additive field, `Material.extractedText String? @db.Text`
+(migration `20260905090000_material_extracted_text`). Everything else
+Phase 7 needed — `ConnectedAccount`, `ConnectedProvider`,
+`Material.externalRef`, `MaterialType.GOOGLE_DOC`/`GOOGLE_DRIVE_FILE`,
+`JobType.GOOGLE_SYNC` — already existed from Phase 1, unused until now.
+Added a schema comment on `ConnectedProvider` documenting that a single
+OAuth grant covers both Drive and Docs scopes, so every connection is
+stored under `GOOGLE_DRIVE` — `GOOGLE_DOCS` stays reserved, unused, for a
+possible future narrower-scope split.
+
+**Token security**: `lib/crypto.ts` — AES-256-GCM, key derived via
+`scryptSync` from `GOOGLE_TOKEN_ENCRYPTION_KEY` (optional) falling back to
+`NEXTAUTH_SECRET` (already required), so connecting Google Drive needs no
+new mandatory secret. `lib/services/google-oauth-state.ts` — HMAC-signed,
+timestamped OAuth `state` (10-minute TTL) for CSRF protection without a
+database table.
+
+**Google API integration** (plain `fetch`, no `googleapis` SDK dependency
+— matches `speech-openai.ts`'s existing style):
+- `lib/services/google-oauth.ts` — authorize URL, code exchange, refresh,
+  revoke, userinfo lookup. Client credentials: `GOOGLE_DRIVE_CLIENT_ID/
+  SECRET` falling back to `GOOGLE_CLIENT_ID/SECRET` (same client works if
+  scopes are enabled on it, per `.env.example`'s existing comment).
+- `lib/services/google-drive.ts` — `listFiles` (excludes folders/trashed,
+  optional `name contains` search, single-quote-escaped), `getFileMetadata`,
+  `downloadFile` (binary), `exportFile` (Google-native → target MIME).
+  User-facing error messages per HTTP status (401 → reconnect, 403 → rate
+  limited, 404 → no longer accessible).
+- `lib/services/google-docs.ts` — `extractGoogleDocText` via Drive's
+  `files.export?mimeType=text/plain`, not the Docs v1 structured API (see
+  that file's comment for why — Phase 7 only needs plain text for
+  chunking, not a NoteBlocks-ready structural tree).
+- `lib/google-connection.ts` — `getGoogleConnectionStatus`,
+  `saveGoogleConnection` (upsert, never overwrites a stored refresh_token
+  with null just because a later response omitted one), the auto-
+  refreshing `getValidGoogleAccessToken`, and `disconnectGoogleAccount`
+  (revokes at Google, sets `revokedAt`, leaves the row + imported
+  Materials untouched — matches the `Material.deletedAt`/
+  `Subject.archivedAt` soft-delete pattern).
+
+**Import orchestration**:
+- `lib/google-file-classifier.ts` — pure function, no db/service imports
+  (kept separate from `google-import.ts` specifically so it's unit-
+  testable without a generated Prisma client). Maps a Drive MIME type to
+  `google_doc` / a concrete `MaterialType` (reusing `mime.ts`'s existing
+  `resolveMaterialType`, so imported PDFs/images/audio/video get the
+  exact same preview and, for audio/video, manual-transcription
+  eligibility as an upload) / an explicit `unsupported` reason (Sheets,
+  Slides, Forms, Drawings, folders, shortcuts) / the generic
+  `GOOGLE_DRIVE_FILE` fallback for any other binary type (real bytes
+  stored, `UnsupportedPreview`-only, same honest fallback DOCX/PPTX
+  already get).
+- `lib/google-import.ts` — `assertGoogleDriveSyncAllowed` (newly wires up
+  `plans.ts`'s previously-unused `advancedFeatures.googleDriveSync` —
+  `false` on Free, `true` on every paid tier), `importGoogleFile` (reuses
+  `resolveMaterialScope` — the identical authorization path
+  `/api/materials/upload-url` uses, so Google imports respect exactly the
+  same personal/workspace/group permission rules as uploads, with no
+  separate Google-specific permission model), duplicate detection via
+  `Material.externalRef`'s `{ provider: "google_drive", fileId }` scoped
+  to the same destination, and `runGoogleImportJob` (mirrors
+  `runTranscriptionJob`'s RUNNING → real work → READY/FAILED execution
+  model and serverless-execution caveat exactly). Google imports retry
+  transient Google/network/storage failures up to three times, and the
+  material preview polls PROCESSING materials so imports do not look failed
+  merely because the background job has not finished yet.
+- Extended `lib/ingestion.ts`'s `runEmbeddingJob`: when there's no
+  Transcript, falls back to chunking `Material.extractedText` with the
+  already-existing-but-previously-unused `chunkText()` (chunks get
+  `startSeconds`/`endSeconds` = null, `pageNumber` = null). This is what
+  makes an imported Google Doc's content actually indexed for AI chat —
+  without it, import would only get a Doc's text stored, not searchable.
+- Added `putObjectBuffer` to `storage-s3.ts` (duck-typed, mirrors
+  `getObjectBuffer`'s existing pattern) so bytes already fetched from
+  Drive can be written directly, instead of only ever handing the browser
+  a presigned PUT URL.
+
+**API routes** (`/api/integrations/google/`): `status` (connection info,
+plan-enabled flag, no token material ever returned), `connect` (plan-
+gated, rate-limited, redirects to Google), `callback` (verifies signed
+state, exchanges code, saves connection, redirects to
+`/settings?google=connected|error`), `disconnect`, `files` (search,
+returns each file's supported/unsupported classification pre-computed),
+`import` (validated via `lib/validation/google.ts`, returns 202 for a new
+import / 200 for an already-imported duplicate with a `changed` flag the
+client uses to auto-re-import).
+
+**UI**: `google-drive-browser.tsx` (connect/checking/not-configured/not-
+enabled/disconnected/connected states, search, per-file import with
+inline loading, unsupported badge + tooltip) added as a fourth tab in the
+existing `upload-material-dialog.tsx`. `connected-accounts-panel.tsx`
+added to Settings (reads the `?google=connected|error` redirect result
+once, shows it as a toast, cleans the URL). `google-doc-viewer.tsx` for
+GOOGLE_DOC materials (no `storageKey`, so it bypasses `MaterialPreview`'s
+normal `readUrl`-fetch path entirely — renders `extractedText` directly,
+handles PROCESSING/FAILED states). `google-source-card.tsx` on the
+material detail page (open-original link + re-import button) shown
+whenever `Material.externalRef.provider === "google_drive"`.
+
+**Tests** (43 new, all passing, zero regressions — 250/250 total):
+`crypto.test.ts` (roundtrip, random-IV non-determinism, tamper/malformed
+rejection), `google-file-classifier.test.ts` (every classification
+branch), `validation/google.test.ts` (schema acceptance/rejection),
+`google-oauth.test.ts` (config fallback order, URL construction, missing-
+config error), `google-oauth-state.test.ts` (sign/verify roundtrip,
+wrong-user rejection, tamper rejection, expiry via `vi.useFakeTimers`),
+`google-drive.test.ts` + `google-docs.test.ts` (mocked-`fetch`: query
+construction/escaping, bearer header, per-status error messages, buffer
+decoding).
+
+**Verification performed**: `npm run test` (250/250), `npm run lint` (0
+errors), `npx tsc --noEmit` diffed against a pre-change baseline by
+file+error-code (ignoring line-number drift from edits) — confirmed the
+only "new" entries are the same `has no exported member 'Material'/
+'MaterialType'` Prisma-stub-client artifact already present for
+`mime.ts`/`material-style.ts`/`metadata-extraction.ts` before this
+session, not genuine new type errors. `npx prisma generate` and `npx
+prisma migrate status` both still blocked by `binaries.prisma.sh`
+returning 403 in this sandbox — identical, previously-documented
+limitation, not new to this session.
+
+**Verification NOT performed** (see "What was NOT verified" in "Current
+phase" above for full detail): real Google OAuth consent flow, real Drive
+file listing/import, real Google Doc export, and real AI retrieval of an
+imported Doc's chunks. No outbound network to `accounts.google.com`/
+`googleapis.com` in this sandbox, and no test Google Cloud OAuth client
+was available. This is the single largest open item before Phase 7 can
+be considered fully done — see "Exact next steps".
+
+**Files changed**: see `git diff --stat` for the exact list; summary —
+1 schema file + 1 migration, 12 new `lib/`/`lib/services/` files, 6 new
+API route files, 5 new/modified UI component files, 1 modified settings
+page, 8 new test files, `.env.example` + `docs/google-setup.md` +
+`ARCHITECTURE.md` + this file for documentation. No file outside those
+areas was touched — Phase 1–6 application code is unmodified except for
+`lib/ingestion.ts` (one extension, described above) and
+`lib/services/storage-s3.ts` (one additive method).
 
 ### Session: Phase 6.7 — Documentation / closeout
 
@@ -1645,65 +1842,66 @@ during implementation).
 
 ## Current task
 
-Phase 6.5 (Group-scoped AI chat) is implemented and verified as described
-in "Recent work completed" above. **Nothing has been committed or
-pushed** — the working tree contains only the Phase 6.5 changes (Phases
-6.1–6.4 are already committed and pushed at `c769f52`, confirmed via a
-fresh clone at the start of this session — see the third correction note
-at the top of this document). `git status`/`git diff --stat` at the end
-of the session showed exactly 8 modified files, all directly
-attributable to Phase 6.5; no unrelated file was touched.
+Phase 7 (Google Drive/Docs integration) is implemented and verified in
+this sandbox as described above. **Nothing has been committed or
+pushed** — the working tree contains only the Phase 7 changes (Phases
+1–6 are already committed and pushed at `55210db`, confirmed via a fresh
+clone at the start of this session — see the fourth correction note at
+the top of the "Current phase" section). `git status`/`git diff --stat`
+at the end of the session should be checked against the file list in
+"Recent work completed" before committing — no unrelated file should
+appear there.
 
 ## Exact next steps
 
-1. **User review of Phase 6.6 + Phase 6.7** — nothing is committed yet;
-   review the diff (see "Recent work completed" for the full file list —
-   Phase 6.6 is code, Phase 6.7 is documentation-only) and commit when
-   satisfied, together or separately as preferred. Phases 6.1–6.5 are
-   already committed/pushed.
+1. **User review of Phase 7** — nothing is committed yet; review the diff
+   (see "Recent work completed" for the full file list) and commit when
+   satisfied. Phases 1–6 are already committed/pushed.
 2. **Run `npx prisma generate` (then `npx prisma migrate dev`)** in an
    environment with real network access to `binaries.prisma.sh` — Phase
-   6.6's migration is written and correct but has not been applied to any
-   real database in this sandbox (no database or network access to the
-   Prisma engine binaries here). This also clears all 6 of the
-   Prisma-stub typecheck errors introduced by Phase 6.6's code (see
-   "Tests performed" above) — they're a byproduct of the stale,
-   un-regenerated client, not real bugs.
-3. **Manual browser verification of Phase 6.6** is still outstanding —
-   this sandbox has no way to run the dev server or reach a database.
-   Before considering Phase 6.6 fully done, actually click through: open
-   a group's Activity tab as a member and confirm real events appear
-   newest-first (invite/accept/decline, role change, remove/leave,
-   subject create/update/delete, material add/remove); confirm a
-   non-member (or a member who left/was removed) gets a 403/404 from
-   `GET /api/groups/[groupId]/activity`, not just a hidden tab; open the
-   notification bell and confirm the unread badge, mark-as-read, and
-   click-to-navigate all work; confirm `PATCH
-   /api/notifications/[notificationId]` 403s when the notification
-   belongs to a different user.
-4. **Manual browser verification of Phase 6.5** is still outstanding too
-   (carried over, unchanged from before this session) — see the Phase 6.5
+   7's migration (`20260905090000_material_extracted_text`) is written
+   and correct but has not been applied to any real database in this
+   sandbox. This also clears the handful of Prisma-stub typecheck errors
+   Phase 7's new code introduces (`google-import.ts`,
+   `google-file-classifier.ts`, `google-doc-viewer.tsx` — all the same
+   "has no exported member 'Material'/'MaterialType'" category already
+   present for `mime.ts`/`material-style.ts` before this phase, not new
+   bugs).
+3. **Set up a real Google Cloud OAuth client and manually verify the full
+   flow** — this is the single most important outstanding item for Phase
+   7. Follow `docs/google-setup.md` end to end: connect Google Drive from
+   Settings, browse real files, import a real Google Doc and confirm it
+   reaches READY with real extracted text and a real `EMBEDDING` job that
+   succeeds, import a real PDF/image/audio file and confirm it previews
+   identically to an upload, attempt an import into a Subject/Group you
+   don't have access to and confirm it's rejected server-side, disconnect
+   and confirm previously-imported Materials are unaffected. None of this
+   was possible in this sandbox (no outbound network to
+   `accounts.google.com`/`googleapis.com`, no test credentials) — see
+   "What was NOT verified" in the "Current phase" section above.
+4. **Manual browser verification of Phase 6.6/6.7** is still outstanding
+   from before this session (carried over unchanged) — see the Phase 6.6
    session log below for the exact checklist.
-5. **Phase 6.7 (docs/closeout) is DONE as of this document** — this
-   session. **Phase 7 (Google Drive/Docs import) is the next phase in
-   sequence, and has explicitly NOT been started.** Do not begin any
-   Phase 7 work speculatively; wait for explicit instruction, per
-   `CLAUDE.md`'s phase-discipline rule.
-6. **Decide on the two "Known limitations" flagged in the Phase 6.4
-   session log (and re-flagged, still undecided, at Phase 6.6's close)**
-   — whether Chapter/Topic/Material mutation inside a group Subject
-   should eventually be role-gated the same way Subject-level mutation
-   now is, and whether Material move-between-owners should stay
-   unrestricted. This is a product decision, not something any Phase 6
-   sub-phase (including 6.6/6.7) was authorized to make unilaterally.
-7. **Verify Phase 5 against a real database**: run `npm run db:generate`
+5. **Decide on the two "Known limitations" flagged in the Phase 6.4
+   session log (and re-flagged at every Phase 6 sub-phase's close)** —
+   whether Chapter/Topic/Material mutation inside a group Subject should
+   eventually be role-gated, and whether Material move-between-owners
+   should stay unrestricted. Phase 7 deliberately did **not** introduce a
+   separate Google-specific permission model — Google imports use exactly
+   the same (currently unrestricted-by-role) authorization path as normal
+   uploads, so this decision applies equally to both.
+6. **Verify Phase 5 against a real database**: run `npm run db:generate`
    with real network access, then `npm run db:migrate`, then confirm
    `db.aIConversation`/`db.aIMessage` compile and the pgvector raw SQL in
-   `ingestion.ts`/`retrieval.ts` actually executes against Postgres. Still
-   outstanding from before Phase 6.1.
-8. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
-   optional, only if/when the user wants AI features to actually respond
-   instead of showing the honest "not configured" state.
+   `ingestion.ts`/`retrieval.ts` actually executes against Postgres —
+   this now also exercises Phase 7's extension to `runEmbeddingJob` (the
+   `Material.extractedText` fallback branch).
+7. **Activate a real AI/embedding provider** (see `docs/ai-setup.md`) —
+   optional. Once one exists, a successfully-imported Google Doc's
+   chunks become genuinely retrievable by AI chat, not just embedded.
+8. **Consider Google Docs structure preservation and continuous sync** as
+   real future work, not urgent — see `docs/google-setup.md`'s "Known
+   limitations" for exactly what's deferred and why.
 9. Small, currently-known, not-yet-actioned cleanups if ever asked for a
    "cleanup pass": remove the dead `recordedMs` variable in
    `recorder-panel.tsx`; dedupe the README Phase 5 line.
@@ -1712,22 +1910,21 @@ attributable to Phase 6.5; no unrelated file was touched.
     (see "Known limitations" in the Phase 6.3 session log) — not urgent,
     flagged so it isn't forgotten.
 11. **A real realtime layer** (websockets/SSE) for live group updates was
-    explicitly not built in Phase 6 (see `docs/ARCHITECTURE.md`'s Phase 6
-    "Known limitations") — worth considering if/when the polling-based
-    notification bell proves insufficient, but not scoped to any phase
-    yet.
+    explicitly not built in Phase 6 — worth considering if/when the
+    polling-based notification bell proves insufficient, but not scoped
+    to any phase yet.
 
 **Do not re-open either deferred issue** ("Known deferred issues (Phase 5
-closeout)" above) as part of Phase 6 or any other work unless the user
+closeout)" above) as part of Phase 7 or any other work unless the user
 explicitly asks for it again.
 
 ## How to verify this document
 
 ```bash
 npm install
-npm run test
-npm run lint
-npm run typecheck 2>&1 | grep -c "error TS"   # expect 68 with Phase 6.6 applied: 62 baseline (all Prisma-cascade, unchanged since Phase 6.4) + 6 new — 5 more Prisma-cascade instances (new code referencing ActivityLog/User/InputJsonValue/NotificationType, blocked by `prisma generate` -> binaries.prisma.sh returning 403 in this sandbox) + 1 pre-existing-pattern implicit-any in page.tsx. Run `npm run db:generate` with real network access and re-check before trusting this number long-term.
+npm run test    # expect 250/250 (207 baseline before Phase 7 + 43 new Phase 7 tests)
+npm run lint    # expect 0 errors
+npm run typecheck 2>&1 | grep -c "error TS"   # expect 73: 70 baseline (all Prisma-cascade or pre-existing implicit-any, unchanged since Phase 6) + 3 new Prisma-cascade instances (google-import.ts, google-file-classifier.ts, google-doc-viewer.tsx referencing MaterialType/Material, blocked by `prisma generate` -> binaries.prisma.sh returning 403 in this sandbox). Run `npm run db:generate` with real network access and re-check before trusting this number long-term.
 ```
 
 If any of these numbers differ from what's recorded above, this document

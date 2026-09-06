@@ -251,6 +251,7 @@ returns a fake-success stub) when required env vars are missing.
 | `EmbeddingService` | `getEmbeddingService()` | none | Registry throws `ServiceNotConfiguredError` (Phase 5, provider-free by explicit decision) |
 | `VisionService` | — | none | Interface only, Phase 4/5 (unused) |
 | `DocumentProcessingService` | — | none | Interface only, unused — no PDF/DOCX/PPTX text extraction yet, so those material types aren't chunkable/indexable in Phase 5's RAG pipeline |
+| Google Drive/Docs | `getGoogleDriveService()` | `google-drive.ts` (Drive v3 REST), `google-docs.ts` (Docs export) | Real (Phase 7). Not behind the interface-registry pattern above — single external provider, nothing to swap — but follows the same "throw a real configuration error, never fake success" rule via `GoogleNotConfiguredError` (`google-oauth.ts`). See `docs/google-setup.md`. |
 
 Note: `interfaces.ts`'s own top comment references a `registry.ts` file
 that doesn't exist — the registry functions live directly in per-area

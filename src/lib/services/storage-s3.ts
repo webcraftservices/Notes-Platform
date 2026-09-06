@@ -89,4 +89,17 @@ export class S3StorageService implements StorageService {
     }
     return Buffer.concat(chunks);
   }
+
+  /**
+   * Not part of the StorageService interface — used server-side (by the
+   * Phase 7 Google import orchestrator, lib/google-import.ts) when bytes
+   * already fetched from an external API need to be written directly,
+   * rather than handed to the browser as a presigned PUT URL. Mirrors
+   * getObjectBuffer's duck-typed pattern above.
+   */
+  async putObjectBuffer(key: string, data: Buffer, contentType: string): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: contentType })
+    );
+  }
 }

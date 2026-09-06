@@ -1,0 +1,30 @@
+diff --git a/node_modules/pptx2html/src/process_pptx.js b/node_modules/pptx2html/src/process_pptx.js
+index bcb9651..8afee4d 100644
+--- a/node_modules/pptx2html/src/process_pptx.js
++++ b/node_modules/pptx2html/src/process_pptx.js
+@@ -370,7 +370,7 @@ export default function processPptx (setOnMessage = () => {}, postMessage) {
+         result = processCxnSpNode(nodeValue, warpObj)
+         break
+       case 'p:pic':    // Picture
+-        result = processPicNode(nodeValue, warpObj)
++        result = await processPicNode(nodeValue, warpObj)
+         break
+       case 'p:graphicFrame':    // Chart, Diagram, Table
+         result = await processGraphicFrameNode(nodeValue, warpObj)
+@@ -1248,14 +1248,14 @@ export default function processPptx (setOnMessage = () => {}, postMessage) {
+     return result
+   }
+ 
+-  function processPicNode (node, warpObj) {
++  async function processPicNode (node, warpObj) {
+     const order = node['attrs']['order']
+ 
+     const rid = node['p:blipFill']['a:blip']['attrs']['r:embed']
+     const imgName = warpObj['slideResObj'][rid]['target']
+     const imgFileExt = extractFileExtension(imgName).toLowerCase()
+     const zip = warpObj['zip']
+-    const imgArrayBuffer = zip.file(imgName).asArrayBuffer()
++    const imgArrayBuffer = await zip.file(imgName).async('arraybuffer')
+     let mimeType = ''
+     const xfrmNode = node['p:spPr']['a:xfrm']
+     // /////////////////////////////////////Amir//////////////////////////////
