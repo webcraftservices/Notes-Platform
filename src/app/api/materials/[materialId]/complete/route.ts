@@ -4,6 +4,7 @@ import { getSessionUser } from "@/lib/access";
 import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
 import { extractMetadata } from "@/lib/metadata-extraction";
+import { queueDocumentExtractionIfNeeded } from "@/lib/document-extraction";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, jsonError } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
 
@@ -64,6 +65,11 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
         },
       });
       await logMaterialAddedIfGroup(updated, user.id);
+      // Fire-and-forget, same execution model as transcription/embedding
+      // jobs — no-ops for material types this pipeline doesn't handle
+      // (see queueDocumentExtractionIfNeeded). Unlike transcription this
+      // isn't gated behind a user action: extraction is local/free.
+      void queueDocumentExtractionIfNeeded(updated, user.id);
       return NextResponse.json({ material: updated });
     } catch {
       const updated = await db.material.update({
@@ -76,5 +82,12 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
 
   const updated = await db.material.update({ where: { id: material.id }, data: { status: "READY" } });
   await logMaterialAddedIfGroup(updated, user.id);
+  // Unlike the synchronous metadata extraction above (which the S3 path
+  // skips specifically to avoid downloading the whole object back down
+  // inside this request), document extraction always runs as a
+  // fire-and-forget background job regardless of storage backend — it
+  // never blocks this response, so the same "not worth the cost here"
+  // tradeoff doesn't apply.
+  void queueDocumentExtractionIfNeeded(updated, user.id);
   return NextResponse.json({ material: updated });
 }

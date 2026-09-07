@@ -12,6 +12,7 @@ import { UnsupportedPreview } from "@/components/materials/unsupported-preview";
 import { LinkViewer } from "@/components/materials/link-viewer";
 import { GoogleDocViewer } from "@/components/materials/google-doc-viewer";
 import { PresentationViewer } from "@/components/materials/presentation-viewer";
+import { DocumentViewer } from "@/components/materials/document-viewer";
 import { getMaterialLabel } from "@/lib/material-style";
 
 export function MaterialPreview({ material }: { material: Material }) {
@@ -130,6 +131,8 @@ export function MaterialPreview({ material }: { material: Material }) {
       return <VideoViewer src={readUrl} title={material.title} />;
     case "PPTX":
       return <PresentationViewer materialId={material.id} src={readUrl} title={material.title} />;
+    case "DOCX":
+      return <DocumentViewer materialId={material.id} src={readUrl} title={material.title} />;
     case "TEXT":
       return <TextViewer src={readUrl} />;
     default:

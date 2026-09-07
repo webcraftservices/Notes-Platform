@@ -51,6 +51,12 @@ export function isImageType(type: MaterialType) {
 export function isPdfType(type: MaterialType) {
   return type === "PDF";
 }
+export function isDocxType(type: MaterialType) {
+  return type === "DOCX";
+}
+export function isPptxType(type: MaterialType) {
+  return type === "PPTX";
+}
 export function isTextType(type: MaterialType) {
   return type === "TEXT";
 }

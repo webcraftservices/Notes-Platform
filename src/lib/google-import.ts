@@ -15,6 +15,7 @@ import { extractMetadata } from "@/lib/metadata-extraction";
 import { getStorageUsage } from "@/lib/storage-usage";
 import { getPlanLimits } from "@/lib/plans";
 import { runEmbeddingJob } from "@/lib/ingestion";
+import { queueDocumentExtractionIfNeeded } from "@/lib/document-extraction";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
 
 export class GoogleFileUnsupportedError extends Error {}
@@ -300,6 +301,10 @@ export async function runGoogleImportJob(jobId: string): Promise<void> {
       data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
     });
     await logMaterialAddedIfGroup(updated, job.userId);
+    // Same automatic-extraction trigger as a normal upload's complete
+    // route — no-ops for material types this pipeline doesn't handle
+    // (GOOGLE_DRIVE_FILE, AUDIO, VIDEO, IMAGE, TEXT).
+    void queueDocumentExtractionIfNeeded(updated, job.userId);
 
     // AUDIO/VIDEO imported from Drive are just as transcribable as an
     // upload — the user triggers that manually from the material page
