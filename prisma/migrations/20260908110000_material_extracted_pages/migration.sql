@@ -1,0 +1,22 @@
+-- Phase 5 (AI notes + RAG + AI chat) — page-aware PDF/PPTX ingestion.
+--
+-- Adds a single nullable JSON column to Material for page-level (or
+-- slide-level) extracted text, alongside the existing flattened
+-- `extractedText` column. Populated only by runDocumentExtractionJob
+-- (src/lib/document-extraction.ts) when DocumentProcessingService's
+-- extractText() returns a `pages` array — currently PDF pages and PPTX
+-- slides (see src/lib/services/document-processing-local.ts). DOCX has
+-- no page concept at the file-format level and this stays NULL for it,
+-- exactly as extractedText already stays NULL for materials with no
+-- extractable text.
+--
+-- Purely additive: existing Material rows get NULL, nothing is
+-- backfilled/reprocessed, and no other column changes shape or
+-- semantics. Existing materials with only `extractedText` populated
+-- (e.g. already-extracted PDFs from before this migration, or Google
+-- Docs imports, which never produce page-level text) continue to be
+-- chunked the same way they always were — see chunkPagedText's fallback
+-- to chunkText() in src/lib/ingestion.ts.
+
+-- AlterTable
+ALTER TABLE "Material" ADD COLUMN "extractedPages" JSONB;

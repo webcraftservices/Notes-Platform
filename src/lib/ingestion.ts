@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { chunkTranscriptSegments, chunkText, type TextChunk } from "@/lib/chunking";
+import { chunkPagedText, chunkTranscriptSegments, chunkText, parseExtractedPages, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
 import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 
@@ -11,23 +11,32 @@ import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
  * job with an actionable message (CLAUDE.md's "never fake a feature"
  * rule), exactly like runTranscriptionJob.
  *
- * Text source: Transcript segments (audio/video materials) when present,
- * chunked with chunkTranscriptSegments so each chunk keeps its
- * startSeconds/endSeconds. Otherwise, Material.extractedText (currently
- * only populated by the Phase 7 Google Docs importer — see
- * lib/google-import.ts) is chunked with the generic chunkText(), producing
- * chunks with no timestamps and no page number. DocumentProcessingService
- * (PDF/DOCX/PPTX text extraction) still has no concrete implementation —
- * see ARCHITECTURE.md — so materials of those types still have no text to
- * chunk and this job intentionally no-ops (SUCCEEDED with zero chunks
- * written) rather than failing, since "nothing to index yet" isn't an
- * error.
+ * Text source, in priority order:
+ *   1. Transcript segments (audio/video materials), chunked with
+ *      chunkTranscriptSegments so each chunk keeps its startSeconds/
+ *      endSeconds.
+ *   2. Material.extractedPages (PDF pages, PPTX slides — populated by
+ *      runDocumentExtractionJob, see document-extraction.ts), chunked
+ *      per-page with chunkPagedText so each chunk keeps its pageNumber
+ *      and a citation can read "PDF • Page X".
+ *   3. Material.extractedText (populated by runDocumentExtractionJob for
+ *      DOCX, or by the Phase 7 Google Docs importer — see
+ *      lib/google-import.ts), chunked with the generic chunkText(),
+ *      producing chunks with no timestamp and no page number. This is
+ *      also the fallback for any PDF/PPTX material whose extractedPages
+ *      predates this pipeline change (extractedText only, extractedPages
+ *      null) — it keeps working exactly as it did before, just without
+ *      page citations, rather than needing reprocessing.
+ *
+ * If none of the above have usable text yet, this job intentionally
+ * no-ops (SUCCEEDED with zero chunks written) rather than failing, since
+ * "nothing to index yet" isn't an error.
  *
  * Triggered fire-and-forget from runTranscriptionJob immediately after a
  * transcription SUCCEEDED (see transcription.ts), and equivalently from
- * runGoogleImportJob after a Google Doc's text is extracted (see
- * lib/google-import.ts) — same execution model and same serverless caveat
- * as transcription jobs (see that file's doc comment).
+ * runDocumentExtractionJob/runGoogleImportJob after a document's text is
+ * extracted — same execution model and same serverless caveat as
+ * transcription jobs (see that file's doc comment).
  */
 export async function runEmbeddingJob(jobId: string): Promise<void> {
   const job = await db.processingJob.findUnique({ where: { id: jobId } });
@@ -50,14 +59,18 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
           })
         : null;
 
-    let chunks: (TextChunk & { startSeconds: number | null; endSeconds: number | null })[];
+    let chunks: (TextChunk & { pageNumber: number | null; startSeconds: number | null; endSeconds: number | null })[];
+
+    const extractedPages = parseExtractedPages(material.extractedPages);
 
     if (transcript && transcript.status === "READY" && transcript.segments.length > 0) {
       chunks = chunkTranscriptSegments(
         transcript.segments.map((s) => ({ text: s.text, startSeconds: s.startSeconds, endSeconds: s.endSeconds }))
-      );
+      ).map((c) => ({ ...c, pageNumber: null }));
+    } else if (extractedPages) {
+      chunks = chunkPagedText(extractedPages).map((c) => ({ ...c, startSeconds: null, endSeconds: null }));
     } else if (material.extractedText && material.extractedText.trim().length > 0) {
-      chunks = chunkText(material.extractedText).map((c) => ({ ...c, startSeconds: null, endSeconds: null }));
+      chunks = chunkText(material.extractedText).map((c) => ({ ...c, pageNumber: null, startSeconds: null, endSeconds: null }));
     } else {
       // Nothing to chunk yet for this material type/state — a real,
       // successful no-op, not an error (see doc comment above).
@@ -109,7 +122,7 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
           INSERT INTO "MaterialChunk"
             (id, "materialId", content, "order", "pageNumber", "startSeconds", "endSeconds", "tokenCount", embedding, "createdAt")
           VALUES
-            (${crypto.randomUUID()}, ${material.id}, ${chunk.content}, ${chunk.order}, NULL,
+            (${crypto.randomUUID()}, ${material.id}, ${chunk.content}, ${chunk.order}, ${chunk.pageNumber},
              ${chunk.startSeconds}, ${chunk.endSeconds}, ${chunk.tokenCount}, ${vectorLiteral}::vector, now())
         `;
       }

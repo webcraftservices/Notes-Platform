@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
+import { resolveExtractedPages, shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
 
 /**
  * shouldQueueDocumentExtraction is the pure, DB-free decision function
@@ -62,5 +62,30 @@ describe("shouldQueueDocumentExtraction", () => {
 
   it("does not queue extraction when there is no stored file yet", () => {
     expect(shouldQueueDocumentExtraction({ type: "PDF", extractedText: null, storageKey: null })).toBe(false);
+  });
+});
+
+/**
+ * resolveExtractedPages is the pure, DB-free transformation
+ * runDocumentExtractionJob defers to (document-extraction.ts) when
+ * deciding what to persist to Material.extractedPages — see that file's
+ * doc comment for why an empty/absent `pages` result must become `null`
+ * rather than an empty array (spec §92: never fabricate).
+ */
+describe("resolveExtractedPages", () => {
+  it("returns the pages array when the extractor produced page-level text", () => {
+    const pages = [
+      { pageNumber: 1, text: "Thermodynamics is..." },
+      { pageNumber: 2, text: "The zeroth law..." },
+    ];
+    expect(resolveExtractedPages({ text: "irrelevant", pages })).toEqual(pages);
+  });
+
+  it("returns null when the extractor's result has no `pages` field at all (e.g. DOCX)", () => {
+    expect(resolveExtractedPages({ text: "irrelevant" })).toBeNull();
+  });
+
+  it("returns null rather than an empty array when `pages` is present but empty", () => {
+    expect(resolveExtractedPages({ text: "irrelevant", pages: [] })).toBeNull();
   });
 });

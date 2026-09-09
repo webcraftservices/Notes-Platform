@@ -1,8 +1,8 @@
-import type { Material } from "@prisma/client";
+import { Prisma, type Material } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getDocumentProcessingService } from "@/lib/services/document-processing";
 import { runEmbeddingJob } from "@/lib/ingestion";
-import { DOCUMENT_EXTRACTION_TYPES, shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
+import { DOCUMENT_EXTRACTION_TYPES, resolveExtractedPages, shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
 
 /**
  * Queues a DOCUMENT_EXTRACTION job for a just-uploaded or just-imported
@@ -40,11 +40,12 @@ export async function queueDocumentExtractionIfNeeded(
 /**
  * Runs a single DOCUMENT_EXTRACTION job end to end: RUNNING → real
  * PDF/DOCX/PPTX text extraction (DocumentProcessingService) → save
- * Material.extractedText → SUCCEEDED (+ kick off EMBEDDING, same pattern
- * as runGoogleImportJob's Google Doc branch), or FAILED with a real error
- * message. Never fabricates extracted text (spec §92) — a corrupted or
- * unreadable file always surfaces as a failed job, never an empty-but-
- * successful one.
+ * Material.extractedText (+ Material.extractedPages when the extractor
+ * returned page-level text — PDF pages, PPTX slides) → SUCCEEDED (+ kick
+ * off EMBEDDING, same pattern as runGoogleImportJob's Google Doc branch),
+ * or FAILED with a real error message. Never fabricates extracted text or
+ * page data (spec §92) — a corrupted or unreadable file always surfaces
+ * as a failed job, never an empty-but-successful one.
  *
  * A document with no extractable text (e.g. a scanned PDF with no text
  * layer) is NOT a failure: the job SUCCEEDS with extractedText left
@@ -83,10 +84,25 @@ export async function runDocumentExtractionJob(jobId: string): Promise<void> {
     });
 
     const text = result.text.trim();
+    // Only persisted when the extractor actually produced page-level text
+    // (PDF pages, PPTX slides — see document-processing-local.ts). DOCX
+    // has no page concept and result.pages is undefined for it, same as
+    // for a PDF/PPTX that (unusually) came back with zero pages — never
+    // fabricated, left null exactly like extractedText is left null for
+    // no extractable text.
+    const pages = resolveExtractedPages(result);
 
     await db.material.update({
       where: { id: material.id },
-      data: { extractedText: text.length > 0 ? text : null },
+      data: {
+        extractedText: text.length > 0 ? text : null,
+        // Nullable Json fields require the explicit Prisma.DbNull sentinel
+        // to write a real SQL NULL — passing plain `null` here is a type
+        // error under Prisma's advanced JSON-null handling (the default
+        // since Prisma 3+, still in effect at the ^5.20.0 pinned in this
+        // project).
+        extractedPages: pages ? (pages as Prisma.InputJsonValue) : Prisma.DbNull,
+      },
     });
 
     await db.processingJob.update({

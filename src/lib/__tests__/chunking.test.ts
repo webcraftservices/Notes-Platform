@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText, chunkTranscriptSegments } from "@/lib/chunking";
+import { chunkPagedText, chunkText, chunkTranscriptSegments, parseExtractedPages } from "@/lib/chunking";
 
 /** Indexes into an array and asserts the element exists (tsconfig has noUncheckedIndexedAccess on). */
 function nth<T>(arr: T[], i: number): T {
@@ -114,3 +114,119 @@ describe("chunkTranscriptSegments", () => {
   });
 });
 
+describe("chunkPagedText", () => {
+  it("returns no chunks for an empty page list", () => {
+    expect(chunkPagedText([])).toEqual([]);
+  });
+
+  it("a single page produces chunks with the correct pageNumber", () => {
+    const chunks = chunkPagedText([{ pageNumber: 1, text: "thermal equilibrium means equal temperature" }]);
+    expect(chunks).toHaveLength(1);
+    const chunk = nth(chunks, 0);
+    expect(chunk.pageNumber).toBe(1);
+    expect(chunk.content).toBe("thermal equilibrium means equal temperature");
+    expect(chunk.order).toBe(0);
+  });
+
+  it("a large page produces multiple chunks and every chunk retains the same pageNumber", () => {
+    const words = Array.from({ length: 500 }, (_, i) => `word${i}`);
+    const chunks = chunkPagedText([{ pageNumber: 5, text: words.join(" ") }], { chunkWords: 100, overlapWords: 20 });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.pageNumber).toBe(5);
+    }
+  });
+
+  it("multiple pages produce chunks with correct page provenance and preserved ordering", () => {
+    const page1Words = Array.from({ length: 300 }, (_, i) => `p1w${i}`);
+    const page2Words = Array.from({ length: 300 }, (_, i) => `p2w${i}`);
+    const chunks = chunkPagedText(
+      [
+        { pageNumber: 1, text: page1Words.join(" ") },
+        { pageNumber: 2, text: page2Words.join(" ") },
+      ],
+      { chunkWords: 100, overlapWords: 0 }
+    );
+
+    // No chunk mixes words from both pages.
+    for (const chunk of chunks) {
+      const isPage1 = chunk.content.includes("p1w") && !chunk.content.includes("p2w");
+      const isPage2 = chunk.content.includes("p2w") && !chunk.content.includes("p1w");
+      expect(isPage1 || isPage2).toBe(true);
+      if (isPage1) expect(chunk.pageNumber).toBe(1);
+      if (isPage2) expect(chunk.pageNumber).toBe(2);
+    }
+
+    // All page-1 chunks precede all page-2 chunks, and `order` is
+    // continuous (not reset per page).
+    const page1Chunks = chunks.filter((c) => c.pageNumber === 1);
+    const page2Chunks = chunks.filter((c) => c.pageNumber === 2);
+    expect(page1Chunks.length).toBeGreaterThan(0);
+    expect(page2Chunks.length).toBeGreaterThan(0);
+    chunks.forEach((chunk, i) => expect(chunk.order).toBe(i));
+    expect(Math.max(...page1Chunks.map((c) => c.order))).toBeLessThan(Math.min(...page2Chunks.map((c) => c.order)));
+  });
+
+  it("empty or whitespace-only pages contribute zero chunks without throwing", () => {
+    const chunks = chunkPagedText([
+      { pageNumber: 1, text: "real content on page one" },
+      { pageNumber: 2, text: "   \n\t  " },
+      { pageNumber: 3, text: "" },
+      { pageNumber: 4, text: "real content on page four" },
+    ]);
+
+    expect(chunks.every((c) => c.pageNumber === 1 || c.pageNumber === 4)).toBe(true);
+    expect(chunks.some((c) => c.pageNumber === 1)).toBe(true);
+    expect(chunks.some((c) => c.pageNumber === 4)).toBe(true);
+  });
+
+  it("preserves page ordering as given, not sorted", () => {
+    // Pages are always produced already sorted by the extractor, but the
+    // function itself shouldn't silently re-sort — it should chunk in
+    // the order it's given.
+    const chunks = chunkPagedText([
+      { pageNumber: 2, text: "second page text" },
+      { pageNumber: 1, text: "first page text" },
+    ]);
+    expect(chunks.map((c) => c.pageNumber)).toEqual([2, 1]);
+  });
+
+  it("is deterministic — same input always produces the same output", () => {
+    const pages = [
+      { pageNumber: 1, text: "the quick brown fox jumps over the lazy dog ".repeat(30) },
+      { pageNumber: 2, text: "pack my box with five dozen liquor jugs ".repeat(30) },
+    ];
+    expect(chunkPagedText(pages)).toEqual(chunkPagedText(pages));
+  });
+});
+describe("parseExtractedPages", () => {
+  it("parses a well-formed pages array from Material.extractedPages", () => {
+    const value = [
+      { pageNumber: 1, text: "first" },
+      { pageNumber: 2, text: "second" },
+    ];
+    expect(parseExtractedPages(value)).toEqual(value);
+  });
+
+  it("returns null for null/undefined (Material.extractedPages not set)", () => {
+    expect(parseExtractedPages(null)).toBeNull();
+    expect(parseExtractedPages(undefined)).toBeNull();
+  });
+
+  it("returns null for a non-array value", () => {
+    expect(parseExtractedPages({ pageNumber: 1, text: "not wrapped in an array" })).toBeNull();
+    expect(parseExtractedPages("just a string")).toBeNull();
+  });
+
+  it("returns null for an empty array", () => {
+    expect(parseExtractedPages([])).toBeNull();
+  });
+
+  it("returns null when an entry is missing pageNumber or text, or has the wrong type", () => {
+    expect(parseExtractedPages([{ pageNumber: 1 }])).toBeNull();
+    expect(parseExtractedPages([{ text: "no page number" }])).toBeNull();
+    expect(parseExtractedPages([{ pageNumber: "1", text: "pageNumber is a string" }])).toBeNull();
+    expect(parseExtractedPages([{ pageNumber: 1, text: "ok" }, { pageNumber: 2 }])).toBeNull();
+  });
+});

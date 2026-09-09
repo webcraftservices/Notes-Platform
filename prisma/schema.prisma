@@ -416,6 +416,19 @@ model Material {
   // DocumentProcessingService (PDF/DOCX/PPTX) would populate the same field
   // rather than inventing a parallel one.
   extractedText String? @db.Text
+  // Page-level (or slide-level) text alongside extractedText's flattened
+  // copy — populated only by DocumentProcessingService.extractText()'s
+  // optional `pages` result (currently: PDF pages, PPTX slides; DOCX has
+  // no page concept at the file-format level and never sets this — see
+  // document-processing-local.ts). Shape: [{ pageNumber, text }, ...],
+  // ordered. Nullable and left unset for every material type/extraction
+  // result that doesn't produce page-level text, so existing materials
+  // with only extractedText populated continue working unchanged —
+  // runEmbeddingJob (ingestion.ts) falls back to chunking extractedText
+  // with chunkText() when this is absent, and to chunkPagedText() when
+  // present, so a PDF's MaterialChunk rows can carry a real pageNumber
+  // instead of always NULL.
+  extractedPages Json?
   sourceUrl   String? // for link imports
   mimeType    String?
   sizeBytes   Int?

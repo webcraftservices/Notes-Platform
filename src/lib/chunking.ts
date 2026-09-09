@@ -79,14 +79,6 @@ export function chunkText(text: string, options: ChunkOptions = {}): TextChunk[]
   return chunks;
 }
 
-/**
- * A single source unit chunking can draw text from — currently only
- * TranscriptSegment rows (audio/video). DocumentProcessingService (PDF/
- * DOCX/PPTX text extraction) has no concrete implementation yet (see
- * ARCHITECTURE.md), so there is no page-based source to chunk from in
- * this codebase state — extending this to page-based sources later only
- * requires a sibling function, not a change to chunkText itself.
- */
 export interface TimedWordSource {
   text: string;
   startSeconds: number;
@@ -151,4 +143,89 @@ export function chunkTranscriptSegments(
   }
 
   return chunks;
+}
+
+/** One page's (or slide's) worth of extracted text — DocumentProcessingService's `pages` result. */
+export interface PageSource {
+  pageNumber: number;
+  text: string;
+}
+
+export interface PagedTextChunk extends TextChunk {
+  pageNumber: number;
+}
+
+/**
+ * Chunks page-level extracted text (currently: PDF pages, PPTX slides —
+ * see Material.extractedPages / document-processing-local.ts) into
+ * PagedTextChunks, each carrying the pageNumber of the page it came from.
+ *
+ * Chunking happens PER PAGE, reusing chunkText() as-is for each page's
+ * text — a chunk never spans two pages, so page attribution is always
+ * exact rather than approximated. This is a deliberate tradeoff: a fact
+ * split across a page boundary in the source PDF can end up split across
+ * two chunks with no overlap between them (chunkText's overlapWords only
+ * applies within a page), same as it can already be split across two
+ * pages in the source document itself. The alternative — flattening all
+ * pages into one text blob and chunking across the concatenation — would
+ * make citations point at the wrong page for any chunk that happens to
+ * straddle a page boundary, which is strictly worse for a "PDF • Page X"
+ * citation than an occasional missed cross-page overlap.
+ *
+ * `order` is assigned continuously across the whole document (not reset
+ * per page), matching chunkText/chunkTranscriptSegments's existing
+ * "one ascending order per material" convention that runEmbeddingJob's
+ * insert relies on.
+ *
+ * Pages with no extractable text (e.g. a blank page) simply contribute
+ * zero chunks — chunkText already returns [] for empty/whitespace-only
+ * input — rather than needing special-case handling here. Page order in
+ * the output follows the order pages are given in `pages`; callers pass
+ * Material.extractedPages, which DocumentProcessingService always
+ * produces already sorted by pageNumber (see document-processing-local.ts).
+ */
+export function chunkPagedText(pages: PageSource[], options: ChunkOptions = {}): PagedTextChunk[] {
+  const chunks: PagedTextChunk[] = [];
+  let order = 0;
+
+  for (const page of pages) {
+    for (const chunk of chunkText(page.text, options)) {
+      chunks.push({ ...chunk, order, pageNumber: page.pageNumber });
+      order += 1;
+    }
+  }
+
+  return chunks;
+}
+
+/**
+ * Validates Material.extractedPages (a raw, untyped Prisma JsonValue) into
+ * a real PageSource[] before handing it to chunkPagedText. Defensive
+ * rather than trusting the column's shape at the type level — the field
+ * is only ever written by runDocumentExtractionJob (document-
+ * extraction.ts) today, but a Json column has no schema-level guarantee,
+ * and a malformed/foreign value here should make the caller fall back to
+ * plain-text chunking rather than crash the embedding job or silently
+ * produce garbage chunks. Pure and DB-free, so it's directly unit
+ * testable — same convention as the rest of this module.
+ */
+export function parseExtractedPages(value: unknown): PageSource[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+
+  const pages: PageSource[] = [];
+  for (const entry of value) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof (entry as Record<string, unknown>).pageNumber !== "number" ||
+      typeof (entry as Record<string, unknown>).text !== "string"
+    ) {
+      return null;
+    }
+    pages.push({
+      pageNumber: (entry as { pageNumber: number }).pageNumber,
+      text: (entry as { text: string }).text,
+    });
+  }
+  return pages;
 }

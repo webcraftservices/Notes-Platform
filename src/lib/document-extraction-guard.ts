@@ -39,3 +39,16 @@ export function shouldQueueDocumentExtraction(material: {
   if (material.extractedText && material.extractedText.trim().length > 0) return false;
   return true;
 }
+
+/**
+ * Decides what to persist to Material.extractedPages from a
+ * DocumentProcessingService.extractText() result. Pure and DB-free for
+ * the same reason as shouldQueueDocumentExtraction above: "never
+ * fabricate, only keep genuinely non-empty page arrays" is a rule worth
+ * unit-testing without a database or a real PDF/PPTX file.
+ */
+export function resolveExtractedPages(
+  result: { text: string; pages?: { pageNumber: number; text: string }[] }
+): { pageNumber: number; text: string }[] | null {
+  return result.pages && result.pages.length > 0 ? result.pages : null;
+}
