@@ -46,6 +46,7 @@ export function MaterialTranscribeSection({
   durationSeconds,
   initialTranscript,
   initialJob,
+  startAtSeconds,
 }: {
   materialId: string;
   materialType: "AUDIO" | "VIDEO";
@@ -54,6 +55,8 @@ export function MaterialTranscribeSection({
   durationSeconds?: number | null;
   initialTranscript: TranscriptData | null;
   initialJob: JobData | null;
+  /** Deep-link entry point (Phase 5 — AI chat source citations with a timestamp): seek the player here once on load. See AudioPlayer/VideoViewer for how. */
+  startAtSeconds?: number;
 }) {
   const [job, setJob] = useState<JobData | null>(initialJob);
   const [transcript, setTranscript] = useState<TranscriptData | null>(initialTranscript);
@@ -113,9 +116,15 @@ export function MaterialTranscribeSection({
   return (
     <div className="space-y-4">
       {materialType === "AUDIO" ? (
-        <AudioPlayer ref={playerRef} src={readUrl} title={title} fallbackDurationSeconds={durationSeconds} />
+        <AudioPlayer
+          ref={playerRef}
+          src={readUrl}
+          title={title}
+          fallbackDurationSeconds={durationSeconds}
+          startAtSeconds={startAtSeconds}
+        />
       ) : (
-        <VideoViewer src={readUrl} title={title} />
+        <VideoViewer src={readUrl} title={title} startAtSeconds={startAtSeconds} />
       )}
 
       <div className="card">

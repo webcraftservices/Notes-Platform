@@ -8,9 +8,29 @@ import { MaterialTranscribeSection } from "@/components/materials/material-trans
 import { MaterialInfoPanel } from "@/components/materials/material-info-panel";
 import { MaterialActionsMenu } from "@/components/materials/material-actions-menu";
 
-export default async function MaterialDetailPage({ params }: { params: { materialId: string } }) {
+export default async function MaterialDetailPage({
+  params,
+  searchParams,
+}: {
+  params: { materialId: string };
+  /**
+   * Deep-link entry points (Phase 5 — AI chat source citation
+   * click-through, see lib/material-link.ts): `page` for a PDF page
+   * number, `t` for an audio/video timestamp in seconds. Both optional —
+   * a normal visit to this page (no query string) behaves exactly as
+   * before. Parsed and validated inline here, matching the existing
+   * `scope`/`q` convention in materials/page.tsx.
+   */
+  searchParams: { page?: string; t?: string };
+}) {
   const user = await requireUser();
   const material = await requireMaterial(params.materialId, user.id);
+
+  const pageParam = searchParams.page != null ? Number(searchParams.page) : NaN;
+  const page = Number.isFinite(pageParam) && pageParam > 0 ? Math.floor(pageParam) : undefined;
+
+  const timestampParam = searchParams.t != null ? Number(searchParams.t) : NaN;
+  const startAtSeconds = Number.isFinite(timestampParam) && timestampParam >= 0 ? timestampParam : undefined;
 
   const isTranscribable =
     (material.type === "AUDIO" || material.type === "VIDEO") && material.status === "READY";
@@ -77,9 +97,10 @@ export default async function MaterialDetailPage({ params }: { params: { materia
                     : null
                 }
                 initialJob={latestJob}
+                startAtSeconds={startAtSeconds}
               />
             ) : (
-              <MaterialPreview material={material} />
+              <MaterialPreview material={material} page={page} />
             )}
           </div>
           <MaterialInfoPanel material={material} scope={{ subject, chapter, topic }} />

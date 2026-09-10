@@ -28,9 +28,9 @@ export function computeSafeProgress(currentTime: number, duration: number): numb
 
 export const AudioPlayer = forwardRef<
   AudioPlayerHandle,
-  { src: string; title: string; fallbackDurationSeconds?: number | null }
+  { src: string; title: string; fallbackDurationSeconds?: number | null; startAtSeconds?: number }
 >(
-  function AudioPlayer({ src, title, fallbackDurationSeconds }, ref) {
+  function AudioPlayer({ src, title, fallbackDurationSeconds, startAtSeconds }, ref) {
     const audioRef = useRef<HTMLAudioElement>(null);
     const [playing, setPlaying] = useState(false);
     // Seeded from a reliable server-computed duration (Material.durationSeconds,
@@ -68,21 +68,20 @@ export const AudioPlayer = forwardRef<
       return Number.isFinite(liveDuration) && liveDuration > 0 ? liveDuration : durationRef.current;
     }
 
+    /** Shared by the imperative seek() handle below and the deep-link auto-seek effect further down — see both call sites for why. */
+    function applySeek(seconds: number) {
+      const audio = audioRef.current;
+      if (!audio) return;
+      const target = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+      const clamped = Number.isFinite(duration) && duration > 0 ? Math.min(target, duration) : target;
+      audio.currentTime = clamped;
+      setCurrentTime(clamped);
+      const d = effectiveDuration(audio.duration);
+      if (d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
+    }
+
     useImperativeHandle(ref, () => ({
-      seek: (seconds: number) => {
-        const audio = audioRef.current;
-        if (!audio) return;
-        const target = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-        const clamped = Number.isFinite(duration) && duration > 0 ? Math.min(target, duration) : target;
-        audio.currentTime = clamped;
-        setCurrentTime(clamped);
-        // Same immediate visual sync as the in-component seek() — this
-        // path (used by transcript-click-to-jump) previously left the
-        // bar stale until the next rAF frame, which only happens while
-        // already playing. See the root-cause analysis above.
-        const d = effectiveDuration(audio.duration);
-        if (d > 0) updateVisual(Math.min(1, Math.max(0, clamped / d)));
-      },
+      seek: applySeek,
       play: () => {
         const audio = audioRef.current;
         if (!audio) return;
@@ -294,6 +293,24 @@ export const AudioPlayer = forwardRef<
     // inside onLoaded/onDurationChange above — it only actually changes
     // when the prop does, which already tracks the same material as `src`.
   }, [src, startRaf, stopRaf, fallbackDuration]);
+
+    // Deep-link support (Phase 5 — AI chat source citations with a
+    // timestamp): seek once to a caller-provided initial position as soon
+    // as the element has loaded enough to seek reliably (`loaded` mirrors
+    // the same "loadedmetadata" signal the effect above already tracks),
+    // reusing the exact same applySeek() the transcript click-to-jump
+    // handle above already relies on rather than a second, separate
+    // seeking mechanism. Guarded with a ref (not just a `startAtSeconds`
+    // dependency) so it fires at most once per mount — without the guard,
+    // any later render that happens to run this effect again (e.g. `src`
+    // changing on the same player) would yank playback back to the start.
+    const appliedInitialSeekRef = useRef(false);
+    useEffect(() => {
+      if (startAtSeconds == null || !loaded || appliedInitialSeekRef.current) return;
+      appliedInitialSeekRef.current = true;
+      applySeek(startAtSeconds);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [startAtSeconds, loaded]);
 
     function togglePlay() {
       const audio = audioRef.current;

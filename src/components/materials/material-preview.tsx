@@ -15,7 +15,14 @@ import { PresentationViewer } from "@/components/materials/presentation-viewer";
 import { DocumentViewer } from "@/components/materials/document-viewer";
 import { getMaterialLabel } from "@/lib/material-style";
 
-export function MaterialPreview({ material }: { material: Material }) {
+export function MaterialPreview({
+  material,
+  page,
+}: {
+  material: Material;
+  /** Deep-link entry point (Phase 5 — AI chat source citations with a page number): open the PDF at this page. Ignored for every other material type. */
+  page?: number;
+}) {
   const [currentMaterial, setCurrentMaterial] = useState(material);
   const [readUrl, setReadUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(material.type !== "LINK" && material.type !== "GOOGLE_DOC");
@@ -120,7 +127,7 @@ export function MaterialPreview({ material }: { material: Material }) {
 
   switch (material.type) {
     case "PDF":
-      return <PdfViewer src={readUrl} title={material.title} />;
+      return <PdfViewer src={readUrl} title={material.title} page={page} />;
     case "IMAGE":
       return <ImageViewer src={readUrl} alt={material.title} />;
     case "AUDIO":

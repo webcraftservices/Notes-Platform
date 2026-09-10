@@ -1,19 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Loader2, Send, Sparkles, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
-
-interface AISource {
-  materialId: string;
-  label: string;
-  timestampSeconds?: number;
-  page?: number;
-}
+import { materialSourceHref, materialSourceAriaLabel } from "@/lib/material-link";
+import type { AIMessageSource as AISource } from "@/lib/ai-chat";
 
 interface AIMessage {
   id: string;
@@ -154,9 +150,16 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
                 {message.sources && message.sources.length > 0 && (
                   <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-line/60 pt-2.5 dark:border-line-dark/60">
                     {message.sources.map((source, i) => (
-                      <Badge key={i} variant="muted">
-                        {source.label}
-                      </Badge>
+                      <Link
+                        key={i}
+                        href={materialSourceHref(source)}
+                        aria-label={materialSourceAriaLabel(source)}
+                        className="rounded-sm transition-colors hover:bg-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-strong dark:hover:bg-graphite-800"
+                      >
+                        <Badge variant="muted" className="cursor-pointer">
+                          {source.label}
+                        </Badge>
+                      </Link>
                     ))}
                   </div>
                 )}
