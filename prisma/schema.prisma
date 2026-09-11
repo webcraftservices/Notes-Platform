@@ -390,7 +390,9 @@ model Material {
   owner       User          @relation(fields: [ownerId], references: [id])
 
   // Attachable to any level of the hierarchy, or left unorganized/inbox —
-  // per spec §3 and §25. Exactly zero or one of these is set.
+  // per spec §3 and §25. Hierarchy IDs are intentionally denormalized:
+  // subject materials store subjectId; chapter materials store subjectId
+  // and chapterId; topic materials store subjectId, chapterId, and topicId.
   workspaceId String?
   workspace   Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   subjectId   String?

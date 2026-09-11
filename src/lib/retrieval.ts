@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { ResolvedAIScope } from "@/lib/access";
 import { getEmbeddingService } from "@/lib/services/embedding";
+import { materialWhereForScope } from "@/lib/retrieval-scope";
 
 export interface RetrievedChunk {
   id: string;
@@ -12,26 +13,6 @@ export interface RetrievedChunk {
   startSeconds: number | null;
   endSeconds: number | null;
   similarity: number;
-}
-
-/**
- * Narrows an AI scope down to the Material `where` filter that matches it.
- * Relies on the guarantee documented in materials-scope.ts: every
- * Material's subjectId/chapterId/topicId are mutually consistent (a
- * topicId always implies the matching chapterId/subjectId are set too),
- * so filtering on the single narrowest scope field is sufficient — no
- * need to OR across levels.
- */
-function materialWhereForScope(scope: ResolvedAIScope) {
-  if (scope.topicId) return { topicId: scope.topicId };
-  if (scope.chapterId) return { chapterId: scope.chapterId };
-  if (scope.subjectId) return { subjectId: scope.subjectId };
-  // Phase 6.5: a bare group scope (ownerType "group" with no
-  // subject/chapter/topic set) retrieves across every Material owned
-  // directly by the group — mirrors Material.groupId, the same field
-  // access.ts's assertScopeAccess already trusts for group-owned content.
-  if (scope.ownerType === "group") return { groupId: scope.groupId };
-  return { workspaceId: scope.workspaceId };
 }
 
 /**

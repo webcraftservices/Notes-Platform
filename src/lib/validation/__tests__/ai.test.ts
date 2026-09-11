@@ -15,6 +15,22 @@ describe("aiScopeQuerySchema", () => {
     expect(aiScopeQuerySchema.safeParse({ topicId: "not-a-cuid" }).success).toBe(false);
   });
 
+  it("rejects a non-cuid subjectId (Phase 5 Task 5: Subject-scoped AI chat)", () => {
+    expect(aiScopeQuerySchema.safeParse({ subjectId: "not-a-cuid" }).success).toBe(false);
+  });
+
+  it("rejects a non-cuid chapterId (Phase 5 Task 5: Chapter-scoped AI chat)", () => {
+    expect(aiScopeQuerySchema.safeParse({ chapterId: "not-a-cuid" }).success).toBe(false);
+  });
+
+  it("accepts a valid subjectId", () => {
+    expect(aiScopeQuerySchema.safeParse({ subjectId: "cksubject000000000000000000" }).success).toBe(true);
+  });
+
+  it("accepts a valid chapterId", () => {
+    expect(aiScopeQuerySchema.safeParse({ chapterId: "ckchapter000000000000000000" }).success).toBe(true);
+  });
+
   it("accepts multiple scope fields at once (route layer decides precedence)", () => {
     const result = aiScopeQuerySchema.safeParse({
       subjectId: "cksubject000000000000000000",
