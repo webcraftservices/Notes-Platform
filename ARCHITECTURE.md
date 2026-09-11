@@ -1,525 +1,426 @@
-# ARCHITECTURE.md — Current Application Architecture
+# Current Application Architecture
 
-This describes the application **as it actually exists right now**, verified
-against the code (not the plan). For the phase-by-phase history of *why*
-each decision was made, see `docs/ARCHITECTURE.md` (a chronological
-decision log — kept for context, not the primary reference anymore). For
-what's implemented vs. not, see `PROJECT_STATE.md`. For rules on changing
-any of this, see `CLAUDE.md`.
+This document describes the system that exists in the repository now. The
+repository source is authoritative; planned work is explicitly labelled.
 
----
+## 1. High-level architecture
 
-## Stack
+The application is one Next.js 14 App Router deployable unit:
 
-Next.js 14 (App Router, TypeScript) · PostgreSQL + Prisma + pgvector ·
-NextAuth · Tailwind CSS · Zod · Vitest.
-
-One deployable unit — route handlers ARE the API, no separate backend
-process. The one thing that will eventually need to split out is
-background job execution (see "Audio recording & transcription" below).
-
-## Frontend structure
-
-```
-src/app/
-├── (auth)/              sign-in, sign-up — own layout, no sidebar
-├── (app)/                the authenticated shell (sidebar + command palette)
-│   ├── layout.tsx          fetches user/workspace/plan, renders Sidebar + MobileNavDrawer
-│   ├── home/               dashboard
-│   ├── subjects/            list → [subjectId] → chapters/[chapterId] → topics/[topicId]
-│   ├── materials/           list + [materialId] detail/preview/transcript
-│   ├── groups/               group list + group detail/collaboration UI
-│   ├── assistant/             workspace-scoped AI assistant UI
-│   ├── search/                structural (name-only) search
-│   └── settings/
-├── onboarding/            two-step flow, NOT inside (app) — no sidebar during onboarding
-└── api/                   see "Backend / API structure" below
+```text
+User
+  -> Next.js pages and client components
+  -> NextAuth session
+  -> centralized access checks in src/lib/access.ts
+  -> Workspace -> Subject -> Chapter -> Topic
+  -> Materials, Notes, Audio, and Group collaboration
+  -> StorageService and ProcessingJob
+  -> extraction or transcription
+  -> text/timestamp/page-aware chunks
+  -> EmbeddingService
+  -> PostgreSQL + pgvector MaterialChunk rows
+  -> scoped semantic retrieval
+  -> numbered RAG context
+  -> AIService
+  -> private AIConversation and AIMessage rows
+  -> citations and authorized source navigation
 ```
 
-Route groups `(auth)`/`(app)` don't affect URLs, only which layout wraps
-the page. Middleware (`src/middleware.ts`) gates page routes by session
-presence only — per-resource authorization always happens again inside
-the page/route handler via `lib/access.ts`.
+Route handlers are the API. There is no separate backend service. Most API
+routes are not protected only by middleware: they call `getSessionUser()` and
+perform resource authorization themselves.
 
-**Component organization** (`src/components/`): one folder per feature
-area (`materials/`, `notes/`, `subjects/`, `chapters/`, `topics/`,
-`shell/`, `dashboard/`, `settings/`, `search/`, `auth/`, `onboarding/`),
-plus `ui/` for generic primitives (Button, Dialog, DropdownMenu, Tabs,
-Input, Textarea, Badge, Skeleton, EmptyState, ConfirmDialog) and
-`shared/` for cross-feature pieces (EditableHeader, PhasePlaceholder).
+The main application areas are:
 
-**State management**: mostly none — server components fetch data
-directly via Prisma, client components use local `useState`. The one
-global client store is `lib/stores/ui-store.ts` (Zustand) — used only for
-UI state that needs to be triggered from more than one place (e.g. the
-"create subject" dialog openable from both the command palette and the
-Subjects page's empty state; the mobile nav drawer's open state).
+- `src/app/(auth)` — sign-in and sign-up.
+- `src/app/(app)` — authenticated shell, dashboard, hierarchy, materials,
+  assistant, groups, search, and settings.
+- `src/app/api` — route handlers.
+- `src/components` — feature and UI components.
+- `src/lib` — access, validation, processing, retrieval, services, and pure
+  domain helpers.
 
-**Design tokens**: `tailwind.config.js` — a warm paper/graphite palette
-with a single amber "highlighter" accent color reserved for AI-flagged
-importance (not yet used anywhere, since Phase 5's AI features that would
-flag importance don't exist yet). Typography: Source Serif 4 (display) +
-Inter (body/UI) + IBM Plex Mono (timestamps/code), loaded in
-`src/app/layout.tsx`.
+## 2. Authentication and authorization
 
-## Backend / API structure
+NextAuth uses JWT sessions. Credentials authentication uses bcrypt and Zod
+validation. Google OAuth is available for sign-in. Google Drive/Docs access
+uses a separate connected-account OAuth flow rather than broad sign-in
+scopes.
 
-24 route handlers under `src/app/api/`, grouped by resource:
+`src/lib/access.ts` is the centralized authorization layer:
 
-| Area | Routes |
-|---|---|
-| Auth | `auth/[...nextauth]`, `auth/register` |
-| Hierarchy | `subjects`, `subjects/[id]`, `subjects/[id]/chapters`, `chapters/[id]`, `chapters/[id]/topics`, `topics/[id]` |
-| Notes | `topics/[id]/note` (get-or-create), `notes/[id]` (title), `notes/[id]/blocks` (bulk autosave), `notes/[id]/versions`, `notes/[id]/versions/[vid]/restore` |
-| Materials | `materials`, `materials/upload-url`, `materials/[id]`, `materials/[id]/complete`, `materials/[id]/transcribe` |
-| Storage | `storage/upload` (local-backend write sink), `storage/read` (proxied read, both backends) |
-| Misc | `profile`, `onboarding`, `search`, `recording-usage`, `health` |
+- Workspace access requires workspace membership.
+- Subject access checks the Subject’s workspace or group owner.
+- Chapter access resolves its Subject and checks the Subject owner.
+- Topic access resolves its Chapter and Subject and checks the Subject owner.
+- Material access uses owner identity plus attached workspace/group access.
+- Group access requires active group membership.
+- Group management operations require the appropriate role.
 
-**Every route handler** starts with `getSessionUser()` (not just relying
-on middleware — most of these routes aren't in `middleware.ts`'s matcher
-at all) and resolves resource access through `lib/access.ts`, never an
-inline `where` clause. Validation is Zod schemas from `lib/validation/`.
-Errors go through `lib/api-response.ts`'s shared helpers.
+Server components use `requireUser()` and `require*()` helpers that call
+`notFound()` for missing or unauthorized resources. API routes use
+`getSessionUser()`, `getAccessible*()` helpers, and shared `401`/`403`/`404`
+response helpers.
 
-**Notable non-obvious behavior**:
-- `notes/[id]/blocks` diffs incoming block IDs against what's already in
-  the DB for that note — it never blindly upserts by client-supplied ID
-  (a real access-control bug was caught and fixed here: a client-supplied
-  ID colliding with another note's block would otherwise let one user
-  overwrite another user's content).
-- `materials/[id]/transcribe` creates a `ProcessingJob` row and calls
-  `runTranscriptionJob()` **without awaiting it** — the HTTP response
-  returns immediately (202), the client polls `GET /materials/[id]` for
-  status. See "Audio recording & transcription" below for why.
+### AI authorization invariant
 
-## Database / Prisma structure
+AI scope input is resolved through `getAccessibleAIScope()`. The resolver
+derives ownership from the actual Subject/Chapter/Topic rather than trusting
+client-supplied owner IDs. Stored conversations are private to their
+`userId`; they are not shared merely because their scope is shared.
 
-Single `prisma/schema.prisma`, ~35 models. The initial migration plus the
-completed additive migrations are tracked under `prisma/migrations/` and
-match the current schema.
+Before a conversation message is retrieved or generated,
+`getAccessibleAIConversation()` re-authorizes the stored hierarchy/group/
+workspace scope. The message route then resolves that scope again before
+calling retrieval. Group knowledge is shared with authorized group members,
+but each member’s AI conversation history remains private.
 
-**Core hierarchy** (all soft-deletable via `deletedAt`, archivable via
-`archivedAt`): `Workspace` → `Subject` → `Chapter` → `Topic`. A `Material`
-can attach at any level (`workspaceId` always set; `subjectId`/
-`chapterId`/`topicId` optionally set, each implying the levels above it —
-enforced by `lib/materials-scope.ts`, never trusted independently from
-the client) or be "Unorganized" (workspace-level only).
+## 3. Hierarchy and material scope
 
-**Notes**: `Note` (one per Topic by UI convention, though the schema
-allows more — `topicId` is a plain nullable FK, not unique) →
-`NoteBlock[]` (ordered, typed via `NoteBlockKind` enum) → `NoteVersion`
-(full snapshots, not diffs).
+The hierarchy is:
 
-**Materials/audio**: `Material` → `Transcript` (1:1) →
-`TranscriptSegment[]` (ordered, with `speakerLabel` when the provider
-diarized). `MaterialChunk` exists in the schema (for future RAG
-embedding) but nothing writes to it yet — Phase 5 territory.
+```text
+Workspace
+  -> Subject
+    -> Chapter
+      -> Topic
+```
 
-**Processing**: `ProcessingJob` (generic — `type` enum includes
-`TRANSCRIPTION` and several Phase 5+ job types that don't have
-implementations yet, e.g. `AI_NOTE_GENERATION`, `EMBEDDING`).
+Subjects belong to exactly one owner scope: a personal Workspace or a Group.
+Chapters belong to Subjects and Topics belong to Chapters.
 
-The Phase 6 group models, Phase 5 AI conversation models, and Phase 7
-`ConnectedAccount` model are used by their corresponding application
-features. `FlashcardDeck`/`Flashcard`/`Quiz`/`QuizQuestion`/`QuizAttempt`
-remain Phase 8 schema scaffolding. `UsageRecord` remains Phase 9 schema
-scaffolding; usage is currently computed via live aggregation in
-`lib/storage-usage.ts`/`lib/recording-usage.ts`, not a ledger.
+Material hierarchy IDs are intentionally denormalized. The current invariant
+is:
 
-**Access pattern**: every model that needs authorization has a matching
-pair in `lib/access.ts` — `getAccessibleX(id, userId)` (throws
-`NotAuthorizedError` or returns `null`) for route handlers, and
-`requireX(id, userId)` (calls Next's `notFound()` on either failure mode
-— deliberately indistinguishable) for server components. Access resolves
-through exactly one of: ownership (`ownerId`/`authorId` match), workspace
-membership, or group membership.
+```text
+Subject material: subjectId = S
+Chapter material: subjectId = S, chapterId = C
+Topic material:   subjectId = S, chapterId = C, topicId = T
+```
 
-## Authentication
+Unorganized materials use their workspace/group ownership without a narrower
+hierarchy attachment. `resolveMaterialScope()` derives ancestor IDs from the
+authorized Topic or Chapter and prevents mismatched client-supplied
+hierarchy IDs from being written.
 
-NextAuth with JWT sessions (not database sessions — avoids a DB round
-trip in middleware). Two providers:
-- **Credentials** (email/password): bcrypt cost 12, validated via
-  `lib/validation/auth.ts`, registration rate-limited via
-  `lib/rate-limit.ts` (in-memory — see Known limitations).
-- **Google OAuth**: sign-in-only scopes. Drive/Docs scopes (Phase 7) are
-  a deliberately separate, later consent flow, not requested at login.
+This denormalization is required by scoped retrieval:
 
-New-account provisioning (`lib/provision.ts`) is shared between both
-signup paths (OAuth's `createUser` event and the credentials
-`/api/auth/register` handler) so they can't drift: creates `Profile`,
-`Subscription` (FREE plan), and exactly one personal `Workspace`.
+- `{ subjectId: S }` includes direct Subject, descendant Chapter, and
+  descendant Topic materials.
+- `{ chapterId: C }` includes direct Chapter and descendant Topic materials.
+- `{ topicId: T }` includes only Topic T materials.
 
-`src/middleware.ts` gates page routes (not most API routes — see
-"Backend / API structure") by session presence only.
+Retrieval intentionally uses these indexed scalar IDs rather than relational
+`OR` queries.
 
-## Storage
+## 4. Materials, storage, and processing
 
-`lib/services/storage.ts` is a registry: `getStorageService()` returns
-either `LocalStorageService` or `S3StorageService` based on
-`STORAGE_PROVIDER` (or inferred from which S3 env vars are set; defaults
-to local).
+Materials support links, images, text, PDFs, DOCX, PPTX, audio, video, and
+Google-imported sources. Material records contain ownership/scope IDs,
+metadata, MIME type, storage key, source URL/external reference, processing
+status, extracted text, extracted pages, and soft-delete/archive fields.
 
-- **`LocalStorageService`** (`storage-local.ts`): real filesystem reads/
-  writes under `STORAGE_LOCAL_DIR` (default `./.storage`, gitignored).
-  "Upload URL" and "read URL" are both same-origin app routes
-  (`/api/storage/upload`, `/api/storage/read`) that re-check session +
-  material ownership on every request — there's no separate signed-token
-  layer because the session cookie already IS the correct check.
-- **`S3StorageService`** (`storage-s3.ts`): real AWS SDK v3, real
-  presigned URLs for upload. Also exposes a non-interface method
-  `getObjectBuffer(key)` used server-side by the transcription
-  orchestrator and by the storage-read proxy (see below).
+`StorageService` is an interface with a registry:
 
-**Reads are proxied through `/api/storage/read` for BOTH backends** (this
-changed after Phase 4 — originally only local was proxied, S3 returned a
-direct presigned GET URL). The proxy avoids browser CORS failures against
-object storage for `<audio>`/`<video>` playback. For the S3 path, this
-means downloading the full object into memory on every read/range request
-— no true byte-range streaming from S3 itself. Uploads remain direct
-browser→S3 (efficient, standard, unaffected by the read-side change).
+- `LocalStorageService` stores files under `STORAGE_LOCAL_DIR` (default
+  `.storage`).
+- `S3StorageService` uses AWS SDK v3 and presigned upload URLs.
+- Uploads can go directly to S3.
+- Reads for both backends are proxied through `/api/storage/read`, which
+  rechecks session/material access and avoids browser CORS failures.
 
-## Google Drive and Google Docs integration
+Material completion extracts non-AI metadata where supported, including PDF
+page count, image dimensions, and audio/video duration. Processing jobs are
+created for transcription, document extraction, embedding, and related
+operations. Jobs currently execute fire-and-forget in the persistent Node
+process; a durable queue/worker is future work.
 
-Google Drive is a separate OAuth connection from Google sign-in. The
-integration uses Google Drive v3 REST endpoints and encrypted stored OAuth
-tokens. `google-import.ts` resolves the caller's material scope, checks the
-plan, detects duplicates through `Material.externalRef`, downloads real Drive
-bytes, stores them through the configured storage service, and starts the
-existing processing path. Transient Google/network/storage errors receive
-bounded retries; permanent failures remain failed.
+### Document extraction
 
-The Settings Connected Accounts panel manages the connection, and the Add
-Material dialog contains a flat Drive browser. Native Google Docs are
-exported as `text/plain` and stored in `Material.extractedText`; their
-structure is intentionally flattened. Supported binary Drive files include
-PDF, DOCX, PPTX, TXT, images, audio, and video. Google-native Slides are
-currently rejected rather than silently pretending to import them.
+`DocumentProcessingService` currently has a local implementation:
 
-Imported PPTX files are served from application storage and rendered by
-`components/materials/presentation-viewer.tsx` using `pptx2html`. The viewer
-supports loading/error states, slide navigation, slide counts, refresh, and
-download. The `patches/pptx2html+0.3.4.patch` compatibility patch changes
-image extraction to the asynchronous JSZip API required by the installed
-runtime.
+- PDF uses PDF.js and returns flattened text plus ordered page text.
+- DOCX uses Mammoth and returns flattened text; DOCX has no file-format page
+  model in this implementation.
+- PPTX reads slide XML and returns flattened text plus slide-number provenance.
 
-## Audio recording & transcription system
+The extracted result is stored in `Material.extractedText` and, for PDF/PPTX,
+`Material.extractedPages`. Empty text is an honest successful no-op for a
+source without a text layer. Corrupt/unreadable input creates a failed
+processing job without pretending the material was understood.
 
-**Recording** (`components/materials/recorder-panel.tsx`): browser
-`MediaRecorder` (WebM/Opus, MP4 fallback), a real amplitude-driven level
-meter via Web Audio `AnalyserNode` (not decorative), device selection.
-Before upload, `webm-duration-fix` patches the WebM container's duration
-metadata — `MediaRecorder` output doesn't include it, which otherwise
-leaves `HTMLAudioElement.duration` as `Infinity`.
+## 5. Audio and transcription
 
-**Upload**: shared with the drag-drop uploader via
-`lib/hooks/use-material-upload.ts` (request signed URL → XHR PUT with
-real progress events → call completion endpoint) — one upload pipeline
-for both a picked `File` and a recorded `Blob`.
+The audio path is:
 
-**Metadata extraction** (`lib/metadata-extraction.ts`): non-AI, runs
-synchronously on upload completion — page count (`pdf-lib`), image
-dimensions (`image-size`), audio/video duration (`music-metadata`). Only
-implemented for the local storage backend (S3-backed materials skip
-this — see `PROJECT_STATE.md`).
+```text
+Record or select audio/video
+  -> upload through use-material-upload
+  -> StorageService
+  -> ProcessingJob(TRANSCRIPTION)
+  -> SpeechService
+  -> Transcript
+  -> TranscriptSegment rows
+  -> material/transcript UI and AudioPlayer
+```
 
-**Transcription** (`lib/transcription.ts` + `lib/services/speech*.ts`):
-`SpeechService` interface, two real cloud implementations selected via
-`SPEECH_PROVIDER`:
-- `AssemblyAISpeechService` — recommended default, real speaker
-  diarization, upload→create-transcript→poll REST flow, no practical
-  file-size limit. Prerecorded requests explicitly send
-  `speech_models: ["universal-2"]`; Pro models are not selected.
-- `OpenAIWhisperSpeechService` — segment timestamps via `verbose_json`,
-  no diarization, hard-checks the 25MB request limit before ever calling
-  the API.
+The browser recorder uses MediaRecorder, device selection, a real Web Audio
+level meter, pause/resume/cancel, and WebM duration repair. Transcription
+jobs resolve bytes from the active storage backend and write real provider
+output.
 
-Neither is a local/on-device model — this is intentional (cloud-only, per
-explicit project requirement).
+`SpeechService` has two real implementations:
 
-`runTranscriptionJob(jobId)` is the orchestrator: resolves audio bytes
-from whichever storage backend is active, calls the configured
-`SpeechService`, writes real `Transcript`/`TranscriptSegment` rows, or a
-real `FAILED` `ProcessingJob` with the provider's actual error — never a
-fabricated transcript.
+- AssemblyAI: upload, create, poll, retrieve, timestamps, and speaker labels
+  where diarization is enabled. Requests use `universal-2`.
+- OpenAI Whisper: `verbose_json` segment timestamps and a hard 25 MB request
+  guard; it does not invent speaker labels.
 
-**Execution model**: fire-and-forget from the route handler (not
-awaited), relying on the Node process staying alive after the HTTP
-response — correct on `next dev`/`next start` on a persistent server,
-**broken on request-scoped serverless platforms** (Vercel functions
-freeze after the response completes). The client polls
-`GET /api/materials/[id]` for job status. The documented upgrade path is
-a real queue (BullMQ+Redis, SQS, etc.) consuming from the same
-`ProcessingJob` table — the table was already modeled generically enough
-in Phase 1 to support this without a schema change.
+Transcript segments retain `startSeconds` and `endSeconds`. Transcript
+clicks seek the AudioPlayer through its imperative playback handle. These
+timestamps also flow into RAG chunk provenance and AI citations.
 
-**Playback sync**: `AudioPlayer` (`components/materials/audio-player.tsx`)
-exposes an imperative `seek`/`play` handle via `forwardRef`, letting the
-transcript viewer jump playback to a clicked segment's timestamp. The
-progress bar animation is `requestAnimationFrame`-driven with direct
-`transform` DOM writes (no CSS transition, no React state per frame) —
-see `CLAUDE.md` for why this must not be "simplified" back to something
-that looks more conventional but visually stutters.
+## 6. Provider architecture
 
-## Important service abstractions
+Provider SDKs are imported only by concrete files under
+`src/lib/services`. Callers depend on interfaces and registry functions.
+Missing configuration raises `ServiceNotConfiguredError`; the application
+does not return fake provider results.
 
-All under `src/lib/services/`, all following the same shape: an
-interface in `interfaces.ts`, one or more concrete implementation files,
-and a registry function that throws `ServiceNotConfiguredError` (never
-returns a fake-success stub) when required env vars are missing.
+### AI generation
 
-| Interface | Registry fn | Implementations | Status |
-|---|---|---|---|
-| `StorageService` | `getStorageService()` | Local, S3 | Both real |
-| `SpeechService` | `getSpeechService()` | OpenAI Whisper, AssemblyAI | Both real |
-| `AIService` | `getAIService()` | none | Registry throws `ServiceNotConfiguredError` (Phase 5, provider-free by explicit decision) |
-| `EmbeddingService` | `getEmbeddingService()` | none | Registry throws `ServiceNotConfiguredError` (Phase 5, provider-free by explicit decision) |
-| `VisionService` | — | none | Interface only, Phase 4/5 (unused) |
-| `DocumentProcessingService` | — | none | Interface only, unused — no PDF/DOCX/PPTX text extraction yet, so those material types aren't chunkable/indexable in Phase 5's RAG pipeline |
-| Google Drive/Docs | `getGoogleDriveService()` | `google-drive.ts` (Drive v3 REST), `google-docs.ts` (Docs export) | Real (Phase 7). Not behind the interface-registry pattern above — single external provider, nothing to swap — but follows the same "throw a real configuration error, never fake success" rule via `GoogleNotConfiguredError` (`google-oauth.ts`). See `docs/google-setup.md`. |
+- Interface: `AIService`.
+- Registry: `getAIService()`.
+- Active concrete provider: Gemini.
+- Model: `gemini-2.5-flash-lite`.
+- Configuration: `AI_PROVIDER=gemini`, `GOOGLE_AI_API_KEY`.
+- Gemini supports chat and structured note generation.
+- Chat is promise-based and non-streaming.
 
-Note: `interfaces.ts`'s own top comment references a `registry.ts` file
-that doesn't exist — the registry functions live directly in per-area
-files (`storage.ts`, `speech.ts`, and now `embedding.ts`/`ai.ts`) instead.
-Phase 5 confirmed this is the actual established pattern (a stale
-comment, not a structural issue) rather than "fixing" it toward a single
-`registry.ts` that nothing else uses.
+The registry accepts `anthropic` and `openai` as future provider names, but
+no concrete implementation for those AI providers currently exists.
+Anthropic is therefore optional architecture, not an active integration.
 
-## Data flow (typical: record → transcribe → view)
+### Embeddings
 
-1. Browser records audio → `RecorderPanel` → `useMaterialUpload` hook →
-   `POST /api/materials/upload-url` (creates `Material` row, status
-   `UPLOADING`, returns a signed/proxied upload target)
-2. Browser PUTs bytes directly to that target (S3: real presigned PUT to
-   S3; local: `PUT /api/storage/upload`)
-3. Browser calls `POST /api/materials/[id]/complete` → server reads the
-   file back, runs metadata extraction (local backend only), sets status
-   `READY`
-4. User clicks "Transcribe" (or the Recorder flow, once wired, will do
-   this automatically — currently manual, see `PROJECT_STATE.md`) →
-   `POST /api/materials/[id]/transcribe` → creates `ProcessingJob`,
-   fires `runTranscriptionJob()` without awaiting, returns 202
-   immediately
-5. Client polls `GET /api/materials/[id]` every few seconds until the job
-   is `SUCCEEDED`/`FAILED`
-6. On success, `Transcript`+`TranscriptSegment` rows exist; the material
-   detail page and the Topic's Transcript tab render them via
-   `MaterialTranscribeSection`
+- Interface: `EmbeddingService`.
+- Dimension contract: exactly `1536`.
+- Concrete implementation: `OpenAIEmbeddingService`.
+- Model: `text-embedding-3-small`.
+- Requested dimension: `1536`.
 
-## Key dependencies (why each is here)
+The current `getEmbeddingService()` registry intentionally still throws
+`ServiceNotConfiguredError` rather than dispatching to the OpenAI class.
+This means the concrete provider is present and tested in isolation, but a
+configured end-to-end embedding/RAG deployment is not yet activated in this
+checkout. A provider with a different dimension would require a schema
+migration and re-embedding all existing chunks.
 
-- `@tiptap/*` — block-level rich text editing (notes)
-- `@dnd-kit/*` — drag-to-reorder (note blocks)
-- `@aws-sdk/client-s3` + `s3-request-presigner` — real S3 backend
-- `pdf-lib`, `image-size`, `music-metadata` — non-AI metadata extraction
-- `webm-duration-fix` — patches MediaRecorder's missing WebM duration
-- `cmdk` — command palette
-- `next-auth` + `@auth/prisma-adapter` — auth
-- `zod` — validation (shared client/server schemas)
-- `zustand` — the one small global UI store
-- `sonner` — toast notifications
-- `date-fns` — relative timestamps
+### Other services
 
-## Relationships between major modules (safe-modification notes)
+The same interface/registry pattern is used for storage, speech, and local
+document processing. Vision is an interface only; no concrete vision provider
+is currently registered.
 
-- `lib/access.ts` is a hard dependency of nearly every route handler and
-  server component. Changing its function signatures has wide blast
-  radius — grep for the function name before changing one.
-- `lib/services/storage.ts` and `lib/transcription.ts` are coupled via
-  duck-typing (`instanceof LocalStorageService` / `instanceof
-  S3StorageService` checks, plus one `as any` cast to call
-  `getObjectBuffer` on whichever backend is active from the storage-read
-  route). This is intentional — `getObjectBuffer` is NOT part of the
-  public `StorageService` interface because most callers never need raw
-  bytes. If a third storage backend is ever added, it needs its own
-  `getObjectBuffer`-equivalent and both call sites need updating.
-- `components/materials/upload-material-dialog.tsx` bundles three
-  concerns (file upload, recording, link-add) behind one uncontrolled
-  dialog component. Anything that wants to open it pre-set to a specific
-  tab from outside (e.g. the command palette) currently can't without a
-  controlled-component refactor — noted as a known gap, not yet done.
-- The Topic page's Transcript tab (`topic-transcripts-panel.tsx`) and the
-  Material detail page's transcribe section
-  (`material-transcribe-section.tsx`) both independently query
-  transcript/job status — there's no shared data-fetching layer between
-  them. Changing the shape of either query's response requires checking
-  both call sites.
+## 7. RAG and semantic retrieval
 
-# Phase 5 — AI notes, RAG & AI chat
+The RAG pipeline is:
 
-## What was built
+```text
+Material transcript/extracted text/pages
+  -> chunking
+  -> EmbeddingService
+  -> MaterialChunk rows
+  -> pgvector cosine-distance search
+  -> scoped material IDs
+  -> numbered context block
+  -> AIService.chat()
+```
 
-**Provider-free by explicit decision.** No AI/embedding SDK
-(Anthropic/OpenAI/Google) was added as a dependency, no API key is
-required, and nothing fabricates a response. `getAIService()` and
-`getEmbeddingService()` (`lib/services/ai.ts`, `lib/services/embedding.ts`)
-always throw `ServiceNotConfiguredError` today — every feature below is
-fully wired end-to-end against the real interfaces and fails honestly at
-exactly that one point. See `docs/ai-setup.md` for how to activate a real
-provider later without touching anything else in this list.
+`chunking.ts` uses deterministic word windows with overlap. Transcript
+chunks preserve timestamp spans. PDF/PPTX page chunks preserve
+`pageNumber`. Plain extracted text chunks have no page/timestamp provenance.
 
-**Chunking** (`lib/chunking.ts`): deterministic, dependency-free —
-whitespace word-splitting with a fixed word-count window (220) and
-overlap (40), no tokenizer library. `chunkTranscriptSegments` is the
-variant actually used today: it flattens `TranscriptSegment` rows to a
-per-word list (each word remembering its segment's start/end seconds), so
-each output chunk's timestamp span reflects exactly which segments its
-words came from — not the segment boundaries themselves. Full limitations
-(word-count ≠ token-count, no sentence-awareness, space-delimited-language
-assumption) are documented in the file's own doc comment, not repeated
-here.
+`runEmbeddingJob()` chooses source text in this order:
 
-**Indexing** (`lib/ingestion.ts`): `runEmbeddingJob(jobId)` mirrors
-`runTranscriptionJob`'s exact shape (RUNNING → real work → SUCCEEDED/
-FAILED). Triggered as a fire-and-forget `EMBEDDING` `ProcessingJob`
-immediately after a transcription job SUCCEEDS (the one edit to
-`transcription.ts` this phase made). Chunks are written via raw SQL
-(`tx.$executeRaw`) because `MaterialChunk.embedding` is
-`Unsupported("vector(1536)")` in the Prisma schema — the typed client can
-neither read nor write that one column, everything else on the row still
-goes through normal Prisma calls inside the same transaction. Only
-audio/video materials (via their `Transcript`) are chunkable right now —
-`DocumentProcessingService` has no implementation, so PDF/DOCX/PPTX
-materials simply have nothing to index yet (the job SUCCEEDS with zero
-chunks written for those, since "nothing to index" isn't a failure).
+1. Ready transcript segments.
+2. Parsed extracted pages.
+3. Flattened extracted text.
 
-**Retrieval** (`lib/retrieval.ts`): real pgvector cosine-distance search
-(`<=>` operator) via `db.$queryRaw`, restricted to materials in an
-already-authorized scope that retrieval re-derives itself (never trusts a
-caller-supplied material ID list). Skips the embedding call entirely
-(returns `[]`) when nothing's indexed yet for the scope, rather than
-tripping an avoidable configuration error on every message sent to a
-freshly-created topic.
+It writes vector values with parameterized raw SQL because Prisma represents
+`MaterialChunk.embedding` as `Unsupported("vector(1536)")`. Other chunk fields
+remain normal Prisma fields. A dimension mismatch fails loudly before writes.
 
-**Scope resolution** (`lib/access.ts`): `getAccessibleAIScope` mirrors
-`resolveMaterialScope`'s cascade (narrowest-wins: topic > chapter >
-subject > workspace) and reuses `materials-scope.ts`'s documented
-guarantee that every `Material`'s narrower FKs are mirrored consistently
-up to `workspaceId` — so filtering on one FK field is sufficient, no OR
-across levels needed. `getAccessibleAIConversation` re-checks the
-underlying scope's access on every read/write (not just conversation
-ownership), since workspace/subject/chapter/topic membership can change
-after a conversation was created.
+`retrieveRelevantChunks()` first queries the authorized Material rows using
+`materialWhereForScope()`, excludes soft-deleted materials, then restricts
+the pgvector query to those material IDs. If no indexed chunks exist, it
+returns an empty result without calling the embedding service.
 
-**AI chat** (`/api/ai/conversations`, `/api/ai/conversations/[id]/messages`,
-`AIChatPanel`): one active conversation per (user, scope) — mirrors Phase
-3's "one note per topic" simplification. A message turn retrieves chunks,
-builds a numbered context block (`lib/ai-chat.ts`), calls
-`AIService.chat()`, and persists BOTH the user and assistant messages in
-one transaction — **only if the AI call actually succeeds**. If
-`AIService`/`EmbeddingService` aren't configured (always true today) or
-the call otherwise fails, nothing is persisted and the route returns a
-real 503; the UI shows a config-error banner rather than a fake assistant
-bubble, and never leaves an orphaned user-only turn in history. Used at
-two scopes: Topic (`TopicTabs`' AI Chat tab) and workspace/global (the
-Assistant page) — Chapter/Subject-scoped UI isn't built yet even though
-the backend supports it (see "Known limitations").
+### Scope behavior
 
-**AI note generation** (`lib/note-generation.ts`,
-`/api/materials/[id]/generate-notes`): `AI_NOTE_GENERATION` job, same
-orchestrator shape as transcription/embedding. Scoped per-Material (like
-`runTranscriptionJob`), requires the material to be topic-attached with a
-READY transcript. On success (once a provider exists), appends
-`NoteBlock`s after the note's current highest `order` and writes a
-`NoteVersion` snapshot first if blocks already existed — never deletes or
-overwrites manual notes. `GenerateAINotesButton` +
-`NotesTabPanel` wrap the existing `NoteEditor` (Phase 3) via a
-remount-`key` trick rather than modifying its internals, since it has no
-built-in refetch prop.
+- Subject scope retrieves direct Subject materials and all Chapter/Topic
+  descendants through the denormalized `subjectId`.
+- Chapter scope retrieves direct Chapter materials and Topic descendants
+  through the denormalized `chapterId`.
+- Topic scope retrieves only that Topic’s materials.
+- Bare group scope retrieves group-owned shared materials by `groupId`.
+- Bare workspace scope retrieves workspace materials by `workspaceId`.
 
-## Key decisions
+## 8. AI chat, conversations, and citations
 
-- **pgvector kept exactly as migrated in Phase 1** — `vector(1536)`, no
-  new migration. `EMBEDDING_DIMENSIONS = 1536` in `embedding.ts` is the
-  single source of truth other code should reference; `runEmbeddingJob`
-  asserts a configured `EmbeddingService.dimensions` matches it before
-  ever calling `.embed()`, so a mismatched provider fails loudly at job
-  start, not with a silently-wrong pgvector insert.
-- **Chunking has no tokenizer dependency** — word-count-based, not a
-  `tiktoken` (or similar) call. This was an explicit project constraint,
-  not an oversight; a real tokenizer is documented future work in
-  `docs/ai-setup.md`, tied to whichever provider gets chosen (different
-  providers tokenize differently).
-- **A failed AI chat turn persists nothing.** Considered persisting the
-  user's message regardless and only failing the assistant reply, but
-  that leaves orphaned user-only turns cluttering history for every
-  message sent while unconfigured (which, in this codebase's current
-  state, is every message). Persisting both-or-neither keeps retries
-  clean and history meaningful once a provider is added.
-- **Indexing is automatic, not a user action.** A successful transcription
-  immediately queues an `EMBEDDING` job — consistent with spec's "RECORD →
-  UNDERSTAND → ORGANIZE → SEARCH → ASK → LEARN" pipeline framing (indexing
-  isn't a separate user-visible step, it's part of what "finishing"
-  processing a lecture means). AI note generation, by contrast, IS a
-  manual user action (`GenerateAINotesButton`) — an unsolicited rewrite of
-  someone's notes is a very different kind of action than making them
-  searchable, and the master prompt is explicit that AI organization is
-  never forced on the user without a click.
-- **`getOrCreateTopicNote` extracted to `lib/notes.ts`** so the existing
-  note route and the new note-generation job share one implementation
-  (`CLAUDE.md`'s "every new Prisma model access pattern" rule) — a small,
-  behavior-preserving refactor of Phase 3 code, not a redesign.
-- **`ProcessingJob` polling gained a generic endpoint**
-  (`GET /api/processing-jobs/[jobId]`) rather than teaching
-  `/api/materials/[id]` a second job-type-specific response shape — AI
-  note generation's result lives on a Topic's Note, not the Material
-  itself, so there's no single natural "parent resource" to attach status
-  to the way transcription attaches to its Material.
+`AIChatPanel` is used by:
 
-## Known limitations (by design, not oversights)
+- workspace Assistant (`/assistant`);
+- Topic AI Chat;
+- Subject AI Chat;
+- Chapter AI Chat;
+- group AI Assistant.
 
-- **Everything in this phase currently fails with a real configuration
-  error** — no `AIService`/`EmbeddingService` implementation exists. This
-  is the entire point of "provider-agnostic scaffold only" as approved;
-  see `docs/ai-setup.md` for activation.
-- **Only audio/video materials are indexed/chat-able.** PDF/DOCX/PPTX
-  text extraction (`DocumentProcessingService`) has no implementation —
-  unrelated to Phase 5's scope, blocked on a Phase 3/4-era interface that
-  was never filled in.
-- **No streaming.** `AIService.chat()` stays Promise-based this phase, per
-  explicit scope. `AIChatPanel` waits for the full response.
-- **Chat UI exists at Topic and workspace scope only** — the backend
-  (`getAccessibleAIScope`, the conversations routes) fully supports
-  Chapter- and Subject-scoped conversations too, but Chapter/Subject pages
-  are single-view (not tabbed) in this codebase and restructuring them
-  into tabs to fit an "Ask AI" panel would be a Phase 2 UI redesign, which
-  this phase's constraints explicitly ruled out. Adding it later is a
-  small, additive change (reuse `AIChatPanel` with a different `scope`
-  prop) once/if those pages grow tabs for another reason.
-- **Group-scoped AI conversations are schema-only.**
-  `AIConversation.groupId` exists but `getAccessibleAIScope` still
-  doesn't resolve it. A group membership/role model *does* now exist
-  (`lib/access.ts`'s `getGroupRole`/`requireGroupRole`, Phase 6.1), but
-  wiring it into `getAccessibleAIScope`/`ResolvedAIScope` and
-  `lib/retrieval.ts`'s `materialWhereForScope` is explicitly Phase 6.5
-  work, not done yet.
-- **`db.aIConversation`/`db.aIMessage` property names are unverified
-  against a real generated Prisma client** in the session that wrote
-  this code (no network access to `binaries.prisma.sh` — same limitation
-  documented for the rest of the Prisma-cascade typecheck errors). They
-  follow Prisma's documented "lowercase only the first character" model
-  naming rule, matching existing patterns like `db.processingJob`, but
-  this should be the first thing checked if Phase 5 doesn't compile after
-  a real `prisma generate`.
+`/api/ai/conversations` validates scope input, authorizes it, and gets or
+creates a private conversation for the user and scope. A separate POST
+starts a new conversation.
 
-## Phase 5 verification checklist
+`/api/ai/conversations/[conversationId]/messages`:
 
-- [ ] `npm run db:generate` succeeds (needs real network access to
-      `binaries.prisma.sh` — did not succeed in the session that wrote
-      this code) — confirms `db.aIConversation`/`db.aIMessage` and the
-      rest of the Prisma-derived types actually compile
-- [ ] With no `AI_PROVIDER`/`EMBEDDING_PROVIDER` configured (or set but no
-      implementation added): open a Topic's AI Chat tab, send a message —
-      see a real "AI chat isn't configured yet" banner, not a fake reply;
-      confirm nothing was persisted (`AIMessage` table stays empty for
-      that attempt)
-- [ ] Transcribe an audio material to completion — confirm an `EMBEDDING`
-      `ProcessingJob` was auto-created and ends `FAILED` with a real
-      `ServiceNotConfiguredError` message (proves the integration hook
-      fired, even though it can't succeed without a provider)
-- [ ] Click "Generate AI Notes" on a topic with a transcribed lecture —
-      confirm the job ends `FAILED` with a real error, and that the
-      topic's existing manual notes are completely untouched
-- [ ] Once a real `AIService`/`EmbeddingService` is added (see
-      `docs/ai-setup.md`): re-run the above and confirm real indexed
-      chunks, a real AI reply with clickable sources that jump to the
-      correct audio timestamp, and real appended `NoteBlock`s
+1. authenticates the caller;
+2. validates message content;
+3. re-authorizes the private conversation and stored scope;
+4. retrieves scoped chunks;
+5. builds numbered RAG context;
+6. calls `AIService.chat()`;
+7. persists the user and assistant messages in one transaction only after a
+   successful provider call.
+
+An assistant message stores `sources` JSON entries with `materialId`, a
+human-readable label, and optional `page` or `timestampSeconds`.
+`materialSourceHref()` links citations to `/materials/[materialId]` with
+`?page=` or `?t=`. The material page and preview enforce authorization
+again. PDF viewers can open the requested page; audio/video playback can
+seek to the requested timestamp. PPTX preview supports slide rendering, while
+its citation currently links to the authorized material page and preserves
+the page/slide provenance in the citation label.
+
+No streaming, suggested prompts, regenerate action, or AI answer editing is
+currently implemented.
+
+## 9. Group collaboration
+
+Group roles are:
+
+```text
+OWNER, ADMIN, MEMBER, VIEWER
+```
+
+Groups have membership, invitations, role enforcement, subjects, materials,
+activity entries, and notifications. Subjects are either Workspace-owned or
+Group-owned, never both. Group-owned material scope follows the owning
+Subject/Chapter/Topic.
+
+Group knowledge is shared with authorized members. AI conversations remain
+private per user even when their retrieval scope is the same group.
+Invitation tokens, email validation, status transitions, and membership
+authorization are checked through the centralized access and invitation
+helpers.
+
+## 10. Database and migrations
+
+The database is PostgreSQL through Prisma. The `pgvector` extension stores
+`MaterialChunk.embedding` as `vector(1536)`.
+
+Important current models include:
+
+- `User`, `Profile`, `Subscription`, `Workspace`, `WorkspaceMember`;
+- `Subject`, `Chapter`, `Topic`;
+- `Material`, `MaterialChunk`;
+- `Transcript`, `TranscriptSegment`;
+- `AIConversation`, `AIMessage`;
+- `ProcessingJob`;
+- `Group`, `GroupMember`, `GroupInvitation`, `ActivityLog`,
+  `Notification`;
+- `ConnectedAccount` for Google connections;
+- `Note`, `NoteBlock`, `NoteVersion`;
+- plan and usage-supporting models.
+
+Flashcard and quiz models remain schema scaffolding. `UsageRecord` exists as
+future ledger scaffolding; current storage and recording usage are computed
+from live Material/subscription aggregates.
+
+Tracked migrations include the initial schema, nullable Subject workspace
+ownership for groups, group invitation/activity/notification changes,
+`Material.extractedText`, and `Material.extractedPages`.
+
+## 11. External integrations
+
+Implemented integrations:
+
+- Gemini generation through `@google/genai`.
+- OpenAI embeddings implementation through the OpenAI SDK, not yet registry
+  activated.
+- AssemblyAI speech-to-text.
+- OpenAI Whisper speech-to-text.
+- Google OAuth sign-in.
+- Separate Google Drive/Docs OAuth connection with signed state and encrypted
+  stored tokens.
+- Google Drive v3 REST browsing and import.
+- Google Docs `text/plain` export.
+- Local PDF/DOCX/PPTX extraction.
+- Optional S3-compatible object storage.
+
+Google-native Slides are rejected by the importer; PPTX files are supported.
+Drive browsing is currently flat and there is no continuous synchronization.
+
+## 12. Security
+
+Current security mechanisms include:
+
+- NextAuth session authentication.
+- Bcrypt password hashing.
+- Session checks in route handlers, not only middleware.
+- Centralized access resolution for every protected resource.
+- Scope authorization before AI conversation creation and retrieval.
+- Re-authorization of stored conversation scopes on use.
+- Parameterized Prisma/raw SQL values for material-ID and vector queries.
+- Signed Google OAuth state.
+- Encrypted connected-account tokens.
+- Invitation token/email/status validation.
+- No client-trusted owner or group IDs for hierarchy scope resolution.
+
+Distributed rate limiting, database row-level security, comprehensive
+observability, and production queue hardening remain future work.
+
+## 13. Testing
+
+The project uses Vitest with Node environment and tests live beside the
+covered code in `__tests__` folders. Existing coverage includes:
+
+- validation schemas;
+- chunking and page/timestamp provenance;
+- document extraction and extraction idempotency guards;
+- mocked Gemini and OpenAI embedding provider behavior;
+- MIME, material links, styles, invitations, groups, and crypto;
+- retrieval scope selection and Subject/Chapter descendant fixtures;
+- AI scope and stored-conversation authorization;
+- audio-player utility behavior.
+
+The suite does not make live cloud-provider calls and does not replace
+database-backed integration testing. Run:
+
+```text
+npm run test
+npm run lint
+npm run typecheck
+```
+
+## 14. Known limitations and next work
+
+- Embedding provider registry activation is still required for real indexed
+  RAG in this checkout.
+- AI chat is non-streaming and has limited UX actions.
+- No AI summaries, suggested prompts, generated questions, or tutor feature.
+- Processing is fire-and-forget and needs a persistent Node runtime.
+- S3 read proxy buffers objects instead of true byte-range streaming.
+- No OCR for scanned/image-only documents.
+- No continuous Drive synchronization.
+- Google-native Slides are not imported.
+- No distributed rate limiting, usage ledger, or production observability.
+- Flashcards, quizzes, and broader Phase 8 study tools are not implemented.
