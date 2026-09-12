@@ -55,9 +55,24 @@ export interface DocumentProcessingService {
   }>;
 }
 
+export interface EmbeddingResult {
+  vectors: number[][];
+  /**
+   * Total tokens billed for this embedding request, when the provider
+   * reports it. `null` when unavailable — never a fabricated number
+   * (spec §92 / CLAUDE.md's "never fake a feature" rule). Phase 5 Task 6
+   * consumes this to record real AI usage (see lib/ai-usage.ts); it isn't
+   * used for anything else.
+   */
+  totalTokens: number | null;
+}
+
 export interface EmbeddingService {
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[]): Promise<EmbeddingResult>;
   dimensions: number;
+  /** Short identifiers used only for AI usage accounting (spec §61 / Phase 5 Task 6) — e.g. "openai" / "text-embedding-3-small". Never used for branching logic. */
+  readonly providerName: string;
+  readonly modelName: string;
 }
 
 export interface AIChatMessage {
@@ -75,6 +90,10 @@ export interface AIService {
   generateNotes(input: { transcriptText: string; templateKind: "lecture" | "meeting" }): Promise<{
     blocks: { kind: string; heading?: string; content: string }[];
   }>;
+
+  /** Short identifiers used only for AI usage accounting (spec §61 / Phase 5 Task 6) — e.g. "gemini" / "gemini-2.5-flash-lite". Never used for branching logic. */
+  readonly providerName: string;
+  readonly modelName: string;
 }
 
 /** Thrown when a provider is selected but its required env vars are absent. */

@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import type { ResolvedAIScope } from "@/lib/access";
 import { getEmbeddingService } from "@/lib/services/embedding";
 import { materialWhereForScope } from "@/lib/retrieval-scope";
+import { recordAIUsage } from "@/lib/ai-usage";
 
 export interface RetrievedChunk {
   id: string;
@@ -33,6 +34,7 @@ export interface RetrievedChunk {
 export async function retrieveRelevantChunks(
   query: string,
   scope: ResolvedAIScope,
+  userId: string,
   limit = 8
 ): Promise<RetrievedChunk[]> {
   const materials = await db.material.findMany({
@@ -48,10 +50,26 @@ export async function retrieveRelevantChunks(
   if (indexedCount === 0) return [];
 
   const embeddingService = getEmbeddingService();
-  const embeddings = await embeddingService.embed([query]);
-  const queryVector = embeddings[0];
+  const { vectors, totalTokens } = await embeddingService.embed([query]);
+  const queryVector = vectors[0];
   if (!queryVector) throw new Error("EmbeddingService returned no vector for the query.");
   const vectorLiteral = `[${queryVector.join(",")}]`;
+
+  // Recorded after the embedding call has already succeeded — see
+  // lib/ai-usage.ts's doc comment for why this never blocks/fails the
+  // retrieval itself. Attributed to the requesting user; scope's
+  // workspaceId/groupId are folded in only as extra context, never as an
+  // alternate owner (spec §10).
+  await recordAIUsage({
+    userId,
+    workspaceId: scope.ownerType === "workspace" ? scope.workspaceId : null,
+    groupId: scope.ownerType === "group" ? scope.groupId : null,
+    category: "embedding",
+    provider: embeddingService.providerName,
+    model: embeddingService.modelName,
+    tokensInput: totalTokens,
+    context: { purpose: "query" },
+  });
 
   // Raw SQL: pgvector's <=> (cosine distance) operator and the vector(1536)
   // column type aren't reachable through the typed Prisma client (the

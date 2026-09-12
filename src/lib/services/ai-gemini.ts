@@ -144,6 +144,9 @@ interface GeminiClient {
  * __tests__/ai-gemini.test.ts).
  */
 export class GeminiAIService implements AIService {
+  readonly providerName = "gemini";
+  readonly modelName = GEMINI_MODEL;
+
   constructor(private readonly client: GeminiClient) {}
 
   async chat(input: {

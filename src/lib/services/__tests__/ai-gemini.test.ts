@@ -14,6 +14,14 @@ function fakeResponse(overrides: Partial<GenerateContentResponse> & { text?: str
   return overrides as GenerateContentResponse;
 }
 
+describe("GeminiAIService", () => {
+  it("reports its provider/model identifiers for usage accounting", () => {
+    const service = new GeminiAIService(fakeClient(vi.fn()));
+    expect(service.providerName).toBe("gemini");
+    expect(service.modelName).toBe("gemini-2.5-flash-lite");
+  });
+});
+
 describe("GeminiAIService.chat", () => {
   it("returns real content and token counts on a successful call", async () => {
     const generateContent = vi.fn().mockResolvedValue(

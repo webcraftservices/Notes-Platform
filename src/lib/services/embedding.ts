@@ -21,26 +21,34 @@ export const EMBEDDING_DIMENSIONS = 1536;
 
 /**
  * EMBEDDING_PROVIDER selects the backend explicitly ("openai" | "google"),
- * matching the two options already named in .env.example. Phase 5 was
- * explicitly scoped as a provider-agnostic pass — no concrete
- * EmbeddingService implementation exists yet, and no embedding SDK is a
- * dependency of this project. This registry function always throws
- * ServiceNotConfiguredError, same as getSpeechService()/getStorageService()
- * did before their first concrete implementation existed.
+ * matching the two options already named in .env.example. Only "openai"
+ * has a concrete implementation so far (embedding-openai.ts) — chosen as
+ * the default in .env.example alongside AI_PROVIDER=gemini so ingestion
+ * and RAG retrieval work out of the box with a single OPENAI_API_KEY,
+ * without requiring OpenAI as the text-generation provider too.
  *
- * When a real provider is added later, it must follow the exact pattern
- * used by speech.ts: a new file (e.g. embedding-openai.ts) exporting a
- * class that implements EmbeddingService and asserts `dimensions === 1536`
- * at construction time, required()'d from a new branch here — never
- * inlined into this function.
+ * Same lazy-`require()` + factory pattern as getAIService()/getSpeechService()
+ * — a real provider file exports a `createXxxService()` factory that reads
+ * its own API key and throws ServiceNotConfiguredError itself if missing,
+ * so this registry function never inlines provider-specific config/auth
+ * logic. Adding "google" later means creating embedding-google.ts
+ * following the exact same shape (implementing EmbeddingService, including
+ * `providerName`/`modelName` and returning real `totalTokens` — see
+ * interfaces.ts) and adding one more branch here — never inlined into
+ * this function.
  */
 export function getEmbeddingService(): EmbeddingService {
   const provider = process.env.EMBEDDING_PROVIDER;
+
+  if (provider === "openai") {
+    const { createOpenAIEmbeddingService } = require("./embedding-openai") as typeof import("./embedding-openai");
+    return createOpenAIEmbeddingService();
+  }
 
   throw new ServiceNotConfiguredError("EmbeddingService", [
     provider
       ? `no concrete EmbeddingService implementation exists yet for EMBEDDING_PROVIDER="${provider}"`
       : 'EMBEDDING_PROVIDER ("openai" or "google")',
-    "a matching API key, once a provider implementation is added — see docs/ai-setup.md",
+    "OPENAI_API_KEY, once EMBEDDING_PROVIDER is set to \"openai\" — see docs/ai-setup.md",
   ]);
 }

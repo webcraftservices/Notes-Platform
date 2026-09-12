@@ -45,6 +45,7 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [limitError, setLimitError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const query = scopeToQuery(scope);
@@ -73,6 +74,7 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
 
     setSending(true);
     setConfigError(null);
+    setLimitError(null);
     // Optimistic user bubble — replaced by the server's persisted version
     // once the request succeeds; removed again if it fails, since a
     // failed turn intentionally persists nothing (see the messages route's
@@ -94,6 +96,12 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
       if (res.status === 503) {
         const { error } = await res.json();
         setConfigError(error);
+        setMessages((prev) => (prev ?? []).filter((m) => m.id !== optimisticId));
+        return;
+      }
+      if (res.status === 429) {
+        const { error } = await res.json();
+        setLimitError(error);
         setMessages((prev) => (prev ?? []).filter((m) => m.id !== optimisticId));
         return;
       }
@@ -176,6 +184,16 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
           <div>
             <p className="font-medium">AI chat isn&apos;t configured yet</p>
             <p className="mt-0.5 text-ink-muted dark:text-white/50">{configError}</p>
+          </div>
+        </div>
+      )}
+
+      {limitError && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-sm border border-signal-info/30 bg-signal-info/5 px-3.5 py-3 text-sm text-ink dark:text-white">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-signal-info" />
+          <div>
+            <p className="font-medium">Slow down a moment</p>
+            <p className="mt-0.5 text-ink-muted dark:text-white/50">{limitError}</p>
           </div>
         </div>
       )}

@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { chunkPagedText, chunkTranscriptSegments, chunkText, parseExtractedPages, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
 import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
+import { recordAIUsage } from "@/lib/ai-usage";
 
 /**
  * Runs a single EMBEDDING job end to end: RUNNING → chunk the material's
@@ -102,10 +103,26 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
       );
     }
 
-    const vectors = await embeddingService.embed(chunks.map((c) => c.content));
+    const { vectors, totalTokens } = await embeddingService.embed(chunks.map((c) => c.content));
     if (vectors.length !== chunks.length) {
       throw new Error("EmbeddingService returned a different number of vectors than chunks were requested.");
     }
+
+    // Recorded once the embedding call itself has actually succeeded (real
+    // vectors returned), same "record after success, never block on it"
+    // semantics as the chat path in messages/route.ts — see lib/ai-usage.ts.
+    // material.ownerId is always set for a user-owned Material; group-owned
+    // materials still carry the uploading user's id there, so usage is
+    // always attributed to a real person, never shared group-wide (spec §10).
+    await recordAIUsage({
+      userId: material.ownerId,
+      workspaceId: material.workspaceId,
+      category: "embedding",
+      provider: embeddingService.providerName,
+      model: embeddingService.modelName,
+      tokensInput: totalTokens,
+      context: { materialId: material.id, chunkCount: chunks.length },
+    });
 
     await db.$transaction(async (tx) => {
       await tx.materialChunk.deleteMany({ where: { materialId: material.id } });

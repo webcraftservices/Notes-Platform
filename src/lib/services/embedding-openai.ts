@@ -1,6 +1,6 @@
 import OpenAI, { APIError } from "openai";
 import type { EmbeddingCreateParams, CreateEmbeddingResponse } from "openai/resources/embeddings";
-import type { EmbeddingService } from "./interfaces";
+import type { EmbeddingResult, EmbeddingService } from "./interfaces";
 import { ServiceNotConfiguredError } from "./interfaces";
 import { EMBEDDING_DIMENSIONS } from "./embedding";
 
@@ -39,11 +39,13 @@ const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
  */
 export class OpenAIEmbeddingService implements EmbeddingService {
   readonly dimensions = EMBEDDING_DIMENSIONS;
+  readonly providerName = "openai";
+  readonly modelName = OPENAI_EMBEDDING_MODEL;
 
   constructor(private readonly client: EmbeddingsClient) {}
 
-  async embed(texts: string[]): Promise<number[][]> {
-    if (texts.length === 0) return [];
+  async embed(texts: string[]): Promise<EmbeddingResult> {
+    if (texts.length === 0) return { vectors: [], totalTokens: null };
 
     let response;
     try {
@@ -81,7 +83,13 @@ export class OpenAIEmbeddingService implements EmbeddingService {
       }
     });
 
-    return vectors;
+    // response.usage.total_tokens is OpenAI's real, billed token count for
+    // this request — never estimated locally. Genuinely absent (not just
+    // falsy/zero) only if the SDK's response shape changes; `null` in that
+    // case rather than guessing (spec §92).
+    const totalTokens = typeof response.usage?.total_tokens === "number" ? response.usage.total_tokens : null;
+
+    return { vectors, totalTokens };
   }
 }
 

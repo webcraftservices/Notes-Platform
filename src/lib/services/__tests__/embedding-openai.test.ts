@@ -20,10 +20,16 @@ describe("OpenAIEmbeddingService", () => {
     expect(service.dimensions).toBe(1536);
   });
 
+  it("reports its provider/model identifiers for usage accounting", () => {
+    const service = new OpenAIEmbeddingService(fakeClient(vi.fn()));
+    expect(service.providerName).toBe("openai");
+    expect(service.modelName).toBe("text-embedding-3-small");
+  });
+
   it("returns [] without calling the API for an empty input list", async () => {
     const create = vi.fn();
     const service = new OpenAIEmbeddingService(fakeClient(create));
-    expect(await service.embed([])).toEqual([]);
+    expect(await service.embed([])).toEqual({ vectors: [], totalTokens: null });
     expect(create).not.toHaveBeenCalled();
   });
 
@@ -36,7 +42,7 @@ describe("OpenAIEmbeddingService", () => {
     });
     const service = new OpenAIEmbeddingService(fakeClient(create));
 
-    const vectors = await service.embed(["thermal equilibrium"]);
+    const { vectors, totalTokens } = await service.embed(["thermal equilibrium"]);
 
     expect(create).toHaveBeenCalledWith({
       model: "text-embedding-3-small",
@@ -45,6 +51,20 @@ describe("OpenAIEmbeddingService", () => {
     });
     expect(vectors).toHaveLength(1);
     expect(vectors[0]).toHaveLength(EMBEDDING_DIMENSIONS);
+    expect(totalTokens).toBe(5);
+  });
+
+  it("reports null totalTokens when the provider response omits usage, rather than fabricating a count", async () => {
+    const create = vi.fn().mockResolvedValue({
+      data: [{ index: 0, object: "embedding", embedding: vector(0.1) }],
+      model: "text-embedding-3-small",
+      object: "list",
+    });
+    const service = new OpenAIEmbeddingService(fakeClient(create));
+
+    const { totalTokens } = await service.embed(["thermal equilibrium"]);
+
+    expect(totalTokens).toBeNull();
   });
 
   it("batches multiple texts into a single request and returns one vector per input, in input order", async () => {
@@ -62,7 +82,7 @@ describe("OpenAIEmbeddingService", () => {
     const service = new OpenAIEmbeddingService(fakeClient(create));
 
     const texts = ["first chunk", "second chunk", "third chunk"];
-    const vectors = await service.embed(texts);
+    const { vectors, totalTokens } = await service.embed(texts);
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ input: texts }));
@@ -70,6 +90,7 @@ describe("OpenAIEmbeddingService", () => {
     expect(vectors[0]![0]).toBeCloseTo(0.1);
     expect(vectors[1]![0]).toBeCloseTo(0.2);
     expect(vectors[2]![0]).toBeCloseTo(0.3);
+    expect(totalTokens).toBe(12);
   });
 
   it("rejects a response with the wrong vector dimension rather than returning it", async () => {
