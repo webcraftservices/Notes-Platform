@@ -150,6 +150,40 @@ export async function getAccessibleMaterial(materialId: string, userId: string) 
   throw new NotAuthorizedError();
 }
 
+/**
+ * FlashcardDeck/Quiz (Phase 8.1) reuse Material's exact scope shape — see
+ * the schema block comment above FlashcardDeck — so access resolves the
+ * same way: the owner can always reach their own deck/quiz, otherwise
+ * access follows whichever workspace/group it's attached to.
+ */
+export async function getAccessibleFlashcardDeck(deckId: string, userId: string) {
+  const deck = await db.flashcardDeck.findUnique({ where: { id: deckId } });
+  if (!deck) return null;
+  if (deck.ownerId === userId) return deck;
+
+  if (deck.groupId) {
+    if (await userIsGroupMember(deck.groupId, userId)) return deck;
+  }
+  if (deck.workspaceId) {
+    if (await userIsWorkspaceMember(deck.workspaceId, userId)) return deck;
+  }
+  throw new NotAuthorizedError();
+}
+
+export async function getAccessibleQuiz(quizId: string, userId: string) {
+  const quiz = await db.quiz.findUnique({ where: { id: quizId } });
+  if (!quiz) return null;
+  if (quiz.ownerId === userId) return quiz;
+
+  if (quiz.groupId) {
+    if (await userIsGroupMember(quiz.groupId, userId)) return quiz;
+  }
+  if (quiz.workspaceId) {
+    if (await userIsWorkspaceMember(quiz.workspaceId, userId)) return quiz;
+  }
+  throw new NotAuthorizedError();
+}
+
 export async function getAccessibleMaterialByStorageKey(storageKey: string, userId: string) {
   const material = await db.material.findFirst({
     where: { storageKey, deletedAt: null },
@@ -227,6 +261,18 @@ export async function requireMaterial(materialId: string, userId: string) {
     const material = await getAccessibleMaterial(materialId, userId);
     if (!material) notFound();
     return material;
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) notFound();
+    throw err;
+  }
+}
+
+/** requireX pair for getAccessibleFlashcardDeck (Phase 8.2 — the minimal deck page needs this). */
+export async function requireFlashcardDeck(deckId: string, userId: string) {
+  try {
+    const deck = await getAccessibleFlashcardDeck(deckId, userId);
+    if (!deck) notFound();
+    return deck;
   } catch (err) {
     if (err instanceof NotAuthorizedError) notFound();
     throw err;

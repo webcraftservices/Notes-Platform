@@ -2,13 +2,12 @@
 
 import type { Material } from "@prisma/client";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { EditableHeader } from "@/components/shared/editable-header";
 import { NotesTabPanel } from "@/components/notes/notes-tab-panel";
 import { MaterialsPanel } from "@/components/materials/materials-panel";
 import { TopicTranscriptsPanel, type TranscribableMaterial } from "@/components/topics/topic-transcripts-panel";
 import { AIChatPanel } from "@/components/ai/ai-chat-panel";
-import { GraduationCap } from "lucide-react";
+import { FlashcardsStudyToolsPanel } from "@/components/topics/flashcards-study-tools-panel";
 
 export function TopicTabs({
   topicId,
@@ -58,12 +57,10 @@ export function TopicTabs({
       </TabsContent>
 
       <TabsContent value="study-tools">
-        <PhasePlaceholder
-          icon={GraduationCap}
-          title="Study tools arrive in Phase 8"
-          description="Generate flashcards, quizzes, and revision sheets from this topic once materials are indexed."
-          phase="Phase 8 · Flashcards, quizzes & AI tutor"
-        />
+        <FlashcardsStudyToolsPanel topicId={topicId} />
+        <p className="mt-6 text-center text-xs text-ink-faint dark:text-white/40">
+          Quizzes and the AI tutor are coming in a later update.
+        </p>
       </TabsContent>
     </Tabs>
   );

@@ -341,13 +341,19 @@ Important current models include:
 - `Note`, `NoteBlock`, `NoteVersion`;
 - plan and usage-supporting models.
 
-Flashcard and quiz models remain schema scaffolding. `UsageRecord` exists as
-future ledger scaffolding; current storage and recording usage are computed
-from live Material/subscription aggregates.
+Flashcard and quiz models remain schema scaffolding (no generation or study
+UI yet), but as of Phase 8.1 they carry Material's own scope shape
+(`workspaceId`/`groupId`/`subjectId`/`chapterId`/`topicId`) instead of a
+bare `topicId`, plus a `FlashcardReview` table for private per-user study
+activity and a `sources` JSON provenance column on `Flashcard`/
+`QuizQuestion` — see §15. `UsageRecord` exists as future ledger scaffolding;
+current storage and recording usage are computed from live
+Material/subscription aggregates.
 
 Tracked migrations include the initial schema, nullable Subject workspace
 ownership for groups, group invitation/activity/notification changes,
-`Material.extractedText`, and `Material.extractedPages`.
+`Material.extractedText`, `Material.extractedPages`, and the Phase 8.1
+Learning System foundation.
 
 ## 11. External integrations
 
@@ -388,7 +394,72 @@ Current security mechanisms include:
 Distributed rate limiting, database row-level security, comprehensive
 observability, and production queue hardening remain future work.
 
-## 13. Testing
+## 13. Learning System scope (Phase 8.1) and flashcard generation (Phase 8.2)
+
+`FlashcardDeck` and `Quiz` reuse Material's own scope shape rather than a
+new resolver: `subjectId`/`chapterId`/`topicId` narrow within an owner,
+`workspaceId`/`groupId` always identify the owner, and an unattached
+deck/quiz falls back to the owner's personal workspace. `lib/
+learning-scope.ts` re-exports `lib/materials-scope.ts`'s
+`resolveMaterialScope` under learning-domain names (`resolveLearningScope`)
+rather than duplicating it. `lib/access.ts`'s `getAccessibleFlashcardDeck`/
+`getAccessibleQuiz` (plus `requireFlashcardDeck`, added in Phase 8.2 for
+the new deck page) follow `getAccessibleMaterial`'s owner-or-scope-
+membership shape. A bare group scope (no subject/chapter/topic underneath
+a Group, the way `AIConversation` supports for group chat) is not
+supported yet, matching Material's own current limitation.
+
+Shared learning *content* (`Flashcard`, `QuizQuestion`, including a
+`sources` JSON provenance column reusing `AIMessage.sources`'s shape) is
+kept structurally separate from private per-user learning *activity*
+(`QuizAttempt`, and `FlashcardReview`) — one group's shared deck can be
+reviewed by every member without any member seeing another's review
+history, matching the same privacy model Phase 6.5 already applies to
+group AI conversations.
+
+`lib/validation/learning.ts` defines Zod schemas
+(`flashcardGenerationItemSchema`, `quizQuestionGenerationItemSchema`) for
+validating AI-generated flashcard/quiz JSON before it's persisted.
+`flashcardGenerationItemSchema` is wired in as of Phase 8.2 (below);
+`quizQuestionGenerationItemSchema` is not — that's Phase 8.3.
+
+**Phase 8.2 — flashcard generation.** `lib/services/flashcard-generation.ts`
+implements the real pipeline: `getAccessibleAIScope` (re-authorizes the
+Topic and produces the same `ResolvedAIScope` AI chat retrieval already
+uses — chosen deliberately over `resolveLearningScope` for this call site,
+since a topicId input resolves to structurally the same fields either
+way; see that file's doc comment) → `retrieveRelevantChunks` (real,
+scope-limited retrieval — no bypassing RAG with a raw query) →
+`AIService.chat()` with a grounding-only system prompt (no new
+AIService method or provider client) → parse/validate the JSON twice
+(raw AI shape, then the complete persisted shape with real
+`chunksToSources()` provenance attached) → one `$transaction` writing a
+`FlashcardDeck` + its `Flashcard`s. A Topic with nothing indexed yet
+fails with `InsufficientSourceMaterialError` before the AI is ever
+called, rather than falling back to general knowledge; unusable AI output
+fails with `FlashcardGenerationOutputError` and persists nothing.
+`recordAIUsage` runs under a new `"flashcard_generation"`
+`AIUsageCategory` (a value that category's own doc comment already
+anticipated) after persistence succeeds, matching the AI chat route's
+best-effort placement.
+
+`POST /api/topics/[topicId]/flashcards` is synchronous, deliberately
+*not* the fire-and-forget `ProcessingJob` pattern audio transcription
+uses — a bounded retrieval-plus-one-chat-call operation is the same cost
+class as a single AI chat turn, so it gets the same request/response
+shape as `POST /api/ai/conversations/[id]/messages`. `GET
+/api/flashcards/[deckId]` returns a deck and its cards via
+`getAccessibleFlashcardDeck`, ordered `id ASC` (cuid's built-in time
+ordering — cards are created sequentially inside one transaction, where
+Postgres's `now()` is fixed for the whole transaction, so `createdAt`
+can't distinguish insertion order the way it does for models created
+one-per-request elsewhere in this app), and never includes
+`FlashcardReview` rows. The Topic "Study Tools" tab's `PhasePlaceholder`
+was replaced with a functional `FlashcardsStudyToolsPanel` plus a minimal
+`/flashcards/[deckId]` page — deliberately not the full study/flip
+experience (that's a later subphase).
+
+## 14. Testing
 
 The project uses Vitest with Node environment and tests live beside the
 covered code in `__tests__` folders. Existing coverage includes:
@@ -400,7 +471,11 @@ covered code in `__tests__` folders. Existing coverage includes:
 - MIME, material links, styles, invitations, groups, and crypto;
 - retrieval scope selection and Subject/Chapter descendant fixtures;
 - AI scope and stored-conversation authorization;
-- audio-player utility behavior.
+- audio-player utility behavior;
+- FlashcardDeck/Quiz scope authorization and learning generation-output
+  validation schemas (Phase 8.1);
+- the flashcard generation service and both flashcard API routes, mocked
+  at the service/AIService boundary (Phase 8.2).
 
 The suite does not make live cloud-provider calls and does not replace
 database-backed integration testing. Run:
@@ -411,7 +486,7 @@ npm run lint
 npm run typecheck
 ```
 
-## 14. Known limitations and next work
+## 15. Known limitations and next work
 
 - Embedding provider registry activation is still required for real indexed
   RAG in this checkout.

@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import type { UsageKind } from "@prisma/client";
+import type { Prisma, UsageKind } from "@prisma/client";
 
 /**
  * Phase 5 Task 6 — AI usage accounting.
@@ -9,12 +9,13 @@ import type { UsageKind } from "@prisma/client";
  * "embedding" covers EmbeddingService.embed() calls (query + ingestion
  * indexing). Both draw from the same `UsageRecord` ledger and the same
  * abstract "AI credits" pool (PlanLimits.aiCreditsPerMonth) — see
- * lib/ai-quota.ts. New AI operations (note generation, flashcard
- * generation, etc.) can add a new category string here without a schema
- * change, since category lives in UsageRecord.metadata rather than a new
- * enum value.
+ * lib/ai-quota.ts. "flashcard_generation" (Phase 8.2) is the first of
+ * the "new AI operations... can add a new category string here" cases
+ * this comment already anticipated — still the same `UsageRecord`
+ * ledger, still no schema change, since category lives in
+ * UsageRecord.metadata rather than a new enum value.
  */
-export type AIUsageCategory = "chat" | "embedding";
+export type AIUsageCategory = "chat" | "embedding" | "flashcard_generation";
 
 export interface RecordAIUsageInput {
   userId: string;
@@ -28,7 +29,7 @@ export interface RecordAIUsageInput {
   tokensInput?: number | null;
   tokensOutput?: number | null;
   /** Free-form extra context (e.g. conversationId, materialId) folded into the same metadata blob rather than new columns. */
-  context?: Record<string, unknown>;
+  context?: Prisma.InputJsonObject;
 }
 
 /**
@@ -49,7 +50,7 @@ export interface RecordAIUsageInput {
  * transaction in messages/route.ts, for the same reason.
  */
 export async function recordAIUsage(input: RecordAIUsageInput): Promise<void> {
-  const metadata: Record<string, unknown> = {
+  const metadata: Prisma.InputJsonObject = {
     category: input.category,
     provider: input.provider,
     model: input.model,

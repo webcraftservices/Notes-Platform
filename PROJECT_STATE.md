@@ -1,7 +1,8 @@
 # Project State
 
-Last reconciled against the repository at commit `22a856a` and the current
-working tree on 2026-09-11.
+Last reconciled against the repository at commit `45db743` plus the Phase
+8.1 Learning System foundation working-tree changes on top of it, on
+2026-09-12.
 
 `PROJECT_STATE.md` is the canonical state document. There is no separate
 root-level `STATE.md`.
@@ -17,7 +18,7 @@ root-level `STATE.md`.
 | Phase 5 — AI, RAG, and AI chat | IN PROGRESS | The provider abstractions, Gemini generation path, embedding implementation, extraction, chunking, indexing, retrieval, scoped chat, citations, and authorization are present. Provider activation and several planned AI UX/features remain incomplete. |
 | Phase 6 — Groups and collaboration | COMPLETE | Groups, membership, roles, invitations, shared Subjects/Materials, activity, notifications, and group AI scope are implemented. |
 | Phase 7 — Google Drive/Docs | IN PROGRESS / PARTIAL | Google OAuth connections, Drive browsing/import, Docs text export, re-import, and supported-file processing are implemented. Continuous sync and native Google Slides import are not implemented. |
-| Phase 8 — Flashcards, quizzes, and tutor | NOT YET IMPLEMENTED | Prisma models exist as scaffolding; the user-facing feature set is not implemented. |
+| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards complete) | Flashcard generation from a Topic's indexed knowledge is real and working end-to-end (retrieval → AIService → validation → persistence → a minimal deck page). Quiz generation, quiz-taking, the AI tutor, study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.2 — Flashcards" below. |
 | Phase 9 — Billing, usage ledger, security hardening, and production polish | NOT YET IMPLEMENTED | Some plan limits and live usage calculations exist, but the full ledger and hardening work do not. |
 
 ## Implemented product surface
@@ -118,6 +119,112 @@ AI responses are never fabricated. Missing provider configuration returns a
 real configuration error, and failed chat turns do not persist an orphaned
 user message or fake assistant response.
 
+## Phase 8.1 — Learning System foundation
+
+Only the foundation is implemented. No flashcard/quiz generation, study
+UI, or AI tutor exists yet — the "Study Tools" tab still shows the
+existing Phase 8 `PhasePlaceholder`, unchanged.
+
+What changed:
+
+- `FlashcardDeck` and `Quiz` now carry the same five-field scope as
+  `Material` (`workspaceId`/`groupId`/`subjectId`/`chapterId`/`topicId`),
+  instead of being hard-tied to an optional `topicId` alone. This reuses
+  `resolveMaterialScope()` (re-exported as `resolveLearningScope()` from
+  the new `lib/learning-scope.ts`) rather than introducing a second scope
+  resolver — see that file's doc comment. A **bare group scope** (a
+  deck/quiz attached to a Group with nothing narrower under it, the way
+  `AIConversation` supports for Phase 6.5 group chat) is deliberately not
+  supported yet, matching Material's own "no Unorganized within a Group"
+  limitation.
+- New `getAccessibleFlashcardDeck()`/`getAccessibleQuiz()` in
+  `lib/access.ts`, following the same owner-or-scope-membership shape as
+  `getAccessibleMaterial()`. No `requireFlashcardDeck`/`requireQuiz`
+  server-component pair yet, since 8.1 adds no pages.
+- **Ownership-boundary fix:** the original `Flashcard` scaffolding stored
+  `timesReviewed`/`timesCorrect`/`nextReviewAt` directly on the shared
+  card row, which would have conflated one group member's private study
+  activity with another's the moment a deck was shared — a direct
+  violation of the Group Learning Model's "User A must not automatically
+  see User B's progress" rule. Nothing in the app read or wrote those
+  columns yet, so they were removed and replaced with a new
+  `FlashcardReview` table (private, per-user, one row per review event),
+  mirroring the `Quiz`/`QuizQuestion` vs. `QuizAttempt` split that already
+  existed and was already correct.
+- **Provenance:** `Flashcard.sources` and `QuizQuestion.sources` are new
+  nullable JSON columns, reusing `AIMessage.sources`'s existing shape
+  (`{ materialId, label, timestampSeconds?, page? }[]`) instead of a new
+  provenance table. Typed and validated via `learningSourceRefSchema` in
+  `lib/validation/learning.ts`.
+- **Structured-output contracts:** `lib/validation/learning.ts` also adds
+  `flashcardGenerationItemSchema` and `quizQuestionGenerationItemSchema`
+  — Zod schemas used to validate AIService's JSON output before writing
+  it to the database. `flashcardGenerationItemSchema` is now actually
+  wired in as of Phase 8.2 (below); `quizQuestionGenerationItemSchema`
+  still isn't wired into any route — that's Phase 8.3. No new `AIService`
+  method was added for either.
+- Migration `20260912100000_learning_system_foundation` was hand-written
+  (same as every other migration in this checkout — `prisma migrate dev`
+  cannot reach `binaries.prisma.sh` in this sandbox) and has not been
+  applied to any database.
+
+Deliberately deferred to 8.3+: quiz generation, any study/tutor UI beyond
+the minimal flashcard entry point below, spaced repetition scheduling,
+shared/aggregate progress views, and a bare-group learning scope.
+
+## Phase 8.2 — Flashcards
+
+Real, end-to-end, Topic-scoped flashcard generation — not a mock, not a
+generic "ask an LLM" feature. The pipeline: `getAccessibleTopic` (route)
+→ `getAccessibleAIScope` (service, re-authorizes) → `retrieveRelevantChunks`
+(real pgvector retrieval, limited to that Topic's materials) →
+`AIService.chat()` (existing abstraction, no new provider/client) →
+two-stage validation against `flashcardGenerationItemSchema` (raw AI
+shape, then the complete shape including real provenance) → one
+`$transaction` creating a `FlashcardDeck` + its `Flashcard`s → best-effort
+`recordAIUsage` under a new `"flashcard_generation"` category.
+
+- **Route shape:** `POST /api/topics/[topicId]/flashcards` is
+  synchronous (like `POST /api/ai/conversations/[id]/messages`), NOT the
+  fire-and-forget `ProcessingJob` pattern used for audio transcription —
+  this is one bounded retrieval + one chat-shaped AI call, the same cost
+  class as a single chat turn, so the client just awaits the finished
+  deck. `GET /api/flashcards/[deckId]` returns a deck + its cards via
+  `getAccessibleFlashcardDeck`, and deliberately never includes
+  `FlashcardReview` rows (shared content vs. private activity, per the
+  Group Learning Model).
+- **Insufficient material:** if `retrieveRelevantChunks` returns nothing
+  for the Topic, generation fails with a real 409
+  (`FLASHCARDS_INSUFFICIENT_MATERIAL`) before ever calling the AI —
+  never a fallback to general-knowledge cards, never an empty deck
+  pretending to be a success.
+- **Malformed AI output:** invalid JSON, an empty array, or items missing
+  `front`/`back` all fail with a 502 (`FLASHCARDS_GENERATION_FAILED`)
+  and create nothing — the transaction never runs.
+- **Provenance:** every card in one generation batch shares the same
+  `chunksToSources(chunks)` result (the exact same provenance-shaping
+  function `ai-chat.ts` already uses for AI chat citations) — honest
+  because it really is everything that grounded that batch, not invented
+  per-card attribution the model was never asked to produce.
+- **Card ordering:** `Flashcard` has no `order` column (no schema change
+  was made for this). Cards are created sequentially inside the
+  transaction and read back `ORDER BY id ASC`, relying on cuid's
+  time-ordering — `createdAt` can't be used for this because Postgres
+  fixes `now()` at transaction start, so every card in one batch would
+  otherwise share an identical timestamp. See
+  `lib/services/flashcard-generation.ts`'s doc comment.
+- **UI:** the Topic "Study Tools" tab's Phase 8 placeholder is now a real
+  `FlashcardsStudyToolsPanel` (generate → link to `/flashcards/[deckId]`)
+  plus a minimal `FlashcardDeckView`/deck page — title, card count,
+  front/back, source badges reusing `materialSourceHref`. No flip
+  animation, no keyboard study controls, no review/answer-tracking UI —
+  those are later subphases, not built here.
+- Deliberately NOT implemented in 8.2 (all explicitly deferred): quiz
+  generation, quiz-taking, the AI tutor, study sessions, progress
+  analytics, spaced repetition, regeneration/versioning of a deck (each
+  generation just creates a new deck), Subject/Chapter-wide generation
+  (Topic-only for now).
+
 ## Material and RAG invariants
 
 Material hierarchy IDs are intentionally denormalized:
@@ -179,9 +286,21 @@ Scanned PDFs and image-only documents have no OCR fallback.
 2. Perform manual browser verification of Subject, Chapter, group, and
    material-source navigation flows with configured providers.
 3. Add only the next explicitly selected Phase 5 AI UX/features; do not imply
-   streaming, quotas, summaries, or study tools are complete.
-4. Continue the roadmap toward Phase 8 study tools and Phase 9 billing,
-   usage-ledger, and production-hardening work.
+   streaming, summaries, or study tools are complete.
+4. Phase 8.3: quiz generation, following flashcard-generation.ts's exact
+   shape (`getAccessibleAIScope` → `retrieveRelevantChunks` →
+   `AIService.chat()` → `quizQuestionGenerationItemSchema` → transaction),
+   plus a quiz-taking UI and scoring against `QuizAttempt`.
+5. Continue the roadmap toward Phase 8.4+ (AI tutor, study sessions,
+   progress, spaced repetition) and Phase 9 billing, usage-ledger, and
+   production-hardening work.
+
+Known pre-existing doc drift (not touched by this task, flagged for a
+future reconciliation pass): the "NOT YET IMPLEMENTED or DEFERRED" list
+under Phase 5 above still says AI quota enforcement/rate limiting isn't
+implemented, but `lib/ai-quota.ts`/`lib/ai-usage.ts` (already on `main` as
+of commit `45db743`) implement both. This predates and is unrelated to
+Phase 8.1.
 
 ## Validation
 
@@ -195,6 +314,20 @@ npm run typecheck
 
 Vitest covers pure chunking, extraction guards, provider behavior with mocked
 SDK clients, validation schemas, material/source-link formatting, retrieval
-scope selection, descendant retrieval fixtures, and AI authorization
-boundaries. Live cloud-provider calls and production database behavior are
+scope selection, descendant retrieval fixtures, AI authorization
+boundaries, FlashcardDeck/Quiz scope authorization, learning
+generation-output validation schemas (Phase 8.1), and — as of Phase 8.2 —
+the flashcard generation service and both flashcard routes (mocked at the
+service/AIService boundary; no real Gemini/OpenAI network calls in the
+suite). Live cloud-provider calls and production database behavior are
 not exercised by the unit suite.
+
+As of the Phase 8.2 commit: 44 test files / 428 passing (4 skipped),
+`npm run lint` clean, `npm run typecheck` at 84 errors — 82 of which are
+the same pre-existing `@prisma/client`-generation-cascade set as before
+(see CLAUDE.md; `npm run db:generate` removes them all in a real dev
+environment), plus 2 new occurrences of that identical cascade pattern
+(implicit `any` on a Prisma query-result parameter and a
+`$transaction` callback parameter in the two new flashcard files) — not
+new logical errors, confirmed by diffing the full error list against the
+pre-8.2 baseline.

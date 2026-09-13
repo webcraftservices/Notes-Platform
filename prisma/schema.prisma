@@ -56,6 +56,7 @@ model User {
   flashcardDecks     FlashcardDeck[]
   quizzes            Quiz[]
   quizAttempts       QuizAttempt[]
+  flashcardReviews   FlashcardReview[]
   activityLogs       ActivityLog[]
   subscription       Subscription?
   usageRecords       UsageRecord[]
@@ -179,6 +180,8 @@ model Workspace {
   subjects    Subject[]
   materials   Material[]
   aiConversations AIConversation[]
+  flashcardDecks FlashcardDeck[]
+  quizzes     Quiz[]
 
   @@index([ownerId])
 }
@@ -242,6 +245,8 @@ model Subject {
   chapters    Chapter[]
   materials   Material[]
   aiConversations AIConversation[]
+  flashcardDecks FlashcardDeck[]
+  quizzes     Quiz[]
   favorites   Favorite[]
 
   @@index([workspaceId])
@@ -264,6 +269,8 @@ model Chapter {
   topics      Topic[]
   materials   Material[]
   aiConversations AIConversation[]
+  flashcardDecks FlashcardDeck[]
+  quizzes     Quiz[]
   favorites   Favorite[]
 
   @@index([subjectId])
@@ -677,6 +684,8 @@ model Group {
   subjects      Subject[]
   materials     Material[]
   aiConversations AIConversation[]
+  flashcardDecks FlashcardDeck[]
+  quizzes       Quiz[]
   activityLogs  ActivityLog[]
   invitations   GroupInvitation[]
 
@@ -747,25 +756,69 @@ model ActivityLog {
 }
 
 // ----------------------------------------------------------------------------
-// STUDY TOOLS
+// STUDY TOOLS / LEARNING SCOPE (Phase 8.1 foundation)
+//
+// FlashcardDeck and Quiz are shared *content* (spec §32/§37's "shared
+// knowledge"), attachable to the same points in the hierarchy as Material,
+// so they reuse Material's exact scope shape rather than inventing a new
+// one: subjectId/chapterId/topicId narrow within an owner, workspaceId/
+// groupId always identify the owner (never both, never neither — same
+// invariant as resolveSubjectOwner), and an unattached deck/quiz falls
+// back to the owner's personal workspace, exactly like an "Unorganized"
+// Material. `lib/materials-scope.ts`'s `resolveMaterialScope` is reused
+// as-is for this (re-exported as `resolveLearningScope` from
+// `lib/learning-scope.ts`) — no second scope resolver was written.
+//
+// Deliberately NOT supported yet: a *bare* group scope (a deck/quiz
+// attached to a Group with no Subject/Chapter/Topic underneath it,
+// mirroring AIConversation's Phase 6.5 "ask across everything this group
+// has shared" mode). Material itself has no equivalent today ("no
+// Unorganized within a Group" — see materials-scope.ts), and Phase 8.1's
+// generation surfaces are all hierarchy-anchored (spec §40 "From any
+// chapter/topic"). Add it only if a future phase has a concrete bare-group
+// generation use case, following AIConversation's bare-`groupId` pattern.
 // ----------------------------------------------------------------------------
 
 model FlashcardDeck {
-  id        String   @id @default(cuid())
-  topicId   String?
-  topic     Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  ownerId   String
-  owner     User     @relation(fields: [ownerId], references: [id])
-  title     String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id @default(cuid())
+  // Same five-field scope as Material (see block comment above): narrowest
+  // hierarchy attachment set, workspaceId/groupId always the resolved owner.
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  groupId     String?
+  group       Group?   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  subject     Subject? @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterId   String?
+  chapter     Chapter? @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  topicId     String?
+  topic       Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+  title       String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  cards     Flashcard[]
+  cards       Flashcard[]
 
+  @@index([workspaceId])
+  @@index([groupId])
+  @@index([subjectId])
+  @@index([chapterId])
   @@index([topicId])
   @@index([ownerId])
 }
 
+// Flashcard content is shared (anyone with deck access sees the same
+// front/back/sources). Per-user study activity is NOT stored here — see
+// FlashcardReview below; a shared row must never carry one user's review
+// stats (Phase 8.1 foundation fix — the original scaffolding's
+// timesReviewed/timesCorrect/nextReviewAt lived directly on this shared
+// row, which would have leaked/conflated one group member's study
+// activity with another's the moment a deck was shared; nothing in the
+// app read or wrote those fields yet, so removing them here is not a
+// breaking change). Quiz/QuizQuestion vs. QuizAttempt already got this
+// split right from the start; Flashcard now matches that pattern.
 model Flashcard {
   id            String   @id @default(cuid())
   deckId        String
@@ -773,10 +826,15 @@ model Flashcard {
   front         String   @db.Text
   back          String   @db.Text
   difficulty    Difficulty @default(MEDIUM)
-  timesReviewed Int      @default(0)
-  timesCorrect  Int      @default(0)
-  nextReviewAt  DateTime? // spaced repetition (future)
+  // Provenance: which Material(s) this card was generated from, in the
+  // same shape AIMessage.sources already established ({ materialId, label,
+  // timestampSeconds?, page? }[]) — reused rather than inventing a new
+  // provenance table, and left null for future manually-authored cards
+  // that have no AI-derived source. See lib/learning-types.ts.
+  sources       Json?
   createdAt     DateTime @default(now())
+
+  reviews       FlashcardReview[]
 
   @@index([deckId])
 }
@@ -787,19 +845,54 @@ enum Difficulty {
   HARD
 }
 
+// Private per-user study activity for a Flashcard (Phase 8.1 foundation).
+// Mirrors QuizAttempt's existing user-owned-activity-vs-shared-content
+// split: many users can review the same shared Flashcard, and each
+// review is visible only to the user who made it (spec's Group Learning
+// Model — "User A must not automatically see User B's ... progress").
+// Deliberately minimal for 8.1: one row per review event, no aggregate
+// counters (those can be computed from this table when a later phase
+// needs them) and no spaced-repetition scheduling field yet (Phase 8.7).
+model FlashcardReview {
+  id          String   @id @default(cuid())
+  flashcardId String
+  flashcard   Flashcard @relation(fields: [flashcardId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wasCorrect  Boolean
+  selfRating  Difficulty?
+  reviewedAt  DateTime @default(now())
+
+  @@index([flashcardId])
+  @@index([userId])
+}
+
 model Quiz {
-  id        String   @id @default(cuid())
-  topicId   String?
-  topic     Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  ownerId   String
-  owner     User     @relation(fields: [ownerId], references: [id])
-  title     String
-  quizType  QuizType @default(MIXED)
-  createdAt DateTime @default(now())
+  id          String   @id @default(cuid())
+  // Same scope shape as FlashcardDeck/Material — see block comment above.
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  groupId     String?
+  group       Group?   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  subject     Subject? @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  chapterId   String?
+  chapter     Chapter? @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  topicId     String?
+  topic       Topic?   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+  title       String
+  quizType    QuizType @default(MIXED)
+  createdAt   DateTime @default(now())
 
-  questions QuizQuestion[]
-  attempts  QuizAttempt[]
+  questions   QuizQuestion[]
+  attempts    QuizAttempt[]
 
+  @@index([workspaceId])
+  @@index([groupId])
+  @@index([subjectId])
+  @@index([chapterId])
   @@index([topicId])
   @@index([ownerId])
 }
@@ -820,6 +913,8 @@ model QuizQuestion {
   options       Json? // for MCQ: [{ id, text }]
   correctAnswer Json // string, or option id, depending on type
   explanation   String?  @db.Text
+  // Provenance — same shape/rationale as Flashcard.sources above.
+  sources       Json?
   order         Int
 
   @@index([quizId])
