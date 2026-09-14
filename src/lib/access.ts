@@ -279,6 +279,18 @@ export async function requireFlashcardDeck(deckId: string, userId: string) {
   }
 }
 
+/** requireX pair for getAccessibleQuiz (Phase 8.3 — the quiz-taking page needs this). */
+export async function requireQuiz(quizId: string, userId: string) {
+  try {
+    const quiz = await getAccessibleQuiz(quizId, userId);
+    if (!quiz) notFound();
+    return quiz;
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) notFound();
+    throw err;
+  }
+}
+
 /**
  * ProcessingJob ownership is a flat userId check — jobs aren't shared via
  * workspace/subject/etc. membership the way Subject/Chapter/Topic/Material

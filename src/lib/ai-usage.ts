@@ -9,13 +9,14 @@ import type { Prisma, UsageKind } from "@prisma/client";
  * "embedding" covers EmbeddingService.embed() calls (query + ingestion
  * indexing). Both draw from the same `UsageRecord` ledger and the same
  * abstract "AI credits" pool (PlanLimits.aiCreditsPerMonth) — see
- * lib/ai-quota.ts. "flashcard_generation" (Phase 8.2) is the first of
- * the "new AI operations... can add a new category string here" cases
- * this comment already anticipated — still the same `UsageRecord`
- * ledger, still no schema change, since category lives in
- * UsageRecord.metadata rather than a new enum value.
+ * lib/ai-quota.ts. "flashcard_generation" (Phase 8.2) and
+ * "quiz_generation" (Phase 8.3) are further instances of the "new AI
+ * operations... can add a new category string here" case this comment
+ * already anticipated — still the same `UsageRecord` ledger, still no
+ * schema change, since category lives in UsageRecord.metadata rather
+ * than a new enum value.
  */
-export type AIUsageCategory = "chat" | "embedding" | "flashcard_generation";
+export type AIUsageCategory = "chat" | "embedding" | "flashcard_generation" | "quiz_generation";
 
 export interface RecordAIUsageInput {
   userId: string;

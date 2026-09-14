@@ -8,6 +8,7 @@ import { MaterialsPanel } from "@/components/materials/materials-panel";
 import { TopicTranscriptsPanel, type TranscribableMaterial } from "@/components/topics/topic-transcripts-panel";
 import { AIChatPanel } from "@/components/ai/ai-chat-panel";
 import { FlashcardsStudyToolsPanel } from "@/components/topics/flashcards-study-tools-panel";
+import { QuizStudyToolsPanel } from "@/components/topics/quiz-study-tools-panel";
 
 export function TopicTabs({
   topicId,
@@ -57,9 +58,12 @@ export function TopicTabs({
       </TabsContent>
 
       <TabsContent value="study-tools">
-        <FlashcardsStudyToolsPanel topicId={topicId} />
+        <div className="grid gap-6 md:grid-cols-2">
+          <FlashcardsStudyToolsPanel topicId={topicId} />
+          <QuizStudyToolsPanel topicId={topicId} />
+        </div>
         <p className="mt-6 text-center text-xs text-ink-faint dark:text-white/40">
-          Quizzes and the AI tutor are coming in a later update.
+          The AI tutor is coming in a later update.
         </p>
       </TabsContent>
     </Tabs>

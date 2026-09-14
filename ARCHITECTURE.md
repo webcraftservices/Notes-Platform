@@ -394,7 +394,7 @@ Current security mechanisms include:
 Distributed rate limiting, database row-level security, comprehensive
 observability, and production queue hardening remain future work.
 
-## 13. Learning System scope (Phase 8.1) and flashcard generation (Phase 8.2)
+## 13. Learning System scope (Phase 8.1), flashcards (Phase 8.2), and quizzes (Phase 8.3)
 
 `FlashcardDeck` and `Quiz` reuse Material's own scope shape rather than a
 new resolver: `subjectId`/`chapterId`/`topicId` narrow within an owner,
@@ -459,6 +459,47 @@ was replaced with a functional `FlashcardsStudyToolsPanel` plus a minimal
 `/flashcards/[deckId]` page — deliberately not the full study/flip
 experience (that's a later subphase).
 
+**Phase 8.3 — quiz generation and quiz-taking.**
+`lib/services/quiz-generation.ts` mirrors `flashcard-generation.ts`'s
+pipeline exactly (`getAccessibleAIScope` → `retrieveRelevantChunks` →
+`AIService.chat()` → validate → attach real `chunksToSources()`
+provenance → validate again → one transaction), applied to `Quiz`/
+`QuizQuestion` instead of `FlashcardDeck`/`Flashcard`, and reusing the
+*existing*, unmodified `quizQuestionGenerationItemSchema` from the Phase
+8.1 corrective pass. No schema change was needed — unlike `Flashcard`,
+`QuizQuestion` already had an explicit `order` column, so question
+ordering doesn't depend on cuid/createdAt behavior the way card ordering
+does. A generated quiz's `quizType` is inferred from the actual question
+composition (a single type if the batch is uniform, `MIXED` otherwise) —
+never a new enum value. Any `sources` the model supplies anyway is
+stripped before validation; only real retrieved-chunk provenance is ever
+persisted.
+
+`lib/quiz-serialization.ts` is the critical security boundary: `toPublicQuiz`/
+`toPublicQuizQuestion` strip `correctAnswer`, `explanation`, and `sources`
+from every question before it can reach a quiz-taking browser. This is
+applied to **both** `GET /api/quizzes/[quizId]` and the generation
+route's own response (`POST /api/topics/[topicId]/quizzes`) — the person
+who just generated a quiz is still a quiz-taking client and must not see
+answers before submitting. `lib/quiz-scoring.ts` (pure, DB-free, no
+database or AIService dependency) is the sole place a `QuizAttempt`'s
+score is computed: MCQ/TRUE_FALSE by exact match, SHORT_ANSWER by
+trimmed case-insensitive match — no second AI call for grading, no
+fuzzy/semantic matching, and a type-mismatched or missing answer scores
+as incorrect rather than throwing. `POST /api/quizzes/[quizId]/attempts`
+filters submitted answers down to the quiz's own real question ids
+before scoring (an unknown id is silently dropped, never scored or
+persisted), then creates a `QuizAttempt` for the authenticated user only
+and returns the real score plus the post-submission reveal of each
+question's answer/explanation/sources. Group privacy is unchanged by this
+phase: a group-owned Topic's generated `Quiz`/`QuizQuestion` are shared
+like any other group content, and no route in this phase ever reads
+another user's `QuizAttempt` rows. The Topic Study Tools tab now shows a
+`QuizStudyToolsPanel` alongside the flashcard panel, and a minimal
+`/quizzes/[quizId]` page (`QuizTakingView`) handles answering and
+displays the server's result — no timer, no adaptive difficulty, no
+per-question flip flow.
+
 ## 14. Testing
 
 The project uses Vitest with Node environment and tests live beside the
@@ -475,7 +516,9 @@ covered code in `__tests__` folders. Existing coverage includes:
 - FlashcardDeck/Quiz scope authorization and learning generation-output
   validation schemas (Phase 8.1);
 - the flashcard generation service and both flashcard API routes, mocked
-  at the service/AIService boundary (Phase 8.2).
+  at the service/AIService boundary (Phase 8.2);
+- the quiz generation service, all three quiz API routes, and pure
+  quiz-scoring logic, mocked at the same boundary (Phase 8.3).
 
 The suite does not make live cloud-provider calls and does not replace
 database-backed integration testing. Run:

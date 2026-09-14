@@ -18,7 +18,7 @@ root-level `STATE.md`.
 | Phase 5 — AI, RAG, and AI chat | IN PROGRESS | The provider abstractions, Gemini generation path, embedding implementation, extraction, chunking, indexing, retrieval, scoped chat, citations, and authorization are present. Provider activation and several planned AI UX/features remain incomplete. |
 | Phase 6 — Groups and collaboration | COMPLETE | Groups, membership, roles, invitations, shared Subjects/Materials, activity, notifications, and group AI scope are implemented. |
 | Phase 7 — Google Drive/Docs | IN PROGRESS / PARTIAL | Google OAuth connections, Drive browsing/import, Docs text export, re-import, and supported-file processing are implemented. Continuous sync and native Google Slides import are not implemented. |
-| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards complete) | Flashcard generation from a Topic's indexed knowledge is real and working end-to-end (retrieval → AIService → validation → persistence → a minimal deck page). Quiz generation, quiz-taking, the AI tutor, study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.2 — Flashcards" below. |
+| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes complete) | Flashcard generation (8.2) and quiz generation + real quiz-taking with server-side scoring (8.3) are both real and working end-to-end. The AI tutor, study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.3 — Quizzes" below. |
 | Phase 9 — Billing, usage ledger, security hardening, and production polish | NOT YET IMPLEMENTED | Some plan limits and live usage calculations exist, but the full ledger and hardening work do not. |
 
 ## Implemented product surface
@@ -225,6 +225,75 @@ shape, then the complete shape including real provenance) → one
   generation just creates a new deck), Subject/Chapter-wide generation
   (Topic-only for now).
 
+## Phase 8.3 — Quizzes
+
+Real, end-to-end Topic-scoped quiz generation and quiz-taking — mirrors
+Phase 8.2's flashcard pipeline closely, applied to the Quiz/QuizQuestion
+models that already existed as Phase 8.1 scaffolding, plus a real
+quiz-taking flow with authoritative server-side scoring.
+
+- **Generation** (`lib/services/quiz-generation.ts`): same shape as
+  `flashcard-generation.ts` — `getAccessibleAIScope` → `retrieveRelevantChunks`
+  → `AIService.chat()` → validated against the **existing**
+  `quizQuestionGenerationItemSchema` (unchanged from the Phase 8.1
+  corrective pass — no new/duplicate schema) → real `chunksToSources()`
+  provenance attached and validated a second time → one transaction
+  creating `Quiz` + `QuizQuestion` rows. Any `sources` the model supplies
+  anyway is stripped before validation — never trusted (task's "no
+  invented material IDs/pages/timestamps").
+- **No schema change was needed.** `Quiz`/`QuizQuestion`/`QuizAttempt`
+  already had every field this phase needed, including
+  `QuizQuestion.order` (an explicit column Flashcard never had, so unlike
+  Flashcard, question ordering doesn't rely on cuid/createdAt behavior —
+  `order` is set directly during generation and is the authoritative sort
+  key).
+- **`QuizType` inference:** a generated quiz's `quizType` is `MCQ`/
+  `TRUE_FALSE`/`SHORT_ANSWER` when every question shares one type, or
+  `MIXED` when the batch mixes types — never a new enum value, never
+  forced to `MIXED` for a uniform batch.
+- **CRITICAL security boundary (`lib/quiz-serialization.ts`):**
+  `toPublicQuiz`/`toPublicQuizQuestion` strip `correctAnswer`,
+  `explanation`, and `sources` from every question before it can reach a
+  quiz-taking browser. This applies not just to `GET /api/quizzes/[quizId]`
+  but also to the **generation route's own response** — the person who
+  just generated the quiz is still a quiz-taking client and must not see
+  the answers before taking it either.
+- **Server-side scoring (`lib/quiz-scoring.ts`, pure/DB-free for unit
+  testability):** MCQ and TRUE_FALSE score by exact match; SHORT_ANSWER
+  scores by trimmed, case-insensitive exact match — no second AI call for
+  grading, no fuzzy/semantic matching. A type-mismatched or missing
+  answer is scored as incorrect, never thrown as an error. The score is
+  always computed from the real persisted `QuizQuestion.correctAnswer`;
+  nothing in the request body (score, correctness flags) is ever trusted.
+- **Routes:** `POST /api/topics/[topicId]/quizzes` (synchronous, same
+  rationale as the flashcard route — one bounded retrieval + one chat
+  call, not the ProcessingJob pattern), `GET /api/quizzes/[quizId]`
+  (sanitized via `toPublicQuiz`), `POST /api/quizzes/[quizId]/attempts`
+  (filters submitted answers down to this quiz's own question ids before
+  scoring — an unknown/foreign question id is silently ignored, never
+  scored or persisted — then creates a `QuizAttempt` for the
+  authenticated user only, and returns the real score plus the
+  post-submission reveal of each question's `correctAnswer`/
+  `explanation`/`sources`).
+- **Group privacy preserved:** a group-owned Topic generates a
+  group-scoped `Quiz`/`QuizQuestion` (shared, same as flashcards); no
+  route or query in this phase ever reads another user's `QuizAttempt`
+  rows — `GET /api/quizzes/[quizId]` doesn't include attempts at all, and
+  the submission route only ever creates one for `user.id`.
+- **UI:** the Topic Study Tools tab now shows both the flashcard panel and
+  a new `QuizStudyToolsPanel` side by side (only the AI tutor remains
+  "coming later"); a minimal `/quizzes/[quizId]` page + `QuizTakingView`
+  handles MCQ/TRUE_FALSE/SHORT_ANSWER input, submission, and a result
+  view built entirely from the server's response. No timer, no
+  bookmarking, no adaptive difficulty, no per-question one-at-a-time flow.
+- Deliberately NOT implemented in 8.3 (all explicitly deferred): the AI
+  tutor, study sessions, progress/analytics, spaced repetition, adaptive
+  difficulty, quiz regeneration/versioning, retake restrictions (a user
+  can submit multiple attempts — nothing currently prevents or surfaces
+  that), and a "resume/view past attempt" endpoint (the submission
+  response already returns the full result inline, so nothing else reads
+  `QuizAttempt` back in this phase).
+
 ## Material and RAG invariants
 
 Material hierarchy IDs are intentionally denormalized:
@@ -287,12 +356,9 @@ Scanned PDFs and image-only documents have no OCR fallback.
    material-source navigation flows with configured providers.
 3. Add only the next explicitly selected Phase 5 AI UX/features; do not imply
    streaming, summaries, or study tools are complete.
-4. Phase 8.3: quiz generation, following flashcard-generation.ts's exact
-   shape (`getAccessibleAIScope` → `retrieveRelevantChunks` →
-   `AIService.chat()` → `quizQuestionGenerationItemSchema` → transaction),
-   plus a quiz-taking UI and scoring against `QuizAttempt`.
-5. Continue the roadmap toward Phase 8.4+ (AI tutor, study sessions,
-   progress, spaced repetition) and Phase 9 billing, usage-ledger, and
+4. Phase 8.4: AI tutor — the next Phase 8 subphase per the roadmap.
+5. Continue the roadmap toward Phase 8.5+ (study sessions, progress,
+   spaced repetition) and Phase 9 billing, usage-ledger, and
    production-hardening work.
 
 Known pre-existing doc drift (not touched by this task, flagged for a
@@ -316,18 +382,23 @@ Vitest covers pure chunking, extraction guards, provider behavior with mocked
 SDK clients, validation schemas, material/source-link formatting, retrieval
 scope selection, descendant retrieval fixtures, AI authorization
 boundaries, FlashcardDeck/Quiz scope authorization, learning
-generation-output validation schemas (Phase 8.1), and — as of Phase 8.2 —
-the flashcard generation service and both flashcard routes (mocked at the
-service/AIService boundary; no real Gemini/OpenAI network calls in the
-suite). Live cloud-provider calls and production database behavior are
-not exercised by the unit suite.
+generation-output validation schemas (Phase 8.1), the flashcard
+generation service and both flashcard routes (Phase 8.2), and — as of
+Phase 8.3 — the quiz generation service, all three quiz routes
+(generation, retrieval, attempt submission), and pure quiz-scoring logic.
+Everything AI-shaped is mocked at the service/AIService boundary; no real
+Gemini/OpenAI network calls in the suite. Live cloud-provider calls and
+production database behavior are not exercised by the unit suite.
 
-As of the Phase 8.2 commit: 44 test files / 428 passing (4 skipped),
-`npm run lint` clean, `npm run typecheck` at 84 errors — 82 of which are
-the same pre-existing `@prisma/client`-generation-cascade set as before
-(see CLAUDE.md; `npm run db:generate` removes them all in a real dev
-environment), plus 2 new occurrences of that identical cascade pattern
-(implicit `any` on a Prisma query-result parameter and a
-`$transaction` callback parameter in the two new flashcard files) — not
-new logical errors, confirmed by diffing the full error list against the
-pre-8.2 baseline.
+As of the Phase 8.3 commit: 49 test files / 492 passing (4 skipped),
+`npm run lint` clean, `npm run typecheck` at 88 errors — 84 of which are
+the same pre-existing `@prisma/client`-generation-cascade set as the
+Phase 8.2 baseline (see CLAUDE.md; `npm run db:generate` removes them all
+in a real dev environment), plus 4 new occurrences of that identical
+cascade pattern (`Module has no exported member 'Quiz'/'QuizQuestion'/
+'QuizType'` — the same "Prisma model type not generated" cause as every
+other cascade error, not a new logical error) in the three new quiz
+files that import those types, confirmed by diffing the full error list
+against the pre-8.3 baseline. One genuine implicit-`any` was caught and
+fixed with an inline type during this pass, matching the "no `any`" rule
+requested for Phase 8.3.
