@@ -21,6 +21,7 @@ import { recordAIUsage } from "@/lib/ai-usage";
  * every other rateLimit() call site in this codebase.
  */
 const AI_CHAT_RATE_LIMIT = { limit: 20, windowSeconds: 60 };
+const AI_TUTOR_RATE_LIMIT = { limit: 20, windowSeconds: 60 };
 
 /**
  * Sends a user message and gets a real AI reply grounded in retrieved
@@ -47,13 +48,6 @@ export async function POST(req: Request, { params }: { params: { conversationId:
   const user = await getSessionUser();
   if (!user) return UNAUTHORIZED();
 
-  const { success: withinRateLimit } = await rateLimit(`ai-chat:${user.id}`, AI_CHAT_RATE_LIMIT);
-  if (!withinRateLimit) {
-    return jsonError("You're sending messages too quickly. Please wait a moment and try again.", 429, {
-      code: "AI_RATE_LIMITED",
-    });
-  }
-
   const body = await req.json().catch(() => null);
   const parsed = sendAIMessageSchema.safeParse(body);
   if (!parsed.success) return zodError(parsed.error);
@@ -61,6 +55,17 @@ export async function POST(req: Request, { params }: { params: { conversationId:
   try {
     const conversation = await getAccessibleAIConversation(params.conversationId, user.id);
     if (!conversation) return NOT_FOUND();
+
+    const isTutorConversation = "kind" in conversation && conversation.kind === "TUTOR";
+    const { success: withinRateLimit } = await rateLimit(
+      isTutorConversation ? `ai-tutor-chat:${user.id}` : `ai-chat:${user.id}`,
+      isTutorConversation ? AI_TUTOR_RATE_LIMIT : AI_CHAT_RATE_LIMIT
+    );
+    if (!withinRateLimit) {
+      return jsonError("You're sending messages too quickly. Please wait a moment and try again.", 429, {
+        code: "AI_RATE_LIMITED",
+      });
+    }
 
     // Re-resolve the conversation's stored scope to get the same
     // ResolvedAIScope shape retrieval.ts needs — getAccessibleAIConversation

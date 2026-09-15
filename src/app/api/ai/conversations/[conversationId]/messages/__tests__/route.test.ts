@@ -67,6 +67,7 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
     access.getSessionUser.mockResolvedValue({ id: "user-1" });
     access.getAccessibleAIConversation.mockResolvedValue({
       id: "conv-1",
+      kind: "CHAT",
       topicId: null,
       chapterId: null,
       subjectId: null,
@@ -112,7 +113,33 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
   it("checks the rate limit using the authenticated user's own id, not any client-supplied identity", async () => {
     await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
 
-    expect(rateLimitModule.rateLimit).toHaveBeenCalledWith(expect.stringContaining("user-1"), expect.any(Object));
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledWith("ai-chat:user-1", expect.any(Object));
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses only the Tutor rate-limit bucket for Tutor conversations", async () => {
+    access.getAccessibleAIConversation.mockResolvedValue({
+      id: "conv-1",
+      kind: "TUTOR",
+      topicId: null,
+      chapterId: null,
+      subjectId: null,
+      groupId: null,
+    });
+
+    await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledWith("ai-tutor-chat:user-1", expect.any(Object));
+    expect(rateLimitModule.rateLimit).not.toHaveBeenCalledWith("ai-chat:user-1", expect.any(Object));
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses only the normal AI Chat bucket for CHAT conversations", async () => {
+    await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledWith("ai-chat:user-1", expect.any(Object));
+    expect(rateLimitModule.rateLimit).not.toHaveBeenCalledWith("ai-tutor-chat:user-1", expect.any(Object));
+    expect(rateLimitModule.rateLimit).toHaveBeenCalledTimes(1);
   });
 
   it("returns a 429 with a stable AI_QUOTA_EXCEEDED code when the quota is exceeded, and never calls the AI provider", async () => {
