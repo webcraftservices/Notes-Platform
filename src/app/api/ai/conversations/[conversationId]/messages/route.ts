@@ -3,12 +3,12 @@ import { db } from "@/lib/db";
 import { getSessionUser, getAccessibleAIConversation, getAccessibleAIScope, NotAuthorizedError } from "@/lib/access";
 import { sendAIMessageSchema } from "@/lib/validation/ai";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
-import { buildContextBlock, chunksToSources, toChatMessages } from "@/lib/ai-chat";
+import { buildContextBlock, chunksToSources, toChatMessages, TUTOR_SYSTEM_INSTRUCTION } from "@/lib/ai-chat";
 import { getAIService } from "@/lib/services/ai";
 import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import { rateLimit } from "@/lib/rate-limit";
-import { assertWithinAIQuota, AIQuotaExceededError } from "@/lib/ai-quota";
+import { assertWithinAIQuota, assertAiTutorEntitlement, AIQuotaExceededError, AITutorNotEnabledError } from "@/lib/ai-quota";
 import { recordAIUsage } from "@/lib/ai-usage";
 
 /**
@@ -21,7 +21,39 @@ import { recordAIUsage } from "@/lib/ai-usage";
  * every other rateLimit() call site in this codebase.
  */
 const AI_CHAT_RATE_LIMIT = { limit: 20, windowSeconds: 60 };
+
+/**
+ * Phase 8.4 — separate bucket (own key, same value) from AI_CHAT_RATE_LIMIT
+ * so heavy tutoring use can't burn through a user's plain "Ask AI"
+ * allowance or vice versa. Same limit/window as chat rather than a
+ * stricter one: tutoring is the same class of conversational usage, not
+ * bulk generation like flashcards/quizzes. This constant and the branch
+ * selecting it were added in commit 0182b54, but were unreachable until
+ * `AIConversation.kind` actually existed on the schema — this phase makes
+ * that column real, which is what makes this bucket reachable in
+ * production for the first time.
+ */
 const AI_TUTOR_RATE_LIMIT = { limit: 20, windowSeconds: 60 };
+
+/**
+ * Shown instead of calling the AI provider at all when a Tutor's Topic
+ * scope has no indexed material yet — mirrors the exact same
+ * fail-before-calling-the-model posture
+ * `InsufficientSourceMaterialError` already uses for flashcard/quiz
+ * generation (lib/services/flashcard-generation.ts /
+ * lib/services/quiz-generation.ts: `if (chunks.length === 0) throw
+ * new InsufficientSourceMaterialError()`), applied here to Tutor instead
+ * of introducing a new "insufficient material" behavior. Deliberately
+ * NOT applied to plain CHAT — that pre-8.4 behavior (still calling the
+ * model with zero chunks, letting HALLUCINATION_CONTROL_INSTRUCTION
+ * decide whether to offer labeled general knowledge) is unchanged.
+ */
+class TutorInsufficientMaterialError extends Error {
+  constructor() {
+    super("This topic doesn't have any indexed material yet, so the Tutor has nothing to teach from. Add and process some material here first.");
+    this.name = "TutorInsufficientMaterialError";
+  }
+}
 
 /**
  * Sends a user message and gets a real AI reply grounded in retrieved
@@ -43,6 +75,15 @@ const AI_TUTOR_RATE_LIMIT = { limit: 20, windowSeconds: 60 };
  * persistence has already succeeded and never turns a successful reply
  * into a failed response if the usage ledger write itself fails (see
  * lib/ai-usage.ts's doc comment).
+ *
+ * Phase 8.4 branches this same pipeline on `conversation.kind`: TUTOR
+ * gets its own rate-limit bucket, a live `aiTutor` plan-entitlement check
+ * (defense-in-depth on top of the creation-time check in
+ * conversations/route.ts — a downgrade must take effect immediately, not
+ * just block new conversations), a Tutor system instruction folded into
+ * the same AIService.chat() call, an honest insufficient-material
+ * short-circuit, and its own `tutor_chat` usage category. CHAT keeps the
+ * exact pre-8.4 behavior in every one of those dimensions.
  */
 export async function POST(req: Request, { params }: { params: { conversationId: string } }) {
   const user = await getSessionUser();
@@ -56,7 +97,14 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     const conversation = await getAccessibleAIConversation(params.conversationId, user.id);
     if (!conversation) return NOT_FOUND();
 
-    const isTutorConversation = "kind" in conversation && conversation.kind === "TUTOR";
+    const isTutorConversation = conversation.kind === "TUTOR";
+
+    // Defense-in-depth: conversations/route.ts already checks this before
+    // a TUTOR conversation can be created, but a plan downgrade after
+    // creation must block the very next message too, not just new
+    // conversations — checked live, same as assertWithinAIQuota below.
+    if (isTutorConversation) await assertAiTutorEntitlement(user.id);
+
     const { success: withinRateLimit } = await rateLimit(
       isTutorConversation ? `ai-tutor-chat:${user.id}` : `ai-chat:${user.id}`,
       isTutorConversation ? AI_TUTOR_RATE_LIMIT : AI_CHAT_RATE_LIMIT
@@ -69,7 +117,10 @@ export async function POST(req: Request, { params }: { params: { conversationId:
 
     // Re-resolve the conversation's stored scope to get the same
     // ResolvedAIScope shape retrieval.ts needs — getAccessibleAIConversation
-    // already re-validated access to it above.
+    // already re-validated access to it above. For a Tutor conversation
+    // this is always Topic-narrow (topicId is required at creation time —
+    // see conversations/route.ts), so retrieval below can never escape
+    // to broader workspace/group material.
     const scope = await getAccessibleAIScope(
       {
         topicId: conversation.topicId ?? undefined,
@@ -91,11 +142,20 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     });
 
     const chunks = await retrieveRelevantChunks(parsed.data.content, scope, user.id);
+
+    if (isTutorConversation && chunks.length === 0) {
+      throw new TutorInsufficientMaterialError();
+    }
+
     const context = buildContextBlock(chunks) ?? undefined;
 
     const ai = getAIService();
     const result = await ai.chat({
-      messages: [...toChatMessages(priorMessages), { role: "user", content: parsed.data.content }],
+      messages: [
+        ...(isTutorConversation ? [{ role: "system" as const, content: TUTOR_SYSTEM_INSTRUCTION }] : []),
+        ...toChatMessages(priorMessages),
+        { role: "user", content: parsed.data.content },
+      ],
       context,
     });
 
@@ -121,7 +181,7 @@ export async function POST(req: Request, { params }: { params: { conversationId:
       userId: user.id,
       workspaceId: scope.ownerType === "workspace" ? scope.workspaceId : null,
       groupId: scope.ownerType === "group" ? scope.groupId : null,
-      category: "chat",
+      category: isTutorConversation ? "tutor_chat" : "chat",
       provider: ai.providerName,
       model: ai.modelName,
       tokensInput: result.tokensInput,
@@ -132,6 +192,10 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     return NextResponse.json({ userMessage, assistantMessage });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    if (err instanceof AITutorNotEnabledError) return jsonError(err.message, 403, { code: "AI_TUTOR_NOT_ENABLED" });
+    if (err instanceof TutorInsufficientMaterialError) {
+      return jsonError(err.message, 409, { code: "TUTOR_INSUFFICIENT_MATERIAL" });
+    }
     if (err instanceof AIQuotaExceededError) {
       // Only the numbers the frontend actually needs to render a usage bar
       // — never the full PlanLimits object (task §13: don't over-expose

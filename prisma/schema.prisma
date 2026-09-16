@@ -572,6 +572,19 @@ model AIConversation {
   userId      String
   user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // Phase 8.4 — distinguishes the pre-existing general-purpose "Ask AI"
+  // conversation (CHAT, the default) from a grounded, Topic-scoped AI
+  // Tutor conversation (TUTOR). Reuses this exact model/table rather than
+  // a parallel TutorConversation table — a Tutor conversation has
+  // identical shape (per-user private history, a scope, sourced
+  // messages); only the system prompt, rate-limit bucket, and usage
+  // category differ, all decided in the API route from this one column.
+  // Not a new access-control axis: getAccessibleAIConversation's
+  // ownership-only privacy check and getAccessibleAIScope's
+  // workspace/group authorization apply identically regardless of `kind`.
+  // Defaults to CHAT so every pre-8.4 conversation row is unaffected.
+  kind        AIConversationKind @default(CHAT)
+
   // Contextual scope — exactly one of these (or none, for workspace/global).
   workspaceId String?
   workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -593,6 +606,7 @@ model AIConversation {
   favorites   Favorite[]
 
   @@index([userId])
+  @@index([userId, kind])
   @@index([workspaceId])
   @@index([subjectId])
   @@index([chapterId])
@@ -618,6 +632,12 @@ enum MessageRole {
   USER
   ASSISTANT
   SYSTEM
+}
+
+// Phase 8.4 — see the doc comment on AIConversation.kind above.
+enum AIConversationKind {
+  CHAT
+  TUTOR
 }
 
 // ----------------------------------------------------------------------------

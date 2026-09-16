@@ -1,5 +1,6 @@
 import { requireUser, requireTopic } from "@/lib/access";
 import { db } from "@/lib/db";
+import { getPlanLimits } from "@/lib/plans";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { TopicActionsMenu } from "@/components/topics/topic-actions-menu";
@@ -14,14 +15,23 @@ export default async function TopicDetailPage({
   const user = await requireUser();
   const topic = await requireTopic(params.topicId, user.id);
 
-  const [subject, chapter, materials] = await Promise.all([
+  const [subject, chapter, materials, subscription] = await Promise.all([
     db.subject.findUniqueOrThrow({ where: { id: params.subjectId } }),
     db.chapter.findUniqueOrThrow({ where: { id: params.chapterId } }),
     db.material.findMany({
       where: { topicId: topic.id, deletedAt: null, archivedAt: null },
       orderBy: { createdAt: "desc" },
     }),
+    // Phase 8.4 — resolved here (not inside TopicTabs, a client component)
+    // so the Tutor entry point's visibility is decided server-side from
+    // the same PlanLimits.advancedFeatures.aiTutor flag the API routes
+    // themselves enforce (lib/ai-quota.ts's assertAiTutorEntitlement) —
+    // same "getPlanLimits(subscription?.plan ?? 'FREE')" pattern already
+    // used in (app)/layout.tsx and (app)/settings/page.tsx.
+    db.subscription.findUnique({ where: { userId: user.id } }),
   ]);
+
+  const aiTutorEnabled = getPlanLimits(subscription?.plan ?? "FREE").advancedFeatures.aiTutor;
 
   const audioVideoMaterials = materials.filter((m) => m.type === "AUDIO" || m.type === "VIDEO");
   const materialIds = audioVideoMaterials.map((m) => m.id);
@@ -82,6 +92,7 @@ export default async function TopicDetailPage({
             description={topic.description}
             materials={materials}
             transcribableMaterials={transcribableMaterials}
+            aiTutorEnabled={aiTutorEnabled}
           />
         </div>
       </main>

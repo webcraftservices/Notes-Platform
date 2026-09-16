@@ -18,7 +18,7 @@ root-level `STATE.md`.
 | Phase 5 — AI, RAG, and AI chat | IN PROGRESS | The provider abstractions, Gemini generation path, embedding implementation, extraction, chunking, indexing, retrieval, scoped chat, citations, and authorization are present. Provider activation and several planned AI UX/features remain incomplete. |
 | Phase 6 — Groups and collaboration | COMPLETE | Groups, membership, roles, invitations, shared Subjects/Materials, activity, notifications, and group AI scope are implemented. |
 | Phase 7 — Google Drive/Docs | IN PROGRESS / PARTIAL | Google OAuth connections, Drive browsing/import, Docs text export, re-import, and supported-file processing are implemented. Continuous sync and native Google Slides import are not implemented. |
-| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes complete) | Flashcard generation (8.2) and quiz generation + real quiz-taking with server-side scoring (8.3) are both real and working end-to-end. The AI tutor, study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.3 — Quizzes" below. |
+| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes + 8.4 AI Tutor complete) | Flashcard generation (8.2), quiz generation + real quiz-taking with server-side scoring (8.3), and a real, Topic-scoped, plan-gated AI Tutor built on a genuine `AIConversation.kind` schema column (8.4) are all real and working end-to-end. Study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.4 — AI Tutor" below. |
 | Phase 9 — Billing, usage ledger, security hardening, and production polish | NOT YET IMPLEMENTED | Some plan limits and live usage calculations exist, but the full ledger and hardening work do not. |
 
 ## Implemented product surface
@@ -280,19 +280,129 @@ quiz-taking flow with authoritative server-side scoring.
   route or query in this phase ever reads another user's `QuizAttempt`
   rows — `GET /api/quizzes/[quizId]` doesn't include attempts at all, and
   the submission route only ever creates one for `user.id`.
-- **UI:** the Topic Study Tools tab now shows both the flashcard panel and
-  a new `QuizStudyToolsPanel` side by side (only the AI tutor remains
-  "coming later"); a minimal `/quizzes/[quizId]` page + `QuizTakingView`
+- **UI:** the Topic Study Tools tab now shows the flashcard panel, the
+  quiz panel, and (as of Phase 8.4) a real AI Tutor entry point, side by
+  side/below; a minimal `/quizzes/[quizId]` page + `QuizTakingView`
   handles MCQ/TRUE_FALSE/SHORT_ANSWER input, submission, and a result
   view built entirely from the server's response. No timer, no
   bookmarking, no adaptive difficulty, no per-question one-at-a-time flow.
-- Deliberately NOT implemented in 8.3 (all explicitly deferred): the AI
-  tutor, study sessions, progress/analytics, spaced repetition, adaptive
-  difficulty, quiz regeneration/versioning, retake restrictions (a user
-  can submit multiple attempts — nothing currently prevents or surfaces
-  that), and a "resume/view past attempt" endpoint (the submission
-  response already returns the full result inline, so nothing else reads
-  `QuizAttempt` back in this phase).
+- Deliberately NOT implemented in 8.3 (all explicitly deferred): study
+  sessions, progress/analytics, spaced repetition, adaptive difficulty,
+  quiz regeneration/versioning, retake restrictions (a user can submit
+  multiple attempts — nothing currently prevents or surfaces that), and a
+  "resume/view past attempt" endpoint (the submission response already
+  returns the full result inline, so nothing else reads `QuizAttempt`
+  back in this phase).
+
+## Phase 8.4 — AI Tutor
+
+A real, Topic-scoped, plan-gated AI Tutor, built as the smallest clean
+extension of the Phase 5 AI chat infrastructure — not a parallel
+conversation/message schema.
+
+**Important history — read before trusting any earlier "Phase 8.4" claim.**
+Commit `0182b54` ("fix: separate AI tutor rate limiting") added an
+`AI_TUTOR_RATE_LIMIT` constant and an `isTutorConversation` branch keyed
+off `conversation.kind`, but **`AIConversation` had no `kind` column at
+that point** — no migration, no schema field, no enum. That branch was
+unreachable dead code against any real database row (`"kind" in
+conversation` is always `false` for a real Prisma row lacking that
+column); nothing else — no system prompt, no usage category, no UI entry
+point, no `aiTutor` entitlement enforcement — existed at all. A
+ground-truth audit against the actual repository (not the commit message)
+caught this before it compounded. This Phase 8.4 entry documents what
+was verified to actually work after a genuine implementation pass; treat
+any prior description of "Phase 8.4 complete" as inaccurate.
+
+- **Schema:** `AIConversation.kind` (`AIConversationKind`: `CHAT` default
+  | `TUTOR`) is now a real column, added via migration
+  `20260916090000_ai_conversation_kind`, plus a `(userId, kind)` index.
+  Every pre-8.4 conversation row defaults to `CHAT` and is unaffected.
+  `getAccessibleAIConversation` needed **zero code changes** — it already
+  returns the full, unmodified Prisma row (no `select` clause), so `kind`
+  flows through it automatically once the column exists.
+- **Topic-only, by design and by validation:** a TUTOR conversation
+  cannot be created without a `topicId` — `lib/validation/ai.ts`'s
+  `aiConversationScopeSchema` rejects `kind: "TUTOR"` without one via
+  `.superRefine`, at the schema layer, before any DB/authorization work.
+  This matches where flashcards/quizzes already live (Topic-only) and is
+  what guarantees Tutor retrieval can never escape to broader
+  workspace/group material — `retrieval-scope.ts` already narrows
+  strictly to `topicId` whenever a scope has one set.
+- **Conversation resolution (`/api/ai/conversations` GET/POST):** now
+  accepts an optional `kind` (query param or body field, default `CHAT`)
+  and folds it into the get-or-create/create call, so a Topic's plain
+  "Ask AI" conversation and its Tutor conversation are two distinct,
+  separately-private rows.
+- **Plan entitlement, actually enforced:** `lib/plans.ts`'s
+  `advancedFeatures.aiTutor` flag existed since early Phase 8 scaffolding
+  but was read nowhere in the codebase — a FREE-tier user faced no actual
+  restriction. `lib/ai-quota.ts` now has `assertAiTutorEntitlement()` +
+  `AITutorNotEnabledError`, following the exact existing
+  `assertGoogleDriveSyncAllowed`/`GoogleDriveNotEnabledError` pattern from
+  `lib/google-import.ts` (same `getPlanLimits(subscription?.plan ??
+  "FREE")` shape, no new entitlement system). Checked in **two** places:
+  at conversation creation (`conversations/route.ts`, both GET and POST)
+  and again live on every message send (`messages/route.ts`) — so a plan
+  downgrade blocks the very next message on an already-created Tutor
+  conversation, not just new ones.
+- **Messages route (`POST /api/ai/conversations/[conversationId]/messages`)**
+  branches on the loaded conversation's real `kind`:
+  - the previously dead-code rate-limit branch is now reachable: TUTOR
+    uses its own `ai-tutor-chat:<userId>` bucket, CHAT keeps
+    `ai-chat:<userId>` — exactly one bucket is ever consumed per message,
+    proven by dedicated tests;
+  - a real `TUTOR_SYSTEM_INSTRUCTION` (`lib/ai-chat.ts`) is passed as an
+    extra `system`-role `AIChatMessage` — `ai-gemini.ts`'s existing
+    `extractSystemMessages`/`buildSystemInstruction` already fold this
+    into the provider's system instruction, so no new `AIService` method
+    or provider-specific code was needed. It instructs: act as a Topic
+    tutor, teach progressively rather than dumping answers, use supplied
+    material as the primary factual source, never invent facts, admit
+    when material is insufficient, ask check-understanding questions
+    where useful, never claim unsupported info came from the student's
+    materials, and stay scoped to the Topic (decline unrestricted-
+    assistant requests). CHAT conversations never receive this message —
+    pre-8.4 behavior is byte-for-byte unchanged;
+  - **no indexed material for the Topic** (zero retrieved chunks) returns
+    a `409 TUTOR_INSUFFICIENT_MATERIAL` *before* calling the AI provider
+    at all — mirrors `InsufficientSourceMaterialError`'s existing
+    fail-before-calling-the-model posture from flashcard/quiz generation,
+    applied to Tutor instead of inventing a new "insufficient material"
+    behavior. CHAT's pre-8.4 behavior with zero chunks (still calls the
+    model, lets `HALLUCINATION_CONTROL_INSTRUCTION` decide) is unchanged;
+  - usage is recorded under a new `"tutor_chat"` `AIUsageCategory`
+    (`lib/ai-usage.ts`) instead of the previously hardcoded `"chat"` —
+    same quota pool, separately visible in the ledger.
+- **UI:** `AIChatPanel` gained a `kind` prop (`"CHAT" | "TUTOR"`, default
+  `"CHAT"` — every existing call site is unaffected) that changes only the
+  conversation-fetch query string, the empty-state icon/copy, and adds a
+  `blockedError` state for the new 403 (`AI_TUTOR_NOT_ENABLED`) / 409
+  (`TUTOR_INSUFFICIENT_MATERIAL`) responses. The Topic page
+  (`topics/[topicId]/page.tsx`) resolves `advancedFeatures.aiTutor`
+  server-side (same `getPlanLimits(subscription?.plan ?? "FREE")` used
+  elsewhere) and passes it to `TopicTabs` as `aiTutorEnabled`; the Study
+  Tools tab's former "The AI tutor is coming in a later update." text is
+  now a real `<AIChatPanel kind="TUTOR">` when entitled, or a short
+  plan-upgrade message when not. This is UX-only gating — the actual
+  enforcement is server-side (`assertAiTutorEntitlement`), same
+  frontend-hides/backend-is-authoritative split as every other
+  entitlement in this app.
+- **Privacy:** unchanged, unmodified `getAccessibleAIConversation`
+  ownership check (`conversation.userId !== userId` throws, regardless of
+  `kind`) — a group-shared Topic's material can ground multiple members'
+  Tutor conversations, but each member's own conversation stays private
+  to them. Verified with real (non-mocked) tests against
+  `lib/access.ts` in `lib/__tests__/access-ai-scope.test.ts`, not by
+  mocking `@/lib/access` itself and asserting on an injected shape (the
+  mistake in the pre-8.4 tests that let the dead-code branch go
+  unnoticed).
+- Deliberately NOT implemented in 8.4: Subject/Chapter/Group Tutor entry
+  points (Topic only, matching flashcards/quizzes/Study Tools), a
+  standalone tutor conversation-history/list page beyond the inline
+  panel, one-question-at-a-time Socratic tutoring mode, correctness
+  evaluation of student answers, and weak-area tracking — none of this
+  was requested for this phase, and Phase 8.5 has not been started.
 
 ## Material and RAG invariants
 
@@ -327,7 +437,10 @@ group-owned Subjects, Chapters, Topics, and Materials. A Subject belongs to
 exactly one owner scope: a personal Workspace or a Group.
 
 Group knowledge is shared with authorized group members. AI conversations are
-private to their owning user. A conversation’s stored Subject, Chapter, Topic,
+private to their owning user — this applies identically to Tutor
+conversations (Phase 8.4): `AIConversation.kind` is a behavior discriminator
+(which system prompt / rate-limit bucket / usage category applies), never an
+access-control input. A conversation’s stored Subject, Chapter, Topic,
 group, or workspace scope is re-authorized whenever it is read or used for a
 message, so losing access invalidates the conversation’s retrieval path.
 
@@ -353,12 +466,14 @@ Scanned PDFs and image-only documents have no OCR fallback.
    registry and configure it for a real end-to-end extraction → chunk →
    embed → retrieve verification.
 2. Perform manual browser verification of Subject, Chapter, group, and
-   material-source navigation flows with configured providers.
+   material-source navigation flows with configured providers, including
+   the new AI Tutor panel and its plan-gated empty/blocked states.
 3. Add only the next explicitly selected Phase 5 AI UX/features; do not imply
    streaming, summaries, or study tools are complete.
-4. Phase 8.4: AI tutor — the next Phase 8 subphase per the roadmap.
-5. Continue the roadmap toward Phase 8.5+ (study sessions, progress,
-   spaced repetition) and Phase 9 billing, usage-ledger, and
+4. Begin Phase 8.5 once explicitly scoped — not started as part of this
+   pass; study sessions, progress tracking, and spaced repetition remain
+   entirely unimplemented.
+5. Continue the roadmap toward Phase 9 billing, usage-ledger, and
    production-hardening work.
 
 Known pre-existing doc drift (not touched by this task, flagged for a
@@ -383,10 +498,18 @@ SDK clients, validation schemas, material/source-link formatting, retrieval
 scope selection, descendant retrieval fixtures, AI authorization
 boundaries, FlashcardDeck/Quiz scope authorization, learning
 generation-output validation schemas (Phase 8.1), the flashcard
-generation service and both flashcard routes (Phase 8.2), and — as of
-Phase 8.3 — the quiz generation service, all three quiz routes
-(generation, retrieval, attempt submission), and pure quiz-scoring logic.
-Everything AI-shaped is mocked at the service/AIService boundary; no real
+generation service and both flashcard routes (Phase 8.2), the quiz
+generation service, all three quiz routes (generation, retrieval, attempt
+submission), and pure quiz-scoring logic (Phase 8.3), and — as of Phase
+8.4 — the real (non-mocked) `aiConversationScopeSchema` validation, the
+real `assertAiTutorEntitlement`/`getPlanLimits` entitlement logic, real
+`getAccessibleAIConversation` privacy behavior for TUTOR-kind rows, both
+`/api/ai/conversations` routes' kind-scoped get-or-create/create/
+entitlement behavior, the messages route's full Tutor branch (dedicated
+rate-limit bucket, system-prompt injection, insufficient-material
+short-circuit, `tutor_chat` usage), `TUTOR_SYSTEM_INSTRUCTION` content,
+and the `AIChatPanel` query-building contract for CHAT vs TUTOR. Everything
+AI-shaped is mocked at the service/AIService boundary; no real
 Gemini/OpenAI network calls in the suite. Live cloud-provider calls and
 production database behavior are not exercised by the unit suite.
 
@@ -402,3 +525,16 @@ files that import those types, confirmed by diffing the full error list
 against the pre-8.3 baseline. One genuine implicit-`any` was caught and
 fixed with an inline type during this pass, matching the "no `any`" rule
 requested for Phase 8.3.
+
+As of the Phase 8.4 commit: 51 test files / 545 passing (4 skipped),
+`npm run lint` clean, `npm run typecheck` at 88 errors — the exact same
+count and the same pre-existing `@prisma/client`-generation-cascade set as
+the Phase 8.3 baseline before it (confirmed by diffing the full error list
+line-for-line: the only differences are line-number shifts from added doc
+comments, zero new errors). `npm run build` could not be fully verified in
+this sandbox: it fails at the Google Fonts fetch step during compilation
+(`fonts.googleapis.com` isn't reachable here), before ever reaching the
+`/api/health` static-generation step's environmental Neon DB error — a
+stricter sandbox network restriction than whatever access produced that
+DB-only failure previously, and unrelated to this phase's changes
+(`app/layout.tsx`, the only file that touches fonts, was not modified).

@@ -34,7 +34,19 @@ const quotaModule = vi.hoisted(() => {
       this.usage = usage;
     }
   }
-  return { assertWithinAIQuota: vi.fn(), AIQuotaExceededError };
+  class AITutorNotEnabledError extends Error {
+    plan: unknown;
+    constructor(plan: unknown) {
+      super("AI Tutor isn't available on your current plan.");
+      this.plan = plan;
+    }
+  }
+  return {
+    assertWithinAIQuota: vi.fn(),
+    AIQuotaExceededError,
+    assertAiTutorEntitlement: vi.fn(),
+    AITutorNotEnabledError,
+  };
 });
 vi.mock("@/lib/ai-quota", () => quotaModule);
 
@@ -76,6 +88,7 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
     access.getAccessibleAIScope.mockResolvedValue(WORKSPACE_SCOPE);
     rateLimitModule.rateLimit.mockResolvedValue({ success: true, remaining: 10 });
     quotaModule.assertWithinAIQuota.mockResolvedValue({ usedCredits: 0, limitCredits: 200 });
+    quotaModule.assertAiTutorEntitlement.mockResolvedValue(undefined);
     retrieval.retrieveRelevantChunks.mockResolvedValue([]);
     db.aIMessage.findMany.mockResolvedValue([]);
     db.$transaction.mockResolvedValue([{ id: "user-msg" }, { id: "assistant-msg" }]);
@@ -231,5 +244,176 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
 
     expect(res.status).toBe(503);
     expect(usageModule.recordAIUsage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Phase 8.4 — real TUTOR behavior. `AIConversation.kind` is now a real
+   * schema column (see prisma/schema.prisma / the 20260916090000
+   * migration) and `getAccessibleAIConversation` returns it unmodified as
+   * part of the full Prisma row (no `select`, so every scalar column
+   * comes back) — these tests mock `access.getAccessibleAIConversation`'s
+   * *return value* the same way every other test in this file mocks its
+   * dependencies, but that return value is no longer describing a shape
+   * that can't exist in the real database (the audit's finding about
+   * commit 0182b54). The proof that the shape is real lives in
+   * lib/__tests__/access-ai-scope.test.ts (exercises the real
+   * getAccessibleAIConversation against a mocked `db`) and
+   * lib/validation/__tests__/ai.test.ts (exercises the real Zod schema) —
+   * this file's job is still only the route's own branching logic, same
+   * division of responsibility as every test above this point.
+   */
+  describe("Tutor conversations (kind: TUTOR)", () => {
+    beforeEach(() => {
+      access.getAccessibleAIConversation.mockResolvedValue({
+        id: "conv-1",
+        kind: "TUTOR",
+        topicId: "topic-1",
+        chapterId: null,
+        subjectId: null,
+        groupId: null,
+      });
+      access.getAccessibleAIScope.mockResolvedValue({
+        ownerType: "workspace" as const,
+        workspaceId: "workspace-1",
+        groupId: null,
+        subjectId: null,
+        chapterId: null,
+        topicId: "topic-1",
+      });
+      retrieval.retrieveRelevantChunks.mockResolvedValue([
+        {
+          id: "chunk-1",
+          materialId: "mat-1",
+          materialTitle: "Lecture 1",
+          content: "Some course content.",
+          pageNumber: 1,
+          startSeconds: null,
+          endSeconds: null,
+          similarity: 0.9,
+        },
+      ]);
+    });
+
+    it("checks the aiTutor plan entitlement before consuming the rate-limit bucket", async () => {
+      quotaModule.assertAiTutorEntitlement.mockRejectedValue(
+        new quotaModule.AITutorNotEnabledError({ label: "Free" })
+      );
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(res.status).toBe(403);
+      expect(json.code).toBe("AI_TUTOR_NOT_ENABLED");
+      expect(rateLimitModule.rateLimit).not.toHaveBeenCalled();
+      expect(aiServiceRegistry.getAIService).not.toHaveBeenCalled();
+    });
+
+    it("never checks the aiTutor entitlement for a plain CHAT conversation", async () => {
+      access.getAccessibleAIConversation.mockResolvedValue({
+        id: "conv-1",
+        kind: "CHAT",
+        topicId: null,
+        chapterId: null,
+        subjectId: null,
+        groupId: null,
+      });
+
+      await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+      expect(quotaModule.assertAiTutorEntitlement).not.toHaveBeenCalled();
+    });
+
+    it("passes a system message containing the Tutor instructions to AIService.chat(), and CHAT never receives it", async () => {
+      const chatMock = vi.fn().mockResolvedValue({ content: "answer", tokensInput: 1, tokensOutput: 1 });
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+
+      await POST(makeRequest({ content: "What is the zeroth law?" }), { params: { conversationId: "conv-1" } });
+
+      const tutorCall = chatMock.mock.calls[0]![0];
+      expect(tutorCall.messages[0]).toMatchObject({ role: "system" });
+      expect(tutorCall.messages[0].content).toMatch(/Tutor/);
+
+      chatMock.mockClear();
+      access.getAccessibleAIConversation.mockResolvedValue({
+        id: "conv-1",
+        kind: "CHAT",
+        topicId: null,
+        chapterId: null,
+        subjectId: null,
+        groupId: null,
+      });
+      await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const chatCall = chatMock.mock.calls[0]![0];
+      expect(chatCall.messages.some((m: { role: string }) => m.role === "system")).toBe(false);
+    });
+
+    it("still passes the retrieved RAG context to AIService.chat() for a Tutor turn", async () => {
+      const chatMock = vi.fn().mockResolvedValue({ content: "answer", tokensInput: 1, tokensOutput: 1 });
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+
+      await POST(makeRequest({ content: "What is the zeroth law?" }), { params: { conversationId: "conv-1" } });
+
+      expect(chatMock.mock.calls[0]![0].context).toBeDefined();
+      expect(retrieval.retrieveRelevantChunks).toHaveBeenCalledWith(
+        "What is the zeroth law?",
+        expect.objectContaining({ topicId: "topic-1" }),
+        "user-1"
+      );
+    });
+
+    it("when nothing is indexed for the Topic, returns an honest 409 instead of calling the AI provider", async () => {
+      retrieval.retrieveRelevantChunks.mockResolvedValue([]);
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(json.code).toBe("TUTOR_INSUFFICIENT_MATERIAL");
+      expect(aiServiceRegistry.getAIService).not.toHaveBeenCalled();
+      expect(usageModule.recordAIUsage).not.toHaveBeenCalled();
+      expect(db.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("does not apply the insufficient-material short-circuit to plain CHAT with zero chunks (unchanged pre-8.4 behavior)", async () => {
+      access.getAccessibleAIConversation.mockResolvedValue({
+        id: "conv-1",
+        kind: "CHAT",
+        topicId: null,
+        chapterId: null,
+        subjectId: null,
+        groupId: null,
+      });
+      retrieval.retrieveRelevantChunks.mockResolvedValue([]);
+      const chatMock = vi.fn().mockResolvedValue({ content: "general answer", tokensInput: 1, tokensOutput: 1 });
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+      expect(res.status).toBe(200);
+      expect(chatMock).toHaveBeenCalled();
+    });
+
+    it("records usage under the tutor_chat category, not chat", async () => {
+      await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+      expect(usageModule.recordAIUsage).toHaveBeenCalledWith(expect.objectContaining({ category: "tutor_chat" }));
+    });
+
+    it("continues to record plain CHAT usage under the chat category", async () => {
+      access.getAccessibleAIConversation.mockResolvedValue({
+        id: "conv-1",
+        kind: "CHAT",
+        topicId: null,
+        chapterId: null,
+        subjectId: null,
+        groupId: null,
+      });
+      access.getAccessibleAIScope.mockResolvedValue(WORKSPACE_SCOPE);
+      retrieval.retrieveRelevantChunks.mockResolvedValue([]);
+
+      await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+      expect(usageModule.recordAIUsage).toHaveBeenCalledWith(expect.objectContaining({ category: "chat" }));
+    });
   });
 });

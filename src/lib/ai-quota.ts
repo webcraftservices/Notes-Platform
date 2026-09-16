@@ -88,3 +88,37 @@ export async function assertWithinAIQuota(userId: string): Promise<AIUsageSummar
   }
   return usage;
 }
+
+/**
+ * Thrown by assertAiTutorEntitlement; the route layer maps this to a 403
+ * with a stable `AI_TUTOR_NOT_ENABLED` code — same shape/precedent as
+ * lib/google-import.ts's `GoogleDriveNotEnabledError`/
+ * `assertGoogleDriveSyncAllowed` for `PlanLimits.advancedFeatures.
+ * googleDriveSync`, applied here to `advancedFeatures.aiTutor` (Phase
+ * 8.4). Kept in this file (not a new file) because it's the same
+ * "should this AI action be allowed for this user right now" family as
+ * `assertWithinAIQuota` above, and the messages/conversations routes
+ * already import from here.
+ */
+export class AITutorNotEnabledError extends Error {
+  constructor(public readonly plan: PlanLimits) {
+    super("AI Tutor isn't available on your current plan. Upgrade your plan in Settings to use it.");
+    this.name = "AITutorNotEnabledError";
+  }
+}
+
+/**
+ * MUST be called before a TUTOR conversation is created AND before a
+ * message is sent to one — checked live from the current subscription on
+ * every call (never cached on the conversation itself), so a plan
+ * downgrade takes effect immediately, the same "always compute live from
+ * source of truth" philosophy `assertWithinAIQuota`/`getStorageUsage`/
+ * `getRecordingUsage` already use elsewhere in this codebase.
+ */
+export async function assertAiTutorEntitlement(userId: string): Promise<void> {
+  const subscription = await db.subscription.findUnique({ where: { userId } });
+  const plan = getPlanLimits(subscription?.plan ?? "FREE");
+  if (!plan.advancedFeatures.aiTutor) {
+    throw new AITutorNotEnabledError(plan);
+  }
+}

@@ -303,6 +303,94 @@ the page/slide provenance in the citation label.
 No streaming, suggested prompts, regenerate action, or AI answer editing is
 currently implemented.
 
+### AI Tutor (Phase 8.4)
+
+**Ground-truth note.** An earlier commit (`0182b54`, "fix: separate AI
+tutor rate limiting") added a rate-limit branch keyed off
+`conversation.kind`, but `AIConversation` had no `kind` column at that
+point — the branch was unreachable dead code against any real database
+row, and nothing else (system prompt, usage category, UI, entitlement
+enforcement) existed. A ground-truth audit against the actual repository
+caught this. Everything below describes what was verified to actually
+work after a genuine implementation pass.
+
+The AI Tutor reuses the exact `AIConversation`/`AIMessage`/`AIChatPanel`
+infrastructure above rather than a parallel schema.
+`AIConversation.kind` (`CHAT` default | `TUTOR`) is now a real column
+(migration `20260916090000_ai_conversation_kind`) and is a behavior
+discriminator, not an access-control input — `getAccessibleAIConversation`'s
+ownership-only privacy rule and `getAccessibleAIScope`'s workspace/group
+authorization apply identically regardless of `kind`, and needed no code
+changes at all, since `getAccessibleAIConversation` already returns the
+full, unmodified Prisma row.
+
+A TUTOR conversation **must** have a `topicId` — `aiConversationScopeSchema`
+(`lib/validation/ai.ts`) rejects `kind: "TUTOR"` without one via
+`.superRefine`, before any DB or authorization work runs. This is what
+keeps Tutor retrieval Topic-scoped: `retrieval-scope.ts` already narrows
+strictly to `topicId` whenever a scope has one, so no new retrieval logic
+was needed.
+
+`/api/ai/conversations` GET/POST accept an optional `kind` (default
+`CHAT`), fold it into the get-or-create/create lookup key alongside the
+scope, and — for TUTOR — call `assertAiTutorEntitlement()`
+(`lib/ai-quota.ts`) before touching the database at all.
+`assertAiTutorEntitlement` follows the exact existing
+`assertGoogleDriveSyncAllowed`/`GoogleDriveNotEnabledError` pattern from
+`lib/google-import.ts` (same `getPlanLimits(subscription?.plan ?? "FREE")`
+shape) against `PlanLimits.advancedFeatures.aiTutor` — a flag that existed
+in `lib/plans.ts` since early Phase 8 scaffolding but was read nowhere
+else in the codebase before this phase.
+
+`POST /api/ai/conversations/[conversationId]/messages` branches on the
+loaded conversation's `kind`:
+
+- **Entitlement** — re-checked live (not just at creation) so a plan
+  downgrade blocks the very next message on an already-created Tutor
+  conversation.
+- **Rate limiting** — a dedicated `ai-tutor-chat:<userId>` bucket, separate
+  from the generic `ai-chat:<userId>` bucket; exactly one bucket is
+  consumed per message, for either kind.
+- **No indexed material** — if retrieval returns zero chunks for the
+  Topic, the route returns `409 TUTOR_INSUFFICIENT_MATERIAL` and never
+  calls the AI provider. This mirrors `InsufficientSourceMaterialError`'s
+  existing fail-before-calling-the-model posture from flashcard/quiz
+  generation rather than inventing a new "insufficient material"
+  behavior. The CHAT path is unchanged: it still calls the model with
+  zero chunks and lets `HALLUCINATION_CONTROL_INSTRUCTION` decide whether
+  to offer explicitly-labeled general knowledge.
+- **System prompt** — `lib/ai-chat.ts`'s `TUTOR_SYSTEM_INSTRUCTION` is
+  passed as an extra `system`-role `AIChatMessage`, which `ai-gemini.ts`'s
+  existing `extractSystemMessages`/`buildSystemInstruction` already fold
+  into the provider's system instruction — no new `AIService` method or
+  provider-specific code. It instructs the model to: act as a tutor for
+  the Topic, teach progressively rather than dump answers, use the
+  supplied material as the primary factual source, never invent facts,
+  explicitly admit when the material is insufficient, ask
+  check-understanding questions where useful, never claim unsupported
+  info came from the student's own materials, and stay scoped to the
+  Topic (decline unrestricted-assistant requests). CHAT conversations
+  never receive this message.
+- **Usage** — recorded under a new `"tutor_chat"` `AIUsageCategory`
+  (`lib/ai-usage.ts`), not the previously-hardcoded `"chat"`. Same quota
+  pool as CHAT, separately visible in the ledger.
+
+`AIChatPanel` gained a `kind` prop (`"CHAT" | "TUTOR"`, default `"CHAT"` —
+every pre-8.4 call site is unaffected), which changes only the
+conversation-fetch query string (`scopeToQuery`, exported and unit-tested
+directly), the empty-state icon/copy, and adds a `blockedError` state for
+the new 403 (`AI_TUTOR_NOT_ENABLED`)/409 (`TUTOR_INSUFFICIENT_MATERIAL`)
+responses. The Topic page resolves `advancedFeatures.aiTutor` server-side
+and passes `aiTutorEnabled` down to `TopicTabs`, whose Study Tools tab
+renders a real `<AIChatPanel kind="TUTOR">` when entitled (replacing the
+old "coming in a later update" placeholder) or a short upgrade message
+when not — UX-only gating; the actual enforcement is server-side.
+
+Not implemented: Subject/Chapter/Group Tutor entry points (Topic only,
+matching flashcards/quizzes), a standalone tutor conversation-history/list
+page beyond the inline panel, one-question-at-a-time Socratic tutoring
+mode, correctness evaluation of student answers, and weak-area tracking.
+
 ## 9. Group collaboration
 
 Group roles are:
@@ -394,7 +482,7 @@ Current security mechanisms include:
 Distributed rate limiting, database row-level security, comprehensive
 observability, and production queue hardening remain future work.
 
-## 13. Learning System scope (Phase 8.1), flashcards (Phase 8.2), and quizzes (Phase 8.3)
+## 13. Learning System scope (Phase 8.1), flashcards (Phase 8.2), quizzes (Phase 8.3), and AI Tutor (Phase 8.4)
 
 `FlashcardDeck` and `Quiz` reuse Material's own scope shape rather than a
 new resolver: `subjectId`/`chapterId`/`topicId` narrow within an owner,
@@ -500,6 +588,21 @@ another user's `QuizAttempt` rows. The Topic Study Tools tab now shows a
 displays the server's result — no timer, no adaptive difficulty, no
 per-question flip flow.
 
+**Phase 8.4 — AI Tutor.** See "AI Tutor (Phase 8.4)" under §8 above for the
+full design — documented there, not duplicated here, because it extends
+the existing `AIConversation`/`AIMessage`/`AIChatPanel` infrastructure in
+place (one new `kind` discriminator column), unlike flashcards/quizzes
+above which introduced their own models. In short: `AIConversation.kind`
+(`CHAT` default | `TUTOR`) keeps a Topic's plain "Ask AI" thread and its
+Tutor thread as separate, equally-private rows, requires a real `topicId`,
+is gated by a genuinely-enforced `advancedFeatures.aiTutor` plan
+entitlement (`lib/ai-quota.ts`'s `assertAiTutorEntitlement`), and gets its
+own rate-limit bucket, system prompt (`TUTOR_SYSTEM_INSTRUCTION`), and
+`tutor_chat` usage category in the messages route. An earlier commit
+(`0182b54`) had added an unreachable version of the rate-limit branch
+before the schema column existed — see the ground-truth note at the start
+of §8's Tutor subsection.
+
 ## 14. Testing
 
 The project uses Vitest with Node environment and tests live beside the
@@ -518,7 +621,15 @@ covered code in `__tests__` folders. Existing coverage includes:
 - the flashcard generation service and both flashcard API routes, mocked
   at the service/AIService boundary (Phase 8.2);
 - the quiz generation service, all three quiz API routes, and pure
-  quiz-scoring logic, mocked at the same boundary (Phase 8.3).
+  quiz-scoring logic, mocked at the same boundary (Phase 8.3);
+- AI Tutor (Phase 8.4): the real (non-mocked) `aiConversationScopeSchema`
+  validation, the real `assertAiTutorEntitlement`/`getPlanLimits`
+  entitlement logic (only `db` mocked), real `getAccessibleAIConversation`
+  privacy behavior for TUTOR-kind rows (only `db` mocked — proves the
+  schema-backed production path, not an assumed shape), both
+  `/api/ai/conversations` routes' kind-scoped behavior, the messages
+  route's Tutor branch, `TUTOR_SYSTEM_INSTRUCTION` content, and
+  `AIChatPanel`'s `scopeToQuery` contract.
 
 The suite does not make live cloud-provider calls and does not replace
 database-backed integration testing. Run:
@@ -534,11 +645,17 @@ npm run typecheck
 - Embedding provider registry activation is still required for real indexed
   RAG in this checkout.
 - AI chat is non-streaming and has limited UX actions.
-- No AI summaries, suggested prompts, generated questions, or tutor feature.
+- No AI summaries, suggested prompts, or generated questions outside of
+  flashcard/quiz generation.
+- AI Tutor (Phase 8.4) is Topic-scoped only — no Subject/Chapter/Group
+  entry point, no standalone conversation-history page, no Socratic
+  one-question-at-a-time mode, no answer evaluation, no weak-area
+  tracking.
 - Processing is fire-and-forget and needs a persistent Node runtime.
 - S3 read proxy buffers objects instead of true byte-range streaming.
 - No OCR for scanned/image-only documents.
 - No continuous Drive synchronization.
 - Google-native Slides are not imported.
 - No distributed rate limiting, usage ledger, or production observability.
-- Flashcards, quizzes, and broader Phase 8 study tools are not implemented.
+- Study sessions, progress tracking, spaced repetition, and Phase 9
+  billing/production-hardening work are not implemented.

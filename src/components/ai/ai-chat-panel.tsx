@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Loader2, Send, Sparkles, AlertCircle } from "lucide-react";
+import { Loader2, Send, Sparkles, GraduationCap, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -34,21 +34,48 @@ type AIScope =
   | { groupId: string }
   | Record<string, never>;
 
-function scopeToQuery(scope: AIScope): string {
+/**
+ * Phase 8.4: which AIConversation this panel talks to — the plain "Ask
+ * AI" conversation (CHAT, the default so every pre-8.4 caller of this
+ * component keeps behaving exactly as before) or a grounded, Topic-scoped
+ * AI Tutor conversation (TUTOR). Matches lib/validation/ai.ts's
+ * aiConversationKindSchema. This is the only thing that changes between
+ * "Ask AI" and "AI Tutor" at the UI layer — everything else (message
+ * list, sources, input, error states) is identical, so this component is
+ * extended in place rather than forked.
+ */
+type AIConversationKind = "CHAT" | "TUTOR";
+
+export function scopeToQuery(scope: AIScope, kind: AIConversationKind): string {
   const params = new URLSearchParams(scope as Record<string, string>);
+  // Only sent when non-default so the query string (and therefore the
+  // effect's re-fetch key) stays byte-identical to pre-8.4 behavior for
+  // every existing CHAT caller.
+  if (kind !== "CHAT") params.set("kind", kind);
   return params.toString();
 }
 
-export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptyStateHint: string }) {
+export function AIChatPanel({
+  scope,
+  emptyStateHint,
+  kind = "CHAT",
+}: {
+  scope: AIScope;
+  emptyStateHint: string;
+  /** Defaults to "CHAT" — pass "TUTOR" for a grounded, Topic-scoped AI Tutor conversation instead of the plain "Ask AI" one. */
+  kind?: AIConversationKind;
+}) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AIMessage[] | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [limitError, setLimitError] = useState<string | null>(null);
+  const [blockedError, setBlockedError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const isTutor = kind === "TUTOR";
 
-  const query = scopeToQuery(scope);
+  const query = scopeToQuery(scope, kind);
 
   useEffect(() => {
     fetch(`/api/ai/conversations${query ? `?${query}` : ""}`)
@@ -75,6 +102,7 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
     setSending(true);
     setConfigError(null);
     setLimitError(null);
+    setBlockedError(null);
     // Optimistic user bubble — replaced by the server's persisted version
     // once the request succeeds; removed again if it fails, since a
     // failed turn intentionally persists nothing (see the messages route's
@@ -102,6 +130,17 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
       if (res.status === 429) {
         const { error } = await res.json();
         setLimitError(error);
+        setMessages((prev) => (prev ?? []).filter((m) => m.id !== optimisticId));
+        return;
+      }
+      if (res.status === 403 || res.status === 409) {
+        // 403: aiTutor plan entitlement revoked since the conversation was
+        // opened (AI_TUTOR_NOT_ENABLED). 409: this Tutor's Topic has no
+        // indexed material yet (TUTOR_INSUFFICIENT_MATERIAL). Both are
+        // "can't answer this the way you're asking" states, not transient
+        // errors — surfaced honestly rather than a generic toast.
+        const { error } = await res.json();
+        setBlockedError(error);
         setMessages((prev) => (prev ?? []).filter((m) => m.id !== optimisticId));
         return;
       }
@@ -137,8 +176,8 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
     <div className="flex flex-col">
       {messages.length === 0 && !configError && (
         <EmptyState
-          icon={Sparkles}
-          title="Ask AI anything about this"
+          icon={isTutor ? GraduationCap : Sparkles}
+          title={isTutor ? "Ask your AI Tutor" : "Ask AI anything about this"}
           description={emptyStateHint}
         />
       )}
@@ -182,8 +221,18 @@ export function AIChatPanel({ scope, emptyStateHint }: { scope: AIScope; emptySt
         <div className="mb-4 flex items-start gap-2.5 rounded-sm border border-signal-info/30 bg-signal-info/5 px-3.5 py-3 text-sm text-ink dark:text-white">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-signal-info" />
           <div>
-            <p className="font-medium">AI chat isn&apos;t configured yet</p>
+            <p className="font-medium">{isTutor ? "AI Tutor isn't configured yet" : "AI chat isn't configured yet"}</p>
             <p className="mt-0.5 text-ink-muted dark:text-white/50">{configError}</p>
+          </div>
+        </div>
+      )}
+
+      {blockedError && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-sm border border-signal-info/30 bg-signal-info/5 px-3.5 py-3 text-sm text-ink dark:text-white">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-signal-info" />
+          <div>
+            <p className="font-medium">{isTutor ? "AI Tutor can't answer that right now" : "Can't send that right now"}</p>
+            <p className="mt-0.5 text-ink-muted dark:text-white/50">{blockedError}</p>
           </div>
         </div>
       )}

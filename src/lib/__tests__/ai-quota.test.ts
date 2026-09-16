@@ -7,7 +7,7 @@ const db = vi.hoisted(() => ({
 
 vi.mock("@/lib/db", () => ({ db }));
 
-import { assertWithinAIQuota, AIQuotaExceededError, getAIUsage } from "@/lib/ai-quota";
+import { assertWithinAIQuota, AIQuotaExceededError, getAIUsage, assertAiTutorEntitlement, AITutorNotEnabledError } from "@/lib/ai-quota";
 import { getPlanLimits } from "@/lib/plans";
 
 describe("getAIUsage", () => {
@@ -93,5 +93,51 @@ describe("assertWithinAIQuota", () => {
 
     expect(caught).toBeInstanceOf(AIQuotaExceededError);
     expect((caught as AIQuotaExceededError).usage.limitCredits).toBe(getPlanLimits("STUDENT").aiCreditsPerMonth);
+  });
+});
+
+/**
+ * Phase 8.4 — plan entitlement enforcement. The audit found `aiTutor` was
+ * declared per plan in lib/plans.ts but read nowhere else in the
+ * codebase, so a FREE-tier user faced no actual restriction. These tests
+ * exercise the real `assertAiTutorEntitlement`/`getPlanLimits` (only `db`
+ * is mocked, same boundary as every other test in this file) to prove
+ * the flag is now genuinely enforced, not just declared.
+ */
+describe("assertAiTutorEntitlement", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("rejects with AITutorNotEnabledError when the user's plan has aiTutor: false", async () => {
+    db.subscription.findUnique.mockResolvedValue({ plan: "FREE" });
+    expect(getPlanLimits("FREE").advancedFeatures.aiTutor).toBe(false);
+
+    await expect(assertAiTutorEntitlement("user-1")).rejects.toThrow(AITutorNotEnabledError);
+  });
+
+  it("defaults an unsubscribed user (no Subscription row) to FREE, which does not have aiTutor", async () => {
+    db.subscription.findUnique.mockResolvedValue(null);
+
+    await expect(assertAiTutorEntitlement("user-1")).rejects.toThrow(AITutorNotEnabledError);
+  });
+
+  it("allows a plan with aiTutor: true", async () => {
+    db.subscription.findUnique.mockResolvedValue({ plan: "STUDENT" });
+    expect(getPlanLimits("STUDENT").advancedFeatures.aiTutor).toBe(true);
+
+    await expect(assertAiTutorEntitlement("user-1")).resolves.toBeUndefined();
+  });
+
+  it("carries the plan on the thrown error so the route layer can report it", async () => {
+    db.subscription.findUnique.mockResolvedValue({ plan: "FREE" });
+
+    let caught: unknown;
+    await assertAiTutorEntitlement("user-1").catch((err) => {
+      caught = err;
+    });
+
+    expect(caught).toBeInstanceOf(AITutorNotEnabledError);
+    expect((caught as AITutorNotEnabledError).plan).toEqual(getPlanLimits("FREE"));
   });
 });

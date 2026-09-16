@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildContextBlock, chunksToSources, formatChunkLabel, toChatMessages } from "@/lib/ai-chat";
+import {
+  buildContextBlock,
+  chunksToSources,
+  formatChunkLabel,
+  toChatMessages,
+  TUTOR_SYSTEM_INSTRUCTION,
+} from "@/lib/ai-chat";
 import type { RetrievedChunk } from "@/lib/retrieval";
 
 function makeChunk(overrides: Partial<RetrievedChunk> = {}): RetrievedChunk {
@@ -66,6 +72,40 @@ describe("buildContextBlock", () => {
     expect(block).toContain("First chunk text.");
     expect(block).toContain("[2] Source: Lecture 12 — 1:30");
     expect(block).toContain("Second chunk text.");
+  });
+});
+
+describe("TUTOR_SYSTEM_INSTRUCTION", () => {
+  it("meaningfully distinguishes Tutor from a general-purpose assistant", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/tutor/i);
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/not a general-purpose assistant/i);
+  });
+
+  it("instructs teaching progressively rather than dumping answers", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/teach/i);
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/progressively/i);
+  });
+
+  it("instructs using the supplied material as the primary factual source and never inventing facts", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/primary factual source/i);
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/do not invent facts/i);
+  });
+
+  it("instructs admitting when the material is insufficient, rather than fabricating", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/doesn't contain enough information/i);
+  });
+
+  it("instructs asking check-understanding questions where appropriate", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/check-understanding question/i);
+  });
+
+  it("instructs never claiming unsupported information came from the student's own materials", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/never claim something came from the student's own materials/i);
+  });
+
+  it("instructs staying scoped to the Topic and declining to act as an unrestricted assistant", () => {
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/stay scoped to this topic/i);
+    expect(TUTOR_SYSTEM_INSTRUCTION).toMatch(/decline requests to act as an unrestricted assistant/i);
   });
 });
 

@@ -16,12 +16,15 @@ export function TopicTabs({
   description,
   materials,
   transcribableMaterials,
+  aiTutorEnabled,
 }: {
   topicId: string;
   name: string;
   description: string | null;
   materials: Material[];
   transcribableMaterials: TranscribableMaterial[];
+  /** Phase 8.4 — PlanLimits.advancedFeatures.aiTutor for the current user, resolved server-side in page.tsx. Gates the Tutor entry point below; the real enforcement is server-side in the API routes (assertAiTutorEntitlement) — this is UX only, same "frontend hides, backend is authoritative" split as every other entitlement in this app. */
+  aiTutorEnabled: boolean;
 }) {
   return (
     <Tabs defaultValue="overview">
@@ -62,9 +65,28 @@ export function TopicTabs({
           <FlashcardsStudyToolsPanel topicId={topicId} />
           <QuizStudyToolsPanel topicId={topicId} />
         </div>
-        <p className="mt-6 text-center text-xs text-ink-faint dark:text-white/40">
-          The AI tutor is coming in a later update.
-        </p>
+        <div className="mt-8 border-t border-line pt-6 dark:border-line-dark">
+          <h3 className="text-sm font-medium text-ink dark:text-white">AI Tutor</h3>
+          {aiTutorEnabled ? (
+            <>
+              <p className="mt-1 text-sm text-ink-muted dark:text-white/50">
+                A focused, private conversation grounded strictly in this topic&apos;s indexed materials — separate
+                from the AI Chat tab.
+              </p>
+              <div className="mt-4">
+                <AIChatPanel
+                  scope={{ topicId }}
+                  kind="TUTOR"
+                  emptyStateHint="Answers are grounded in this topic's indexed materials, with clickable sources. If nothing is indexed yet, add and process some material first."
+                />
+              </div>
+            </>
+          ) : (
+            <p className="mt-1 text-sm text-ink-muted dark:text-white/50">
+              AI Tutor isn&apos;t available on your current plan. Upgrade your plan in Settings to use it.
+            </p>
+          )}
+        </div>
       </TabsContent>
     </Tabs>
   );
