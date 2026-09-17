@@ -540,11 +540,13 @@ shape as `POST /api/ai/conversations/[id]/messages`. `GET
 ordering — cards are created sequentially inside one transaction, where
 Postgres's `now()` is fixed for the whole transaction, so `createdAt`
 can't distinguish insertion order the way it does for models created
-one-per-request elsewhere in this app), and never includes
-`FlashcardReview` rows. The Topic "Study Tools" tab's `PhasePlaceholder`
-was replaced with a functional `FlashcardsStudyToolsPanel` plus a minimal
-`/flashcards/[deckId]` page — deliberately not the full study/flip
-experience (that's a later subphase).
+one-per-request elsewhere in this app). As of Phase 8.6 (below), each
+card also carries the requesting user's own latest `FlashcardReview`
+(never anyone else's). The Topic "Study Tools" tab's `PhasePlaceholder`
+was replaced with a functional `FlashcardsStudyToolsPanel` plus a
+`/flashcards/[deckId]` page — a real Study/Overview tabbed experience as
+of Phase 8.6; Phase 8.2 itself only shipped the Overview (browse-all-
+cards) half.
 
 **Phase 8.3 — quiz generation and quiz-taking.**
 `lib/services/quiz-generation.ts` mirrors `flashcard-generation.ts`'s
@@ -638,11 +640,58 @@ a "Your progress" summary inside the existing Topic Study Tools tab
 existing chapter-completion `ProgressRow` — the two are never merged.
 No schema change and no new index; `QuizAttempt.userId` and
 `AIConversation`'s existing `(userId, kind)` index already cover this
-phase's queries. Not implemented: flashcard review recording and
-flashcard progress/mastery, study streaks or daily-activity buckets
+phase's queries. Not implemented in Phase 8.5: flashcard review
+recording (added in Phase 8.6, below) and flashcard progress/mastery
+(still not surfaced anywhere), study streaks or daily-activity buckets
 (and therefore no timezone handling), `weakTopics` population,
 per-question weak-topic analytics, and any general analytics beyond
 this.
+
+**Phase 8.6 — Flashcard Study & Review.** Activates the `FlashcardReview`
+model Phase 8.1 already defined but nothing wrote to — no schema change.
+`POST /api/flashcards/[deckId]/reviews` mirrors `POST
+/api/quizzes/[quizId]/attempts`'s authorization shape exactly:
+`getAccessibleFlashcardDeck` (the same check the GET route already uses)
+gates deck access, then `db.flashcard.findFirst({ where: { id:
+flashcardId, deckId: deck.id } })` confirms the submitted `flashcardId`
+actually belongs to *this* deck before any write — a real flashcard id
+that belongs to a different (even accessible) deck is rejected with 400,
+closing the flashcardId-IDOR path. `userId` is never accepted from the
+request body (`submitFlashcardReviewSchema` only has `flashcardId` and
+`wasCorrect`); every `FlashcardReview` is created for the authenticated
+session user. Multiple reviews per card are allowed and never collapsed
+— append-only history, same posture as `QuizAttempt` — and nothing here
+implements SM-2/FSRS, due-date scheduling, streaks, or any other
+spaced-repetition or gamification mechanic; those remain explicitly out
+of scope.
+
+`GET /api/flashcards/[deckId]` now includes each card's own-user latest
+review via a Prisma `include` scoped with `where: { userId: user.id },
+orderBy: { reviewedAt: "desc" }, take: 1` — structurally incapable of
+returning another user's rows, the same "the query itself is the privacy
+boundary" pattern Phase 8.5's progress aggregation and the quiz-attempts
+route both already rely on. The raw plural `reviews` array is never
+returned; the route maps it down to a single `review: {...} | null`
+field. The deck page (`src/app/(app)/flashcards/[deckId]/page.tsx`) does
+the same scoped `include` directly (mirroring how the quiz-taking page
+already fetches via `db` rather than calling its own GET route
+internally) and passes the result to a new client `FlashcardDeckPage`
+wrapper (`src/components/flashcards/flashcard-deck-page.tsx`) that adds a
+`Study` / `Overview` tab pair using the existing `Tabs` primitive — the
+deck page had no tab structure before this phase, so this is the
+smallest fitting addition, not a new navigation pattern.
+`FlashcardStudyView` (`src/components/flashcards/flashcard-study-view.tsx`)
+is the actual one-card-at-a-time loop: reveal → Known/Not Known → real
+`POST` to the reviews endpoint → advance only after a successful response
+→ completion state with a local, session-only studied/known count (never
+persisted, never a global metric). Revisiting a deck re-derives
+already-reviewed state entirely from the server's per-card `review`
+field on each fresh page load — nothing about "was this reviewed" is
+cached or inferred client-side across visits. Card order stays the
+existing stable `id asc` order regardless of prior review outcomes; nothing
+reorders, filters, or schedules cards by review state. `FlashcardDeckView`
+(the Phase 8.2 static list) is unchanged and lives on as the `Overview`
+tab's content.
 
 ## 14. Testing
 
@@ -676,7 +725,16 @@ covered code in `__tests__` folders. Existing coverage includes:
   rollups, TUTOR-vs-CHAT exclusion, zero-activity and zero-question
   edge cases, user-isolation on a shared group quiz) and `GET
   /api/progress`'s scope validation, `getAccessibleAIScope` resolution,
-  and inaccessible-scope rejection.
+  and inaccessible-scope rejection;
+- Flashcard Study & Review (Phase 8.6): `POST
+  /api/flashcards/[deckId]/reviews`'s full authorization/validation
+  surface (auth, deck access incl. group-owned decks, malformed/missing
+  payload, flashcardId-not-in-this-deck IDOR rejection, client-supplied
+  `userId` having no effect, multiple reviews per card), and `GET
+  /api/flashcards/[deckId]`'s per-user latest-review scoping (the
+  `include`'s `where: { userId }` argument, the singular `review` field
+  replacing the raw `reviews` array, `review: null` for an unreviewed
+  card, and a second user never seeing the first user's review).
 
 The suite does not make live cloud-provider calls and does not replace
 database-backed integration testing. Run:
@@ -706,8 +764,11 @@ npm run typecheck
 - No distributed rate limiting, usage ledger, or production observability.
 - Real Quiz-progress and AI-Tutor-activity aggregation exist (Phase 8.5:
   `GET /api/progress`, Topic "Your progress" panel, dashboard "Study
-  Activity" widget). Flashcard review recording (and therefore flashcard
-  progress/mastery), study streaks, daily-activity buckets, and spaced
-  repetition are still not implemented — `FlashcardReview` remains
-  schema-only with no write path. Phase 9 billing/production-hardening
-  work is also not implemented.
+  Activity" widget). Flashcard review recording now exists too (Phase
+  8.6: `POST /api/flashcards/[deckId]/reviews`, `FlashcardStudyView`),
+  but flashcard progress/mastery is still not surfaced anywhere (not
+  added to `GET /api/progress` or either progress UI), and study streaks,
+  daily-activity buckets, and spaced repetition (SM-2/FSRS, due-date
+  scheduling, or any other scheduling algorithm) remain unimplemented by
+  design. Phase 9 billing/production-hardening work is also not
+  implemented.

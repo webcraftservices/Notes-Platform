@@ -2,14 +2,17 @@ import { requireUser, requireFlashcardDeck } from "@/lib/access";
 import { db } from "@/lib/db";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
-import { FlashcardDeckView } from "@/components/flashcards/flashcard-deck-view";
+import { FlashcardDeckPage as FlashcardDeckPageView } from "@/components/flashcards/flashcard-deck-page";
 
 /**
- * Phase 8.2's minimal deck page (task §10) — proves the generated deck is
- * real and reachable, nothing more. `requireFlashcardDeck` is the same
- * owner-or-scope-membership check `getAccessibleFlashcardDeck` performs
- * for the API route (lib/access.ts), so a deck attached to a Group only
- * renders for someone with access to that Group, exactly like every other
+ * Phase 8.6: extends the Phase 8.2 minimal deck page (task §10) with the
+ * same current-user-only latest-review scoping the API route's GET now
+ * does (see `src/app/api/flashcards/[deckId]/route.ts`'s doc comment) —
+ * `reviews: { where: { userId: user.id }, orderBy: { reviewedAt: "desc" },
+ * take: 1 }` can never fetch another user's review rows. `requireFlashcardDeck`
+ * remains the same owner-or-scope-membership check `getAccessibleFlashcardDeck`
+ * performs for the API route, so a deck attached to a Group only renders
+ * for someone with access to that Group, exactly like every other
  * shared-content page in this app.
  */
 export default async function FlashcardDeckPage({ params }: { params: { deckId: string } }) {
@@ -19,6 +22,13 @@ export default async function FlashcardDeckPage({ params }: { params: { deckId: 
   const cards = await db.flashcard.findMany({
     where: { deckId: deck.id },
     orderBy: { id: "asc" },
+    include: {
+      reviews: {
+        where: { userId: user.id },
+        orderBy: { reviewedAt: "desc" },
+        take: 1,
+      },
+    },
   });
 
   return (
@@ -28,13 +38,17 @@ export default async function FlashcardDeckPage({ params }: { params: { deckId: 
       </Topbar>
       <main className="flex-1 overflow-y-auto px-6 py-8">
         <div className="mx-auto max-w-3xl">
-          <FlashcardDeckView
+          <FlashcardDeckPageView
+            deckId={deck.id}
             title={deck.title}
-            cards={cards.map((card: typeof cards[number]) => ({
+            cards={cards.map(({ reviews, ...card }: (typeof cards)[number]) => ({
               id: card.id,
               front: card.front,
               back: card.back,
               sources: card.sources as DeckCardSources,
+              review: reviews[0]
+                ? { id: reviews[0].id, wasCorrect: reviews[0].wasCorrect, reviewedAt: reviews[0].reviewedAt.toISOString() }
+                : null,
             }))}
           />
         </div>

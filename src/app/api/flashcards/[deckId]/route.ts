@@ -11,13 +11,16 @@ import { NOT_FOUND, FORBIDDEN, UNAUTHORIZED } from "@/lib/api-response";
  * flashcard-generation.ts wrote them in (see that file's doc comment on
  * why `id`, not `createdAt`, is the stable sort key here).
  *
- * Deliberately does NOT include `FlashcardReview` rows at all (task §12/
- * §17 — deck content is shared, review activity is private per user; this
- * phase has no reviewing UI yet, so there's nothing legitimate to return
- * even for the requesting user's own reviews). Add a scoped
- * `reviews: { where: { userId: user.id } }` include only when a future
- * phase actually needs the current user's own review state here — never
- * every reviewer's data.
+ * Phase 8.6: each card also carries the *authenticated user's own*
+ * latest `review` (or `null` if they've never reviewed it) — deck
+ * content stays shared, but review activity stays private per user
+ * (task's Group Privacy section). The Prisma `include` is scoped with
+ * `where: { userId: user.id }`, so this can never fetch — let alone
+ * leak — another reviewer's rows; `take: 1` + `orderBy: reviewedAt desc`
+ * gives just the latest event, never the full history, since only
+ * current card state is needed here. `reviews` (the raw scoped array)
+ * is stripped from the response in favor of a single `review` field so
+ * nothing about the plural-array shape leaks into the API contract.
  */
 export async function GET(_req: Request, { params }: { params: { deckId: string } }) {
   const user = await getSessionUser();
@@ -30,9 +33,21 @@ export async function GET(_req: Request, { params }: { params: { deckId: string 
     const cards = await db.flashcard.findMany({
       where: { deckId: deck.id },
       orderBy: { id: "asc" },
+      include: {
+        reviews: {
+          where: { userId: user.id },
+          orderBy: { reviewedAt: "desc" },
+          take: 1,
+        },
+      },
     });
 
-    return NextResponse.json({ deck: { ...deck, cards } });
+    const cardsWithOwnReview = cards.map(({ reviews, ...card }: (typeof cards)[number]) => ({
+      ...card,
+      review: reviews[0] ?? null,
+    }));
+
+    return NextResponse.json({ deck: { ...deck, cards: cardsWithOwnReview } });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
     throw err;

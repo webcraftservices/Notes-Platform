@@ -1,8 +1,8 @@
 # Project State
 
-Last reconciled against the repository at commit `805e02b` ("feat:
-implement Phase 8.4 AI tutor") plus the Phase 8.5 Study Progress
-working-tree changes on top of it, on 2026-09-17.
+Last reconciled against the repository at commit `0348aa9` ("feat: add
+study progress tracking" — Phase 8.5) plus the Phase 8.6 Flashcard Study
+& Review working-tree changes on top of it, on 2026-09-17.
 
 `PROJECT_STATE.md` is the canonical state document. There is no separate
 root-level `STATE.md`.
@@ -18,7 +18,7 @@ root-level `STATE.md`.
 | Phase 5 — AI, RAG, and AI chat | IN PROGRESS | The provider abstractions, Gemini generation path, embedding implementation, extraction, chunking, indexing, retrieval, scoped chat, citations, and authorization are present. Provider activation and several planned AI UX/features remain incomplete. |
 | Phase 6 — Groups and collaboration | COMPLETE | Groups, membership, roles, invitations, shared Subjects/Materials, activity, notifications, and group AI scope are implemented. |
 | Phase 7 — Google Drive/Docs | IN PROGRESS / PARTIAL | Google OAuth connections, Drive browsing/import, Docs text export, re-import, and supported-file processing are implemented. Continuous sync and native Google Slides import are not implemented. |
-| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes + 8.4 AI Tutor + 8.5 Study Progress complete) | Flashcard generation (8.2), quiz generation + real quiz-taking with server-side scoring (8.3), a real, Topic-scoped, plan-gated AI Tutor (8.4), and real private Quiz/Tutor progress aggregation (8.5) are all real and working end-to-end. Flashcard review recording (and therefore flashcard progress/mastery), study streaks, and spaced repetition are NOT implemented — see "Phase 8.5 — Study Progress" below. |
+| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes + 8.4 AI Tutor + 8.5 Study Progress + 8.6 Flashcard Study & Review complete) | Flashcard generation (8.2), quiz generation + real quiz-taking with server-side scoring (8.3), a real, Topic-scoped, plan-gated AI Tutor (8.4), real private Quiz/Tutor progress aggregation (8.5), and a real interactive flashcard study loop with private per-user review persistence (8.6) are all real and working end-to-end. Flashcard progress/mastery surfacing, study streaks, and spaced repetition are NOT implemented — see "Phase 8.6 — Flashcard Study & Review" below. |
 | Phase 9 — Billing, usage ledger, security hardening, and production polish | NOT YET IMPLEMENTED | Some plan limits and live usage calculations exist, but the full ledger and hardening work do not. |
 
 ## Implemented product surface
@@ -188,9 +188,11 @@ shape, then the complete shape including real provenance) → one
   this is one bounded retrieval + one chat-shaped AI call, the same cost
   class as a single chat turn, so the client just awaits the finished
   deck. `GET /api/flashcards/[deckId]` returns a deck + its cards via
-  `getAccessibleFlashcardDeck`, and deliberately never includes
-  `FlashcardReview` rows (shared content vs. private activity, per the
-  Group Learning Model).
+  `getAccessibleFlashcardDeck`. As of Phase 8.6 below, each card also
+  carries the requesting user's own latest `FlashcardReview` (`review:
+  {...} | null`) via a Prisma `include` scoped to `userId` — shared
+  content stays shared, but review activity stays private per user, per
+  the Group Learning Model.
 - **Insufficient material:** if `retrieveRelevantChunks` returns nothing
   for the Topic, generation fails with a real 409
   (`FLASHCARDS_INSUFFICIENT_MATERIAL`) before ever calling the AI —
@@ -477,6 +479,75 @@ any route) and was left untouched.
   `AIConversation`'s existing `(userId, kind)` index already cover this
   phase's query patterns at the expected scale.
 
+## Phase 8.6 — Flashcard Study & Review
+
+Activates the `FlashcardReview` model that Phase 8.1 defined and Phase
+8.5's audit confirmed had no write path anywhere in the codebase. This
+phase adds exactly that write path plus a real study UI — nothing else.
+**No schema change** — `FlashcardReview`'s existing fields
+(`flashcardId`, `userId`, `wasCorrect`, `selfRating`, `reviewedAt`) were
+already the correct shape; `selfRating` remains unused/optional, as
+before.
+
+- **API — `POST /api/flashcards/[deckId]/reviews`:** mirrors `POST
+  /api/quizzes/[quizId]/attempts`'s authorization shape exactly:
+  `getSessionUser` → validate body (`submitFlashcardReviewSchema`:
+  `flashcardId` + `wasCorrect`, nothing else) → `getAccessibleFlashcardDeck`
+  (the same owner-or-scope-membership check the GET route already uses,
+  so group-owned decks work identically) → `db.flashcard.findFirst({
+  where: { id: flashcardId, deckId: deck.id } })` to confirm the card
+  actually belongs to *this* deck → `db.flashcardReview.create(...)` with
+  `userId` always taken from the authenticated session, never the
+  request body (the schema doesn't even have a `userId` field, so there
+  is nothing for a client to send). A flashcard id that's real but
+  belongs to a different (even accessible) deck fails the `findFirst`
+  lookup and returns 400 — closes the flashcardId-IDOR path explicitly.
+  Multiple reviews per card are allowed and never deduplicated/upserted —
+  append-only history, the same posture `QuizAttempt` already has.
+- **API — `GET /api/flashcards/[deckId]` (extended):** the `flashcard`
+  query now includes each card's own-user latest review: `reviews: {
+  where: { userId: user.id }, orderBy: { reviewedAt: "desc" }, take: 1
+  }`. The route maps this down to a single `review: {...} | null` field
+  per card and never returns the raw plural `reviews` array — the
+  Prisma `where: { userId: user.id }` clause is the actual privacy
+  boundary (structurally incapable of returning another user's rows),
+  the same pattern Phase 8.5's aggregation and the quiz-attempts route
+  already rely on.
+- **Frontend:** `src/components/flashcards/flashcard-study-view.tsx` is
+  the real one-card-at-a-time loop — front shown first, "Reveal answer"
+  shows the back plus provenance sources, then "Known" / "Not Known"
+  POSTs to the reviews endpoint and only advances to the next card after
+  a successful response (an error keeps the user on the same card with a
+  real error message, never a silent fake success). Completion shows a
+  local, session-only studied/known count — never persisted, never fed
+  into Phase 8.5's progress aggregation or any dashboard. An empty deck
+  (zero cards) shows a proper `EmptyState`, never a broken study loop or
+  a network call for a nonexistent card. `src/components/flashcards/
+  flashcard-deck-page.tsx` is a small client wrapper adding a "Study" /
+  "Overview" tab pair via the existing `Tabs` primitive (already used by
+  `TopicTabs`/`SubjectTabs`/`ChapterTabs`/`GroupTabs`) — the deck page had
+  no tab structure before this phase, so this is the smallest fitting
+  addition rather than a new navigation pattern. The Phase 8.2
+  `FlashcardDeckView` (static browse-all-cards list) is unchanged and is
+  now the `Overview` tab's content, reachable by anyone who just wants to
+  inspect the generated cards without starting a review session.
+- **Revisiting:** re-derives all "already reviewed" state from the
+  server's per-card `review` field on each fresh page load — nothing
+  about review history is cached or inferred client-side across visits.
+  Card order stays the existing stable `id asc` order regardless of
+  prior review outcomes; nothing reorders, filters, or schedules cards
+  by review state.
+- **Explicitly NOT implemented** (out of scope by design, per the task):
+  SM-2, FSRS, ease factors, review intervals, due-date scheduling, or any
+  other spaced-repetition algorithm; XP, levels, badges, streaks,
+  leaderboards, or any gamification; AI-generated study plans or review
+  recommendations; global or weak-topic flashcard analytics; any change
+  to `GET /api/progress`, the Study Progress UI, Quiz, or the AI Tutor.
+  Flashcard progress/mastery is still not surfaced in `GET /api/progress`
+  or either progress widget — this phase only makes the underlying
+  `FlashcardReview` data real; a future phase would have to explicitly
+  add it there.
+
 ## Material and RAG invariants
 
 Material hierarchy IDs are intentionally denormalized:
@@ -540,14 +611,16 @@ Scanned PDFs and image-only documents have no OCR fallback.
    embed → retrieve verification.
 2. Perform manual browser verification of Subject, Chapter, group, and
    material-source navigation flows with configured providers, including
-   the new AI Tutor panel and the Phase 8.5 Study Progress UI.
+   the new AI Tutor panel, the Phase 8.5 Study Progress UI, and the
+   Phase 8.6 flashcard Study/Overview tabs.
 3. Add only the next explicitly selected Phase 5 AI UX/features; do not imply
    streaming, summaries, or study tools are complete.
-4. If flashcard progress is wanted, build a real `FlashcardReview`
-   write path (recording an actual flip/correct-incorrect interaction in
-   `FlashcardDeckView` or equivalent) first — Phase 8.5 deliberately did
-   not add one, since `FlashcardReview` has no producer today. Study
-   streaks and spaced repetition also remain entirely unimplemented.
+4. If flashcard progress/mastery is wanted on the dashboard or `GET
+   /api/progress`, that's still a distinct follow-up — Phase 8.6 made
+   `FlashcardReview` a real, written, private-per-user table, but did not
+   surface any aggregate over it. Study streaks and spaced repetition
+   (SM-2/FSRS/due-date scheduling) also remain entirely unimplemented by
+   design.
 5. Continue the roadmap toward Phase 9 billing, usage-ledger, and
    production-hardening work.
 
@@ -588,7 +661,11 @@ Phase 8.5, coverage also includes `lib/study-progress.ts`'s quiz-progress
 and Tutor-activity aggregation (multi-attempt/multi-quiz rollups,
 TUTOR-vs-CHAT exclusion, zero-activity and zero-question edge cases) and
 `GET /api/progress`'s scope resolution, authorization, and the
-group-shared-content-vs-private-activity boundary. Everything AI-shaped
+group-shared-content-vs-private-activity boundary. As of Phase 8.6,
+coverage also includes `POST /api/flashcards/[deckId]/reviews`'s full
+authorization/validation surface and the extended `GET
+/api/flashcards/[deckId]`'s per-user latest-review scoping (see the test
+summary below). Everything AI-shaped
 is mocked at the service/AIService boundary; no real Gemini/OpenAI
 network calls in the suite. Live cloud-provider calls and production
 database behavior are not exercised by the unit suite.
@@ -638,5 +715,32 @@ exclusion, unscoped-vs-scoped requests, malformed scope (400), an
 inaccessible scope (403, not an empty 200), and — the most important
 privacy case — that User A's progress on a shared group Quiz never
 includes User B's attempts, and vice versa. No schema change; `git diff
-prisma/schema.prisma` is empty. `FlashcardReview` and `weakTopics` remain
-completely untouched.
+prisma/schema.prisma` is empty. `FlashcardReview` and `weakTopics` remained
+completely untouched as of this commit (`FlashcardReview` was
+subsequently activated in Phase 8.6 below; `weakTopics` remains
+untouched).
+
+As of the Phase 8.6 changes (working tree, not committed per this task's
+no-commit rule): 54 test files / 585 passing (4 skipped, the same pre-existing
+set) — one new test file (`reviews/__tests__/route.test.ts`) versus the
+Phase 8.5 baseline's 53 — `npm run lint` clean, `npm run typecheck`
+diffed line-for-line against a stash-isolated Phase 8.5 baseline:
+identical 96-error pre-existing `@prisma/client`-generation-cascade set,
+zero new errors. `npm run build` remains unverifiable in this sandbox
+for the same pre-existing, unrelated reason as every prior phase: no
+network egress to `fonts.googleapis.com` (confirmed identical on
+unmodified `main` before any Phase 8.6 file was touched). `npx prisma
+validate`/`generate` also remain blocked by the sandbox's lack of egress
+to `binaries.prisma.sh` (403), same as every prior phase. 18 net new
+tests versus the Phase 8.5 baseline: 15 new for `POST
+/api/flashcards/[deckId]/reviews` (auth, personal-deck and group-deck
+authorization, malformed/missing payload, a flashcardId that doesn't
+exist or belongs to a different deck — the explicit IDOR case, a
+client-supplied `userId` having no effect, multiple reviews on one card,
+and the response shape), and a net +3 for `GET /api/flashcards/[deckId]`
+(one obsolete "never returns reviews" test removed, four new ones added
+covering the `include`'s exact `where: { userId }` scoping arguments,
+the singular `review` field replacing the raw array, `review: null` for
+an unreviewed card, and — the privacy case — a second user's request
+never surfacing the first user's review). No schema change; `git diff
+prisma/schema.prisma` is empty.
