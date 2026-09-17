@@ -1,13 +1,15 @@
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
-import { BookOpen, TrendingUp, Sparkles, Users, FolderOpen } from "lucide-react";
+import { BookOpen, TrendingUp, Activity, Sparkles, Users, FolderOpen } from "lucide-react";
 import { requireUser, getPrimaryWorkspace } from "@/lib/access";
 import { getDashboardData } from "@/lib/dashboard";
+import { getStudyProgress } from "@/lib/study-progress";
 import { Topbar } from "@/components/shell/topbar";
 import { EmptyState } from "@/components/ui/empty-state";
 import { SubjectCard } from "@/components/subjects/subject-card";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import { ProgressRow } from "@/components/dashboard/progress-row";
+import { StudyActivityWidget } from "@/components/dashboard/study-activity-widget";
 import { CreateSubjectDialog } from "@/components/subjects/create-subject-dialog";
 import { CreateGroupDialog } from "@/components/groups/create-group-dialog";
 import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
@@ -25,6 +27,11 @@ export default async function DashboardPage() {
   const user = await requireUser();
   const workspace = await getPrimaryWorkspace(user.id);
   const { recentSubjects, recentTopics, progress, subjectCount, recentMaterials } = await getDashboardData(workspace.id);
+  // Phase 8.5 — real Quiz/AI-Tutor activity, global (no scope) so it
+  // covers every quiz attempt and Tutor session this user has, personal
+  // or group. Kept separate from `progress` above (ChapterStatus
+  // completion) — see StudyActivityWidget's doc comment.
+  const studyActivity = await getStudyProgress(user.id);
   const firstName = user.name?.split(" ")[0] ?? "there";
 
   return (
@@ -113,6 +120,14 @@ export default async function DashboardPage() {
               </div>
             </section>
           )}
+
+          <section>
+            <h2 className="mb-4 flex items-center gap-2 font-display text-base font-semibold text-ink dark:text-white">
+              <Activity className="h-4 w-4 text-ink-faint" />
+              Study Activity
+            </h2>
+            <StudyActivityWidget progress={studyActivity} />
+          </section>
 
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <section>

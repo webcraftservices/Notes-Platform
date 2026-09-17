@@ -9,6 +9,7 @@ import { TopicTranscriptsPanel, type TranscribableMaterial } from "@/components/
 import { AIChatPanel } from "@/components/ai/ai-chat-panel";
 import { FlashcardsStudyToolsPanel } from "@/components/topics/flashcards-study-tools-panel";
 import { QuizStudyToolsPanel } from "@/components/topics/quiz-study-tools-panel";
+import { StudyProgressPanel } from "@/components/topics/study-progress-panel";
 
 export function TopicTabs({
   topicId,
@@ -61,6 +62,12 @@ export function TopicTabs({
       </TabsContent>
 
       <TabsContent value="study-tools">
+        <div className="mb-6 border-b border-line pb-6 dark:border-line-dark">
+          <h3 className="text-sm font-medium text-ink dark:text-white">Your progress</h3>
+          <div className="mt-4">
+            <StudyProgressPanel topicId={topicId} />
+          </div>
+        </div>
         <div className="grid gap-6 md:grid-cols-2">
           <FlashcardsStudyToolsPanel topicId={topicId} />
           <QuizStudyToolsPanel topicId={topicId} />

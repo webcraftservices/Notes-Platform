@@ -429,12 +429,11 @@ Important current models include:
 - `Note`, `NoteBlock`, `NoteVersion`;
 - plan and usage-supporting models.
 
-Flashcard and quiz models remain schema scaffolding (no generation or study
-UI yet), but as of Phase 8.1 they carry Material's own scope shape
+Flashcard and quiz models are fully implemented with generation and study UI (Phases 8.2 and 8.3). As of Phase 8.1 they carry Material's own scope shape
 (`workspaceId`/`groupId`/`subjectId`/`chapterId`/`topicId`) instead of a
 bare `topicId`, plus a `FlashcardReview` table for private per-user study
 activity and a `sources` JSON provenance column on `Flashcard`/
-`QuizQuestion` — see §15. `UsageRecord` exists as future ledger scaffolding;
+`QuizQuestion` — see §15. `UsageRecord` is actively used to record AI usage (e.g., `"chat"`, `"tutor_chat"`, `"flashcard_generation"`);
 current storage and recording usage are computed from live
 Material/subscription aggregates.
 
@@ -482,7 +481,7 @@ Current security mechanisms include:
 Distributed rate limiting, database row-level security, comprehensive
 observability, and production queue hardening remain future work.
 
-## 13. Learning System scope (Phase 8.1), flashcards (Phase 8.2), quizzes (Phase 8.3), and AI Tutor (Phase 8.4)
+## 13. Learning System scope (Phase 8.1), flashcards (Phase 8.2), quizzes (Phase 8.3), AI Tutor (Phase 8.4), and Study Progress (Phase 8.5)
 
 `FlashcardDeck` and `Quiz` reuse Material's own scope shape rather than a
 new resolver: `subjectId`/`chapterId`/`topicId` narrow within an owner,
@@ -603,6 +602,48 @@ own rate-limit bucket, system prompt (`TUTOR_SYSTEM_INSTRUCTION`), and
 before the schema column existed — see the ground-truth note at the start
 of §8's Tutor subsection.
 
+**Phase 8.5 — Study Progress.** Real, private, per-user aggregation over
+`QuizAttempt` and Tutor-kind `AIConversation`/`AIMessage` rows — no new
+`StudyProgress` model. A read-only audit performed before implementation
+found `FlashcardReview` has no write path anywhere in the codebase (no
+route ever creates one, and `FlashcardDeckView` has no
+flip/correct-incorrect interaction), so flashcard progress was excluded
+from this phase entirely rather than shown as a permanently-empty state;
+`QuizAttempt.weakTopics` was likewise confirmed schema-only and left
+untouched. `src/lib/study-progress.ts` exports `getQuizProgress(userId,
+scope?)` and `getTutorActivity(userId, scope?)`: every query starts
+`WHERE userId = userId`, and an optional, already-authorized
+`ResolvedAIScope` narrows which `Quiz`/`AIConversation` rows count via
+`lib/retrieval-scope.ts`'s existing `materialWhereForScope` — reused
+unchanged, since `Quiz` and `AIConversation` share `Material`'s exact
+five-field scope shape, so no new scope-to-where helper was written. No
+scope at all is the true global aggregate for that user. Multiple
+attempts on one quiz are never collapsed (`attempts`/`latest`/
+`bestScore`/`averageScore` all computed across the full set, history
+capped at 20), and multiple quizzes under one scope roll up together
+since the where-clause narrows by the quiz's scope field, not a single
+`quizId`. Tutor activity counts only `kind = TUTOR` conversations,
+reading `AIConversation`/`AIMessage` directly rather than the
+best-effort `tutor_chat` `UsageRecord` ledger. `GET /api/progress`
+follows the identical validate → `getAccessibleAIScope` → aggregate
+shape as `GET /api/ai/conversations` — same scope-authorization path,
+no second authorization system, an inaccessible scope returns 403 rather
+than a misleadingly-empty 200. Privacy is unchanged/reused: group-owned
+Quiz/Topic content is shared, but `QuizAttempt`/`AIConversation` rows
+stay strictly per-`userId`, verified by a test asserting two group
+members who both took the same quiz never see each other's attempts. UI:
+a "Your progress" summary inside the existing Topic Study Tools tab
+(`StudyProgressPanel`) and a separate dashboard "Study Activity" section
+(`StudyActivityWidget`) kept visually and semantically distinct from the
+existing chapter-completion `ProgressRow` — the two are never merged.
+No schema change and no new index; `QuizAttempt.userId` and
+`AIConversation`'s existing `(userId, kind)` index already cover this
+phase's queries. Not implemented: flashcard review recording and
+flashcard progress/mastery, study streaks or daily-activity buckets
+(and therefore no timezone handling), `weakTopics` population,
+per-question weak-topic analytics, and any general analytics beyond
+this.
+
 ## 14. Testing
 
 The project uses Vitest with Node environment and tests live beside the
@@ -629,7 +670,13 @@ covered code in `__tests__` folders. Existing coverage includes:
   schema-backed production path, not an assumed shape), both
   `/api/ai/conversations` routes' kind-scoped behavior, the messages
   route's Tutor branch, `TUTOR_SYSTEM_INSTRUCTION` content, and
-  `AIChatPanel`'s `scopeToQuery` contract.
+  `AIChatPanel`'s `scopeToQuery` contract;
+- Study Progress (Phase 8.5): `lib/study-progress.ts`'s quiz-progress and
+  Tutor-activity aggregation (multi-attempt/multi-quiz-under-one-topic
+  rollups, TUTOR-vs-CHAT exclusion, zero-activity and zero-question
+  edge cases, user-isolation on a shared group quiz) and `GET
+  /api/progress`'s scope validation, `getAccessibleAIScope` resolution,
+  and inaccessible-scope rejection.
 
 The suite does not make live cloud-provider calls and does not replace
 database-backed integration testing. Run:
@@ -657,5 +704,10 @@ npm run typecheck
 - No continuous Drive synchronization.
 - Google-native Slides are not imported.
 - No distributed rate limiting, usage ledger, or production observability.
-- Study sessions, progress tracking, spaced repetition, and Phase 9
-  billing/production-hardening work are not implemented.
+- Real Quiz-progress and AI-Tutor-activity aggregation exist (Phase 8.5:
+  `GET /api/progress`, Topic "Your progress" panel, dashboard "Study
+  Activity" widget). Flashcard review recording (and therefore flashcard
+  progress/mastery), study streaks, daily-activity buckets, and spaced
+  repetition are still not implemented — `FlashcardReview` remains
+  schema-only with no write path. Phase 9 billing/production-hardening
+  work is also not implemented.

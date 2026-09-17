@@ -1,8 +1,8 @@
 # Project State
 
-Last reconciled against the repository at commit `45db743` plus the Phase
-8.1 Learning System foundation working-tree changes on top of it, on
-2026-09-12.
+Last reconciled against the repository at commit `805e02b` ("feat:
+implement Phase 8.4 AI tutor") plus the Phase 8.5 Study Progress
+working-tree changes on top of it, on 2026-09-17.
 
 `PROJECT_STATE.md` is the canonical state document. There is no separate
 root-level `STATE.md`.
@@ -18,7 +18,7 @@ root-level `STATE.md`.
 | Phase 5 — AI, RAG, and AI chat | IN PROGRESS | The provider abstractions, Gemini generation path, embedding implementation, extraction, chunking, indexing, retrieval, scoped chat, citations, and authorization are present. Provider activation and several planned AI UX/features remain incomplete. |
 | Phase 6 — Groups and collaboration | COMPLETE | Groups, membership, roles, invitations, shared Subjects/Materials, activity, notifications, and group AI scope are implemented. |
 | Phase 7 — Google Drive/Docs | IN PROGRESS / PARTIAL | Google OAuth connections, Drive browsing/import, Docs text export, re-import, and supported-file processing are implemented. Continuous sync and native Google Slides import are not implemented. |
-| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes + 8.4 AI Tutor complete) | Flashcard generation (8.2), quiz generation + real quiz-taking with server-side scoring (8.3), and a real, Topic-scoped, plan-gated AI Tutor built on a genuine `AIConversation.kind` schema column (8.4) are all real and working end-to-end. Study sessions, progress/analytics, and spaced repetition are NOT implemented — see "Phase 8.4 — AI Tutor" below. |
+| Phase 8 — Flashcards, quizzes, and tutor | IN PROGRESS (8.1 foundation + 8.2 flashcards + 8.3 quizzes + 8.4 AI Tutor + 8.5 Study Progress complete) | Flashcard generation (8.2), quiz generation + real quiz-taking with server-side scoring (8.3), a real, Topic-scoped, plan-gated AI Tutor (8.4), and real private Quiz/Tutor progress aggregation (8.5) are all real and working end-to-end. Flashcard review recording (and therefore flashcard progress/mastery), study streaks, and spaced repetition are NOT implemented — see "Phase 8.5 — Study Progress" below. |
 | Phase 9 — Billing, usage ledger, security hardening, and production polish | NOT YET IMPLEMENTED | Some plan limits and live usage calculations exist, but the full ledger and hardening work do not. |
 
 ## Implemented product surface
@@ -121,9 +121,7 @@ user message or fake assistant response.
 
 ## Phase 8.1 — Learning System foundation
 
-Only the foundation is implemented. No flashcard/quiz generation, study
-UI, or AI tutor exists yet — the "Study Tools" tab still shows the
-existing Phase 8 `PhasePlaceholder`, unchanged.
+This phase implemented the foundation. (Subsequent phases 8.2-8.5 have since implemented generation, study UI, and the AI tutor, replacing the placeholder.)
 
 What changed:
 
@@ -402,7 +400,82 @@ any prior description of "Phase 8.4 complete" as inaccurate.
   standalone tutor conversation-history/list page beyond the inline
   panel, one-question-at-a-time Socratic tutoring mode, correctness
   evaluation of student answers, and weak-area tracking — none of this
-  was requested for this phase, and Phase 8.5 has not been started.
+  was requested for this phase. (Weak-area/progress tracking is now
+  partially addressed by Phase 8.5 below, for quizzes and Tutor activity
+  only — not for the correctness-evaluation/Socratic-mode items above.)
+
+## Phase 8.5 — Study Progress
+
+Real, private, per-user Quiz and AI Tutor activity aggregation.
+Deliberately **not** a new `StudyProgress` model — `QuizAttempt` and the
+Phase 8.4 `AIConversation`/`AIMessage` (`kind = TUTOR`) rows were already
+real persisted activity; this phase only aggregates them.
+
+**Audit finding that shaped this phase's scope.** A read-only audit
+performed first (before any code changes) found that `FlashcardReview`
+exists in the schema but has **no write path anywhere in the
+codebase** — no route ever creates one, and `FlashcardDeckView` is a
+static list with no flip/correct-incorrect interaction. Flashcard
+progress was therefore excluded from 8.5 entirely rather than shown as a
+permanently-empty "0 flashcards reviewed" state. The audit also confirmed
+`QuizAttempt.weakTopics` is schema-only (default `[]`, never written by
+any route) and was left untouched.
+
+- **Service (`src/lib/study-progress.ts`):** `getQuizProgress(userId,
+  scope?)` and `getTutorActivity(userId, scope?)`, plus a
+  `getStudyProgress` convenience wrapper. Every query starts `WHERE
+  userId = userId` — never inferred from a request param. `scope`, when
+  given, must already be an authorized `ResolvedAIScope` (from
+  `getAccessibleAIScope`); it narrows which `Quiz`/`AIConversation` rows
+  count via `lib/retrieval-scope.ts`'s existing `materialWhereForScope`
+  (reused as-is — Quiz and AIConversation share Material's exact
+  five-field scope shape, so no new scope-to-where helper was needed). No
+  `scope` at all means the true global aggregate: every attempt/session
+  this user has ever had, personal or group.
+- **Quiz progress** never collapses multiple attempts: `attempts` counts
+  every one, `latest` is the most recently started, `bestScore`/
+  `averageScore` are computed across all of them, and multiple quizzes
+  under one scope (e.g. several quizzes generated for the same Topic
+  over time) all roll up together because the where-clause narrows by
+  `quiz.topicId` (etc.), not by a single `quizId`. History is capped at
+  20 most-recent attempts — a personal list, not a paginated report.
+- **Tutor activity** counts only `AIConversation` rows with `kind =
+  TUTOR` — a plain "Ask AI" (`kind = CHAT`) conversation never
+  contributes, verified by a dedicated test. Reads
+  `AIConversation`/`AIMessage` directly rather than the `tutor_chat`
+  `UsageRecord` ledger, since `UsageRecord` is a best-effort accounting
+  record while the conversation/message tables are the real activity.
+- **API — `GET /api/progress`:** follows the same `getSessionUser` →
+  validate (`aiScopeQuerySchema`, reused unchanged from Phase 5/6.5) →
+  `getAccessibleAIScope` → aggregate shape as `GET /api/ai/conversations`.
+  No scope query params → skips scope resolution entirely and returns
+  the global aggregate. Any scope param present is resolved/authorized
+  through the same `getAccessibleAIScope` AI chat already uses — no
+  second authorization system. An inaccessible scope throws
+  `NotAuthorizedError` → `403`, never a misleadingly-empty `200`.
+- **Privacy:** unchanged, reused authorization. Content (a group-owned
+  Quiz or Tutor-enabled Topic) is shared; activity (`QuizAttempt`,
+  `AIConversation`) stays strictly per-`userId` — two members of the same
+  group who both took the same Quiz each see only their own attempts,
+  verified directly by a test asserting User A's progress never includes
+  User B's rows on a shared group quiz.
+- **UI:** a "Your progress" summary inside the existing Topic Study Tools
+  tab (`StudyProgressPanel`, client-fetched from `/api/progress?
+  topicId=...`) — no new tab. A separate dashboard "Study Activity"
+  section (`StudyActivityWidget`, server-rendered from
+  `getStudyProgress(user.id)` with no scope) — kept visually and
+  semantically distinct from the existing `ProgressRow`
+  (`ChapterStatus`-based chapter completion); the two are never merged.
+  Both render only the metrics the API actually returns — no flashcard
+  section, no streak, no weak-topic breakdown.
+- Deliberately NOT implemented in 8.5 (see the audit above): flashcard
+  review recording and flashcard progress/mastery, study streaks or
+  daily-activity buckets (and therefore no timezone handling), populating
+  `weakTopics`, per-question weak-topic analytics, gamification, badges,
+  leaderboards, and any general analytics dashboard beyond this. No
+  schema change and no new index were made — `QuizAttempt.userId` and
+  `AIConversation`'s existing `(userId, kind)` index already cover this
+  phase's query patterns at the expected scale.
 
 ## Material and RAG invariants
 
@@ -467,12 +540,14 @@ Scanned PDFs and image-only documents have no OCR fallback.
    embed → retrieve verification.
 2. Perform manual browser verification of Subject, Chapter, group, and
    material-source navigation flows with configured providers, including
-   the new AI Tutor panel and its plan-gated empty/blocked states.
+   the new AI Tutor panel and the Phase 8.5 Study Progress UI.
 3. Add only the next explicitly selected Phase 5 AI UX/features; do not imply
    streaming, summaries, or study tools are complete.
-4. Begin Phase 8.5 once explicitly scoped — not started as part of this
-   pass; study sessions, progress tracking, and spaced repetition remain
-   entirely unimplemented.
+4. If flashcard progress is wanted, build a real `FlashcardReview`
+   write path (recording an actual flip/correct-incorrect interaction in
+   `FlashcardDeckView` or equivalent) first — Phase 8.5 deliberately did
+   not add one, since `FlashcardReview` has no producer today. Study
+   streaks and spaced repetition also remain entirely unimplemented.
 5. Continue the roadmap toward Phase 9 billing, usage-ledger, and
    production-hardening work.
 
@@ -508,10 +583,15 @@ real `assertAiTutorEntitlement`/`getPlanLimits` entitlement logic, real
 entitlement behavior, the messages route's full Tutor branch (dedicated
 rate-limit bucket, system-prompt injection, insufficient-material
 short-circuit, `tutor_chat` usage), `TUTOR_SYSTEM_INSTRUCTION` content,
-and the `AIChatPanel` query-building contract for CHAT vs TUTOR. Everything
-AI-shaped is mocked at the service/AIService boundary; no real
-Gemini/OpenAI network calls in the suite. Live cloud-provider calls and
-production database behavior are not exercised by the unit suite.
+and the `AIChatPanel` query-building contract for CHAT vs TUTOR. As of
+Phase 8.5, coverage also includes `lib/study-progress.ts`'s quiz-progress
+and Tutor-activity aggregation (multi-attempt/multi-quiz rollups,
+TUTOR-vs-CHAT exclusion, zero-activity and zero-question edge cases) and
+`GET /api/progress`'s scope resolution, authorization, and the
+group-shared-content-vs-private-activity boundary. Everything AI-shaped
+is mocked at the service/AIService boundary; no real Gemini/OpenAI
+network calls in the suite. Live cloud-provider calls and production
+database behavior are not exercised by the unit suite.
 
 As of the Phase 8.3 commit: 49 test files / 492 passing (4 skipped),
 `npm run lint` clean, `npm run typecheck` at 88 errors — 84 of which are
@@ -538,3 +618,25 @@ this sandbox: it fails at the Google Fonts fetch step during compilation
 stricter sandbox network restriction than whatever access produced that
 DB-only failure previously, and unrelated to this phase's changes
 (`app/layout.tsx`, the only file that touches fonts, was not modified).
+
+As of the Phase 8.5 commit (working tree, not yet committed): 53 test
+files / 567 passing (4 skipped, the same pre-existing set), `npm run
+lint` clean, `npm run typecheck` at 96 errors — diffed line-for-line
+against a stash-isolated Phase 8.4 baseline: identical error set, only
+line-number shifts in `src/app/(app)/home/page.tsx` from the added
+Study Activity section (same pre-existing implicit-`any`/Prisma-cascade
+pattern, zero new errors). `npm run build` remains unverifiable in this
+sandbox for the same two pre-existing, unrelated reasons: no network
+egress to `fonts.googleapis.com` (Google Fonts) and no network egress to
+Prisma's engine-binary checksum host (`npx prisma generate` itself fails
+here with a 403) — neither is touched by this phase's files. The 22 new
+Phase 8.5 tests (15 for `lib/study-progress.ts`, 7 for `GET /api/progress`)
+cover: empty-activity state, single and multiple attempts on one quiz,
+latest/best/average correctness, multi-quiz topic rollups, a bare-group
+scope, history capping, zero-question/zero-division safety, TUTOR-vs-CHAT
+exclusion, unscoped-vs-scoped requests, malformed scope (400), an
+inaccessible scope (403, not an empty 200), and — the most important
+privacy case — that User A's progress on a shared group Quiz never
+includes User B's attempts, and vice versa. No schema change; `git diff
+prisma/schema.prisma` is empty. `FlashcardReview` and `weakTopics` remain
+completely untouched.
