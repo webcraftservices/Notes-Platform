@@ -54,7 +54,7 @@ const usageModule = vi.hoisted(() => ({ recordAIUsage: vi.fn() }));
 vi.mock("@/lib/ai-usage", () => usageModule);
 
 import { POST } from "@/app/api/ai/conversations/[conversationId]/messages/route";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 function makeRequest(body: unknown): Request {
   return new Request("https://example.test/api/ai/conversations/conv-1/messages", {
@@ -244,6 +244,64 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
 
     expect(res.status).toBe(503);
     expect(usageModule.recordAIUsage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Phase 9.1 (spec §16-19) — AI provider timeout/network failures. These
+   * pin the client-facing contract (503, generic safe message, stable
+   * code, no leaked provider internals, nothing persisted) and the
+   * unrelated-error boundary (a truly unexpected failure still becomes a
+   * safe 500, never a raw exception; known errors are unaffected).
+   */
+  describe("AI provider unavailability (Phase 9.1)", () => {
+    it("returns a 503 with a safe generic message and stable code on a network/timeout failure, and persists nothing", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new AIProviderUnavailableError("Gemini request failed: fetch failed"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(res.status).toBe(503);
+      expect(json.code).toBe("AI_PROVIDER_UNAVAILABLE");
+      expect(json.error).toBe("AI service is temporarily unavailable. Please try again.");
+      // Never leak the raw provider exception text to the client.
+      expect(JSON.stringify(json)).not.toMatch(/fetch failed/);
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(usageModule.recordAIUsage).not.toHaveBeenCalled();
+      // The failure is still diagnosable server-side.
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it("returns a safe generic 500 (not a raw exception) for a genuinely unexpected error, and logs it server-side", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new Error("TypeError: cannot read property 'x' of undefined"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(res.status).toBe(500);
+      expect(json.error).toBe("Something went wrong. Please try again.");
+      expect(JSON.stringify(json)).not.toMatch(/cannot read property/);
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it("leaves existing known-error handling unchanged alongside the new unavailable/unexpected branches", async () => {
+      quotaModule.assertWithinAIQuota.mockRejectedValue(
+        new quotaModule.AIQuotaExceededError({ usedCredits: 200, limitCredits: 200, plan: { label: "Free" } })
+      );
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(res.status).toBe(429);
+      expect(json.code).toBe("AI_QUOTA_EXCEEDED");
+    });
   });
 
   /**

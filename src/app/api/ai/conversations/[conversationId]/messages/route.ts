@@ -5,8 +5,8 @@ import { sendAIMessageSchema } from "@/lib/validation/ai";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
 import { buildContextBlock, chunksToSources, toChatMessages, TUTOR_SYSTEM_INSTRUCTION } from "@/lib/ai-chat";
 import { getAIService } from "@/lib/services/ai";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
-import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
+import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, INTERNAL_ERROR, logServerError } from "@/lib/api-response";
 import { rateLimit } from "@/lib/rate-limit";
 import { assertWithinAIQuota, assertAiTutorEntitlement, AIQuotaExceededError, AITutorNotEnabledError } from "@/lib/ai-quota";
 import { recordAIUsage } from "@/lib/ai-usage";
@@ -214,6 +214,21 @@ export async function POST(req: Request, { params }: { params: { conversationId:
       );
     }
     if (err instanceof ServiceNotConfiguredError) return jsonError(err.message, 503);
-    throw err;
+    // Phase 9.1 (spec §16-17): a network failure, timeout, or upstream
+    // 429/5xx from the provider is a real but transient condition — never
+    // the raw provider exception, and distinct from ServiceNotConfiguredError
+    // above (which means the app itself isn't set up, not that the
+    // provider is momentarily down).
+    if (err instanceof AIProviderUnavailableError) {
+      logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id }, err);
+      return jsonError("AI service is temporarily unavailable. Please try again.", 503, {
+        code: "AI_PROVIDER_UNAVAILABLE",
+      });
+    }
+    // Anything else here is genuinely unexpected (a bug, not a known
+    // condition) — log it with context for diagnosis, but never leak the
+    // raw error (stack trace, message internals) to the client (spec §13).
+    logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id }, err);
+    return INTERNAL_ERROR();
   }
 }

@@ -3,7 +3,7 @@ import { ApiError } from "@google/genai";
 import type { GenerateContentParameters, GenerateContentResponse } from "@google/genai";
 import { GeminiAIService, createGeminiAIService } from "@/lib/services/ai-gemini";
 import { getAIService } from "@/lib/services/ai";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 /** A minimal fake of the one Gemini client surface GeminiAIService touches. */
 function fakeClient(generateContent: (params: GenerateContentParameters) => Promise<GenerateContentResponse>) {
@@ -136,6 +136,65 @@ describe("GeminiAIService.chat", () => {
     const service = new GeminiAIService(fakeClient(generateContent));
 
     await expect(service.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(/network down/);
+  });
+
+  /**
+   * Phase 9.1 — provider-unavailable classification (spec §16-17). These
+   * pin the *type* of the thrown error (not just its message, already
+   * covered above) so route handlers can map it to a clean 503 without
+   * string-matching, while genuinely-bad-request-shaped provider errors
+   * stay generic (unexpected/internal) rather than being reported as
+   * "temporarily unavailable".
+   */
+  describe("provider-unavailable classification", () => {
+    it("classifies a network/connection-level failure (non-ApiError) as AIProviderUnavailableError", async () => {
+      const generateContent = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      await expect(service.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toBeInstanceOf(
+        AIProviderUnavailableError
+      );
+    });
+
+    it("classifies an upstream 429 (ApiError) as AIProviderUnavailableError", async () => {
+      const apiError = new ApiError({ message: "Rate limit exceeded", status: 429 });
+      const generateContent = vi.fn().mockRejectedValue(apiError);
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      await expect(service.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toBeInstanceOf(
+        AIProviderUnavailableError
+      );
+    });
+
+    it("classifies an upstream 503 (ApiError) as AIProviderUnavailableError", async () => {
+      const apiError = new ApiError({ message: "Service unavailable", status: 503 });
+      const generateContent = vi.fn().mockRejectedValue(apiError);
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      await expect(service.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toBeInstanceOf(
+        AIProviderUnavailableError
+      );
+    });
+
+    it("does NOT classify a 400 bad-request ApiError as unavailable — it's a real bug, not an outage", async () => {
+      const apiError = new ApiError({ message: "Invalid argument", status: 400 });
+      const generateContent = vi.fn().mockRejectedValue(apiError);
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const rejection = service.chat({ messages: [{ role: "user", content: "hi" }] });
+      await expect(rejection).rejects.not.toBeInstanceOf(AIProviderUnavailableError);
+      await expect(rejection).rejects.toThrow(/400/);
+    });
+
+    it("applies the same classification to generateNotes()", async () => {
+      const apiError = new ApiError({ message: "Service unavailable", status: 502 });
+      const generateContent = vi.fn().mockRejectedValue(apiError);
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      await expect(
+        service.generateNotes({ transcriptText: "text", templateKind: "lecture" })
+      ).rejects.toBeInstanceOf(AIProviderUnavailableError);
+    });
   });
 });
 

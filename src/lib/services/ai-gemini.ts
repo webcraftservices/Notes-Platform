@@ -1,7 +1,7 @@
 import { GoogleGenAI, ApiError, Type } from "@google/genai";
 import type { Content, GenerateContentParameters, GenerateContentResponse, Schema } from "@google/genai";
 import type { AIService, AIChatMessage } from "./interfaces";
-import { ServiceNotConfiguredError } from "./interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "./interfaces";
 import { NOTE_BLOCK_KIND_LABELS, NOTE_BLOCK_KIND_ORDER } from "@/lib/note-block-style";
 
 /**
@@ -77,9 +77,35 @@ function extractSystemMessages(messages: AIChatMessage[]): string[] {
   return messages.filter((m) => m.role === "system").map((m) => m.content);
 }
 
+/**
+ * Statuses that mean "the provider itself is unavailable right now" rather
+ * than "we sent it a bad request" — 429 (rate-limited upstream, from the
+ * caller's perspective indistinguishable from unavailability) and any 5xx.
+ * A 4xx other than 429 (e.g. 400 bad request) indicates a real bug in how
+ * this file calls the API, so it is deliberately NOT included here (spec
+ * §17: don't turn every error into 503).
+ */
+function isUpstreamUnavailableStatus(status: number | undefined): boolean {
+  return status === 429 || (typeof status === "number" && status >= 500);
+}
+
+/**
+ * Wraps anything thrown by the one `this.client.models.generateContent(...)`
+ * call this file makes (Phase 9.1, spec §16-17). Anything that isn't a
+ * structured `ApiError` from the SDK — a network failure, a timeout, a
+ * connection reset — can only have come from the transport layer trying
+ * and failing to reach Gemini at all, so it's treated as provider
+ * unavailability too. Message text/format is unchanged from before this
+ * phase (existing tests assert on it); only the resulting Error's type
+ * changed, so callers can distinguish "try again shortly" (503) from a
+ * genuine bug without parsing message strings.
+ */
 function wrapGeminiError(err: unknown): Error {
-  if (err instanceof ApiError) return new Error(`Gemini request failed (${err.status}): ${err.message}`);
-  return new Error(`Gemini request failed: ${err instanceof Error ? err.message : String(err)}`);
+  if (err instanceof ApiError) {
+    const message = `Gemini request failed (${err.status}): ${err.message}`;
+    return isUpstreamUnavailableStatus(err.status) ? new AIProviderUnavailableError(message) : new Error(message);
+  }
+  return new AIProviderUnavailableError(`Gemini request failed: ${err instanceof Error ? err.message : String(err)}`);
 }
 
 const NOTE_BLOCK_KINDS = NOTE_BLOCK_KIND_ORDER as string[];

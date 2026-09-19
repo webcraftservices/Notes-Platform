@@ -107,3 +107,23 @@ export class ServiceNotConfiguredError extends Error {
     this.name = "ServiceNotConfiguredError";
   }
 }
+
+/**
+ * Thrown by an AIService implementation when the request itself was fine
+ * (the service IS configured — see ServiceNotConfiguredError above) but the
+ * provider was unreachable or unavailable at the network/infrastructure
+ * level: a connection failure, a request timeout, or an upstream 429/5xx
+ * from the provider (Phase 9.1, spec §17). Distinct from an ApiError the
+ * provider returns for a genuinely bad request (e.g. 400) — those indicate
+ * a bug in how we're calling the API, not a transient outage, so they are
+ * NOT wrapped in this class and are treated as unexpected/internal errors
+ * instead. Route handlers should map this specifically to a 503 with a
+ * generic "try again" message — never the raw provider exception (spec
+ * §16-17) — while leaving every other error type's status unchanged.
+ */
+export class AIProviderUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AIProviderUnavailableError";
+  }
+}

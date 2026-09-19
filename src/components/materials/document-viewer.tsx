@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AlertCircle, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { sanitizeDocumentHtml } from "@/lib/sanitize-html";
 
 export function DocumentViewer({
   materialId,
@@ -31,8 +32,12 @@ export function DocumentViewer({
         const buffer = await response.arrayBuffer();
         const mammoth = await import("mammoth");
         const result = await mammoth.convertToHtml({ arrayBuffer: buffer });
+        // Mammoth's output is derived from a user-supplied .docx file and is
+        // rendered below via dangerouslySetInnerHTML — never trust it as-is
+        // (Phase 9.1 / spec §87). See lib/sanitize-html.ts for what this allows.
+        const safeHtml = sanitizeDocumentHtml(result.value);
 
-        if (!controller.signal.aborted) setHtml(result.value);
+        if (!controller.signal.aborted) setHtml(safeHtml);
       } catch (err) {
         if (!controller.signal.aborted) {
           setError(err instanceof Error ? err.message : "The Word document could not be rendered.");
