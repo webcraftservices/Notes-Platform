@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { rejectPrototypePollution } from "@/lib/validation/safe-json";
 
 /**
  * Phase 8.3 — `POST /api/quizzes/[quizId]/attempts` request body. Keys
@@ -9,7 +10,11 @@ import { z } from "zod";
  * shape, not membership, since it has no database access.
  */
 export const submitQuizAttemptSchema = z.object({
-  answers: z.record(z.string(), z.union([z.string(), z.boolean()])),
+  // Phase 9.3: same __proto__/constructor/prototype guard as note block
+  // content (lib/validation/safe-json.ts) — lower severity here since
+  // values are constrained to string/boolean, but the same shape of risk
+  // at negligible extra cost.
+  answers: rejectPrototypePollution(z.record(z.string(), z.union([z.string(), z.boolean()]))),
 });
 
 export type SubmitQuizAttemptInput = z.infer<typeof submitQuizAttemptSchema>;

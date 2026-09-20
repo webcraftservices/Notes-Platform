@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { rejectPrototypePollution } from "@/lib/validation/safe-json";
 
 export const NOTE_BLOCK_KINDS = [
   "OVERVIEW",
@@ -30,7 +31,9 @@ export const noteBlockSchema = z.object({
   heading: z.string().trim().max(200).nullable().optional(),
   // Tiptap/ProseMirror JSON document — validated only as "is an object" at
   // this layer; Tiptap itself is the source of truth for document shape.
-  content: z.record(z.any()),
+  // Phase 9.3: additionally rejects __proto__/constructor/prototype keys
+  // anywhere in the structure — see lib/validation/safe-json.ts for why.
+  content: rejectPrototypePollution(z.record(z.any())),
   order: z.number().int().min(0),
 });
 

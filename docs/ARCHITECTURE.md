@@ -118,7 +118,7 @@ that plainly states which phase implements it — never a fake working UI:
 - Groups, invitations, realtime → ~~Phase 6~~ **done as of Phase 6.6 — see the "Phase 6 — Groups + collaboration" section below** (realtime is the one sub-item still deferred; see that section's Known limitations)
 - Google Drive/Docs import → **Phase 7**
 - Flashcards, quizzes, AI tutor → **Phase 8**
-- Row-level security, production rate limiting, observability → **Phase 9** (rate limiting done as of Phase 9.1; observability foundation — Datadog logs/metrics, health/readiness, client-error reporting — done as of Phase 9.2, see `docs/observability.md`; row-level security remains Phase 9)
+- Row-level security, production rate limiting, observability → **Phase 9** (rate limiting done as of Phase 9.1; observability foundation — Datadog logs/metrics, health/readiness, client-error reporting — done as of Phase 9.2, see `docs/observability.md`; production security boundary hardening — headers/CSP, input-validation fixes, dependency upgrades — done as of Phase 9.3, see `docs/security-hardening.md`; row-level security remains Phase 9)
 
 ## Phase 1 verification checklist
 
