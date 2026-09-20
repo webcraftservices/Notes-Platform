@@ -53,6 +53,12 @@ vi.mock("@/lib/ai-quota", () => quotaModule);
 const usageModule = vi.hoisted(() => ({ recordAIUsage: vi.fn() }));
 vi.mock("@/lib/ai-usage", () => usageModule);
 
+const observability = vi.hoisted(() => ({
+  sendDatadogMetric: vi.fn().mockResolvedValue(undefined),
+  sendDatadogLog: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/observability/datadog", () => observability);
+
 import { POST } from "@/app/api/ai/conversations/[conversationId]/messages/route";
 import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
@@ -76,6 +82,8 @@ const WORKSPACE_SCOPE = {
 describe("POST /api/ai/conversations/[conversationId]/messages", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    observability.sendDatadogMetric.mockResolvedValue(undefined);
+    observability.sendDatadogLog.mockResolvedValue(undefined);
     access.getSessionUser.mockResolvedValue({ id: "user-1" });
     access.getAccessibleAIConversation.mockResolvedValue({
       id: "conv-1",
@@ -301,6 +309,102 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
 
       expect(res.status).toBe(429);
       expect(json.code).toBe("AI_QUOTA_EXCEEDED");
+    });
+  });
+
+  /**
+   * Phase 9.2 — request/correlation ID and safe AI-observability metrics.
+   * These pin the two specific places this phase touched (the 503/500
+   * responses this route already controlled, and the one AI-provider
+   * call site) without expanding into every branch of this route.
+   */
+  describe("observability (Phase 9.2)", () => {
+    it("includes a requestId in the 503 response when the AI provider is unavailable", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new AIProviderUnavailableError("Gemini request failed: fetch failed"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(typeof json.requestId).toBe("string");
+      expect(json.requestId.length).toBeGreaterThan(0);
+    });
+
+    it("includes a requestId in the 500 response for a genuinely unexpected error", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new Error("boom"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(typeof json.requestId).toBe("string");
+      expect(json.requestId.length).toBeGreaterThan(0);
+    });
+
+    it("reuses an incoming x-request-id header instead of generating a new one", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new Error("boom"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const req = new Request("https://example.test/api/ai/conversations/conv-1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": "incoming-id-999" },
+        body: JSON.stringify({ content: "hello" }),
+      });
+      const res = await POST(req, { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(json.requestId).toBe("incoming-id-999");
+    });
+
+    it("does NOT add a requestId to existing known-error responses this phase didn't touch (e.g. quota 429)", async () => {
+      quotaModule.assertWithinAIQuota.mockRejectedValue(
+        new quotaModule.AIQuotaExceededError({ usedCredits: 200, limitCredits: 200, plan: { label: "Free" } })
+      );
+
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      const json = await res.json();
+
+      expect(json.requestId).toBeUndefined();
+    });
+
+    it("emits a success/latency metric (never the prompt or reply content) when the AI call succeeds", async () => {
+      const res = await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+      expect(res.status).toBe(200);
+
+      const successCall = observability.sendDatadogMetric.mock.calls.find(
+        ([name]) => name === "ai.chat.requests"
+      );
+      expect(successCall).toBeDefined();
+      expect(successCall![2]).toMatchObject({ tags: expect.arrayContaining(["outcome:success", "kind:chat"]) });
+
+      const latencyCall = observability.sendDatadogMetric.mock.calls.find(
+        ([name]) => name === "ai.chat.latency_ms"
+      );
+      expect(latencyCall).toBeDefined();
+      expect(latencyCall![1]).toBeGreaterThanOrEqual(0);
+
+      // Never the actual message content anywhere in what was sent to Datadog.
+      const allArgs = JSON.stringify(observability.sendDatadogMetric.mock.calls);
+      expect(allArgs).not.toContain("hello");
+    });
+
+    it("emits a failure metric tagged with the failure category when the AI provider is unavailable", async () => {
+      const chatMock = vi.fn().mockRejectedValue(new AIProviderUnavailableError("Gemini request failed: fetch failed"));
+      aiServiceRegistry.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: chatMock });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+      const failureCall = observability.sendDatadogMetric.mock.calls.find(
+        ([name]) => name === "ai.chat.requests"
+      );
+      expect(failureCall).toBeDefined();
+      expect(failureCall![2]).toMatchObject({
+        tags: expect.arrayContaining(["outcome:failure", "failure_category:unavailable"]),
+      });
     });
   });
 

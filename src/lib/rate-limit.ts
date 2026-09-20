@@ -126,3 +126,30 @@ export async function rateLimit(key: string, opts: RateLimitOptions): Promise<Ra
   if (redis) return redisRateLimit(redis, key, opts);
   return inMemoryRateLimit(key, opts);
 }
+
+export type RedisHealthStatus =
+  | { configured: false }
+  | { configured: true; reachable: true }
+  | { configured: true; reachable: false; error: string };
+
+/**
+ * For the readiness endpoint (Phase 9.2, spec §E) — NOT used by rateLimit()
+ * itself. A single `PING` is cheap enough to do for real (unlike a real AI
+ * call, which spec §E explicitly says never to make here), so this
+ * reports actual reachability when Redis is configured, rather than just
+ * "the env vars exist". When Redis isn't configured at all, that's not a
+ * failure — the app is deliberately, safely running on the in-memory
+ * fallback (see module doc above) — so this reports `configured: false`
+ * rather than `reachable: false`.
+ */
+export async function checkRedisHealth(): Promise<RedisHealthStatus> {
+  const redis = getRedisClient();
+  if (!redis) return { configured: false };
+
+  try {
+    await redis.ping();
+    return { configured: true, reachable: true };
+  } catch (err) {
+    return { configured: true, reachable: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

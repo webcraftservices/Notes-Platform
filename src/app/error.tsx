@@ -13,6 +13,21 @@ export default function GlobalError({
 }) {
   useEffect(() => {
     console.error(error);
+    // Best-effort, fire-and-forget: before Phase 9.2 this error was only
+    // ever visible in the user's own browser console — nothing durable
+    // saw it. A failure to report must never affect this error page
+    // itself, so this is deliberately not awaited and has no visible
+    // effect on `reset`/rendering either way.
+    fetch("/api/client-errors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: error.message,
+        digest: error.digest,
+        stack: error.stack,
+        boundary: "global",
+      }),
+    }).catch(() => {});
   }, [error]);
 
   return (

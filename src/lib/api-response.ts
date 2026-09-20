@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ZodError } from "zod";
+import { sendDatadogLog } from "@/lib/observability/datadog";
 
 /**
  * `extra` merges additional stable, machine-readable fields into the body
@@ -34,22 +35,32 @@ export const CONFLICT = (message = "This already exists.") => jsonError(message,
 export const INTERNAL_ERROR = () => jsonError("Something went wrong. Please try again.", 500);
 
 /**
- * Structured server-side error logging (spec §15/§89) for the failures
- * that reach `INTERNAL_ERROR`/`SERVICE_UNAVAILABLE` — i.e. failures that
- * were NOT one of the app's known/expected error types (auth, validation,
- * not-found, quota, rate-limit, service-not-configured, ...), which
- * already have their own specific status codes and don't need this.
+ * Structured server-side error logging (spec §15/§89, extended in Phase
+ * 9.2 §A/§Step3) for the failures that reach `INTERNAL_ERROR`/`SERVICE_
+ * UNAVAILABLE` — i.e. failures that were NOT one of the app's known/
+ * expected error types (auth, validation, not-found, quota, rate-limit,
+ * service-not-configured, ...), which already have their own specific
+ * status codes and don't need this.
  *
  * Mirrors the existing `console.error("[scope] message", {...context})`
  * convention already used in lib/ai-usage.ts — this is not a new logging
  * framework, just a shared shape for the context that convention already
- * carries ad hoc at each call site. Never pass secrets, tokens, full
- * prompts, or raw document contents in `context` (spec §15).
+ * carries ad hoc at each call site. As of Phase 9.2 the same safe context
+ * is also forwarded to Datadog (a no-op when DD_API_KEY isn't set — see
+ * lib/observability/datadog.ts) so these failures are visible in
+ * production monitoring, not just local/platform console output.
+ *
+ * Never pass secrets, tokens, full prompts, raw document/transcript
+ * contents, or other sensitive values in `context` — everything here is
+ * both a local console line AND, in production, a Datadog log event.
  */
 export function logServerError(context: { route: string; op?: string; [key: string]: unknown }, err: unknown) {
   const { route, ...rest } = context;
-  console.error(`[api:${route}]`, {
-    ...rest,
-    error: err instanceof Error ? err.message : String(err),
-  });
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[api:${route}]`, { ...rest, error: message });
+  // Fire-and-forget: never delays or fails the response this is called
+  // from. sendDatadogLog itself never throws/rejects (see its doc
+  // comment); .catch is defensive belt-and-braces in case that contract
+  // is ever violated by a future edit.
+  void sendDatadogLog({ level: "error", message: `${route}: ${message}`, route, ...rest }).catch(() => {});
 }

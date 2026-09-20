@@ -6,10 +6,12 @@ import { retrieveRelevantChunks } from "@/lib/retrieval";
 import { buildContextBlock, chunksToSources, toChatMessages, TUTOR_SYSTEM_INSTRUCTION } from "@/lib/ai-chat";
 import { getAIService } from "@/lib/services/ai";
 import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
-import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, INTERNAL_ERROR, logServerError } from "@/lib/api-response";
+import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, logServerError } from "@/lib/api-response";
 import { rateLimit } from "@/lib/rate-limit";
 import { assertWithinAIQuota, assertAiTutorEntitlement, AIQuotaExceededError, AITutorNotEnabledError } from "@/lib/ai-quota";
 import { recordAIUsage } from "@/lib/ai-usage";
+import { getOrCreateRequestId } from "@/lib/observability/request-id";
+import { sendDatadogMetric } from "@/lib/observability/datadog";
 
 /**
  * Requests per window for the AI chat endpoint (task §8) — the only AI
@@ -86,6 +88,7 @@ class TutorInsufficientMaterialError extends Error {
  * exact pre-8.4 behavior in every one of those dimensions.
  */
 export async function POST(req: Request, { params }: { params: { conversationId: string } }) {
+  const requestId = getOrCreateRequestId(req);
   const user = await getSessionUser();
   if (!user) return UNAUTHORIZED();
 
@@ -150,13 +153,40 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     const context = buildContextBlock(chunks) ?? undefined;
 
     const ai = getAIService();
-    const result = await ai.chat({
-      messages: [
-        ...(isTutorConversation ? [{ role: "system" as const, content: TUTOR_SYSTEM_INSTRUCTION }] : []),
-        ...toChatMessages(priorMessages),
-        { role: "user", content: parsed.data.content },
-      ],
-      context,
+    const aiCallStartedAt = Date.now();
+    let result: Awaited<ReturnType<typeof ai.chat>>;
+    try {
+      result = await ai.chat({
+        messages: [
+          ...(isTutorConversation ? [{ role: "system" as const, content: TUTOR_SYSTEM_INSTRUCTION }] : []),
+          ...toChatMessages(priorMessages),
+          { role: "user", content: parsed.data.content },
+        ],
+        context,
+      });
+    } catch (aiErr) {
+      // Phase 9.2 §D — safe AI observability: provider/model/operation/
+      // duration/failure-category only, never the prompt or the error's
+      // own message (which could echo back retrieved context/chunks).
+      void sendDatadogMetric("ai.chat.requests", 1, {
+        type: "count",
+        tags: [
+          `provider:${ai.providerName}`,
+          `model:${ai.modelName}`,
+          `kind:${isTutorConversation ? "tutor" : "chat"}`,
+          "outcome:failure",
+          `failure_category:${aiErr instanceof AIProviderUnavailableError ? "unavailable" : "unexpected"}`,
+        ],
+      });
+      throw aiErr;
+    }
+    void sendDatadogMetric("ai.chat.requests", 1, {
+      type: "count",
+      tags: [`provider:${ai.providerName}`, `model:${ai.modelName}`, `kind:${isTutorConversation ? "tutor" : "chat"}`, "outcome:success"],
+    });
+    void sendDatadogMetric("ai.chat.latency_ms", Date.now() - aiCallStartedAt, {
+      type: "gauge",
+      tags: [`provider:${ai.providerName}`, `model:${ai.modelName}`, `kind:${isTutorConversation ? "tutor" : "chat"}`],
     });
 
     const [userMessage, assistantMessage] = await db.$transaction([
@@ -220,15 +250,16 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     // above (which means the app itself isn't set up, not that the
     // provider is momentarily down).
     if (err instanceof AIProviderUnavailableError) {
-      logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id }, err);
+      logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id, requestId }, err);
       return jsonError("AI service is temporarily unavailable. Please try again.", 503, {
         code: "AI_PROVIDER_UNAVAILABLE",
+        requestId,
       });
     }
     // Anything else here is genuinely unexpected (a bug, not a known
     // condition) — log it with context for diagnosis, but never leak the
     // raw error (stack trace, message internals) to the client (spec §13).
-    logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id }, err);
-    return INTERNAL_ERROR();
+    logServerError({ route: "ai/conversations/[id]/messages", op: "chat", userId: user.id, requestId }, err);
+    return jsonError("Something went wrong. Please try again.", 500, { requestId });
   }
 }
