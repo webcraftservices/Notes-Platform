@@ -17,17 +17,27 @@ const redisInstances: MockRedis[] = [];
  */
 const sharedStore = new Map<string, number>();
 let failNext = false;
+let hangNext = false;
+let incrCalls = 0;
 
 class MockRedis {
-  constructor(public config: { url: string; token: string }) {
+  constructor(public config: { url: string; token: string; retry?: unknown }) {
     redisInstances.push(this);
   }
 
   async incr(key: string): Promise<number> {
+    incrCalls += 1;
+    if (hangNext) return new Promise<number>(() => {}); // never settles: a black-holed connection
     if (failNext) throw new Error("simulated Redis outage");
     const next = (sharedStore.get(key) ?? 0) + 1;
     sharedStore.set(key, next);
     return next;
+  }
+
+  async ping(): Promise<string> {
+    if (hangNext) return new Promise<string>(() => {});
+    if (failNext) throw new Error("simulated Redis outage");
+    return "PONG";
   }
 
   async expire(_key: string, _seconds: number): Promise<number> {
@@ -38,14 +48,21 @@ class MockRedis {
 
 vi.mock("@upstash/redis", () => ({ Redis: MockRedis }));
 
+// Reset by both describe blocks' beforeEach below.
+function resetMockRedis() {
+  redisInstances.length = 0;
+  sharedStore.clear();
+  failNext = false;
+  hangNext = false;
+  incrCalls = 0;
+}
+
 describe("rateLimit — backend selection", () => {
   const ORIGINAL_ENV = { ...process.env };
 
   beforeEach(() => {
     vi.resetModules();
-    redisInstances.length = 0;
-    sharedStore.clear();
-    failNext = false;
+    resetMockRedis();
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
   });
@@ -89,9 +106,7 @@ describe("rateLimit — Redis-backed behavior", () => {
 
   beforeEach(() => {
     vi.resetModules();
-    redisInstances.length = 0;
-    sharedStore.clear();
-    failNext = false;
+    resetMockRedis();
     process.env.UPSTASH_REDIS_REST_URL = "https://example.upstash.io";
     process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
   });
@@ -148,7 +163,7 @@ describe("rateLimit — Redis-backed behavior", () => {
     expect(bAllowed.success).toBe(true);
   });
 
-  it("fails open (allows the request) and logs when Redis throws", async () => {
+  it("falls back to the in-memory limiter (not fully open) and logs when Redis throws", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { rateLimit } = await import("@/lib/rate-limit");
     const key = `redis-outage:${Math.random()}`;
@@ -156,13 +171,61 @@ describe("rateLimit — Redis-backed behavior", () => {
     await rateLimit(key, { limit: 2, windowSeconds: 60 });
     failNext = true;
 
-    const result = await rateLimit(key, { limit: 2, windowSeconds: 60 });
-
-    expect(result).toEqual({ success: true, remaining: 2 });
+    // Never fails CLOSED: requests within the local limit are still allowed…
+    const second = await rateLimit(key, { limit: 2, windowSeconds: 60 });
+    expect(second.success).toBe(true);
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining("[rate-limit]"),
       expect.objectContaining({ key })
     );
+
+    // …but no longer fails fully OPEN: the per-instance limiter still
+    // enforces the limit during the outage (previously every request passed).
+    await rateLimit(key, { limit: 2, windowSeconds: 60 });
+    const blocked = await rateLimit(key, { limit: 2, windowSeconds: 60 });
+    expect(blocked.success).toBe(false);
     consoleSpy.mockRestore();
+  });
+
+  it("stops calling Redis for a cool-down period after a failure, so an outage doesn't tax every request", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { rateLimit } = await import("@/lib/rate-limit");
+
+    failNext = true;
+    await rateLimit(`cooldown-a:${Math.random()}`, { limit: 5, windowSeconds: 60 });
+    const callsAfterFailure = incrCalls;
+    expect(callsAfterFailure).toBe(1);
+
+    await rateLimit(`cooldown-b:${Math.random()}`, { limit: 5, windowSeconds: 60 });
+    await rateLimit(`cooldown-c:${Math.random()}`, { limit: 5, windowSeconds: 60 });
+
+    expect(incrCalls).toBe(callsAfterFailure);
+    consoleSpy.mockRestore();
+  });
+
+  it("does not hang when Redis accepts the connection but never answers — it times out and degrades", async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { rateLimit } = await import("@/lib/rate-limit");
+      hangNext = true;
+
+      const pending = rateLimit(`redis-hang:${Math.random()}`, { limit: 5, windowSeconds: 60 });
+      await vi.advanceTimersByTimeAsync(1500);
+      const result = await pending;
+
+      expect(result.success).toBe(true);
+      expect(consoleSpy).toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("constructs the Redis client with automatic retries disabled", async () => {
+    const { rateLimit } = await import("@/lib/rate-limit");
+    await rateLimit(`redis-no-retry:${Math.random()}`, { limit: 5, windowSeconds: 60 });
+
+    expect((redisInstances[0]?.config as { retry?: unknown }).retry).toBe(false);
   });
 });

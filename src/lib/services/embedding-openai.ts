@@ -1,7 +1,7 @@
-import OpenAI, { APIError } from "openai";
+import OpenAI, { APIConnectionError, APIError } from "openai";
 import type { EmbeddingCreateParams, CreateEmbeddingResponse } from "openai/resources/embeddings";
 import type { EmbeddingResult, EmbeddingService } from "./interfaces";
-import { ServiceNotConfiguredError } from "./interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "./interfaces";
 import { EMBEDDING_DIMENSIONS } from "./embedding";
 
 /**
@@ -29,6 +29,35 @@ interface EmbeddingsClient {
 const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 
 /**
+ * Phase 9.4 — explicit request bounds. The OpenAI SDK's defaults are a
+ * 10-minute timeout and 2 automatic retries, and it retries EVERY 429 —
+ * including `insufficient_quota`, which can never succeed on retry. Query
+ * embedding sits on the user-facing chat path, so both are tightened:
+ * 30s per attempt, one retry (the SDK retries connection errors, 408,
+ * 409, 429 and 5xx; 4xx auth/validation errors are not retried).
+ */
+const OPENAI_EMBEDDING_TIMEOUT_MS = 30_000;
+const OPENAI_EMBEDDING_MAX_RETRIES = 1;
+
+/**
+ * OpenAI accepts at most 2048 inputs and ~300k tokens per embeddings
+ * request. Ingestion used to send every chunk of a document in ONE
+ * request, so a large PDF could exceed that and fail outright. Requests
+ * are split into fixed-size batches instead (~100 chunks × a few hundred
+ * tokens each stays far below either limit).
+ */
+const OPENAI_EMBEDDING_BATCH_SIZE = 100;
+
+/** A failure that means "OpenAI is unreachable/overloaded right now" (retry later), as opposed to "we sent it something wrong" or "we're not authorized". */
+function isTransientOpenAIError(err: unknown): boolean {
+  if (err instanceof APIConnectionError) return true; // includes APIConnectionTimeoutError
+  if (err instanceof APIError) {
+    return err.status === 408 || err.status === 429 || (typeof err.status === "number" && err.status >= 500);
+  }
+  return false;
+}
+
+/**
  * Real integration against OpenAI's embeddings API via the official `openai`
  * SDK (see docs/ai-setup.md §2 — this is the point where the project
  * stops being provider-agnostic, by design). Untestable against the live
@@ -47,6 +76,22 @@ export class OpenAIEmbeddingService implements EmbeddingService {
   async embed(texts: string[]): Promise<EmbeddingResult> {
     if (texts.length === 0) return { vectors: [], totalTokens: null };
 
+    const vectors: number[][] = [];
+    let totalTokens: number | null = 0;
+
+    for (let start = 0; start < texts.length; start += OPENAI_EMBEDDING_BATCH_SIZE) {
+      const batch = texts.slice(start, start + OPENAI_EMBEDDING_BATCH_SIZE);
+      const batchResult = await this.embedBatch(batch, start);
+      vectors.push(...batchResult.vectors);
+      // Null if ANY batch's usage was missing — a partial sum would
+      // under-report real, billed tokens (spec §92: never estimate).
+      totalTokens = totalTokens === null || batchResult.totalTokens === null ? null : totalTokens + batchResult.totalTokens;
+    }
+
+    return { vectors, totalTokens };
+  }
+
+  private async embedBatch(texts: string[], globalOffset: number): Promise<EmbeddingResult> {
     let response;
     try {
       response = await this.client.embeddings.create({
@@ -55,8 +100,13 @@ export class OpenAIEmbeddingService implements EmbeddingService {
         dimensions: EMBEDDING_DIMENSIONS,
       });
     } catch (err) {
-      const detail = err instanceof APIError ? `(${err.status}) ${err.message}` : (err as Error).message;
-      throw new Error(`OpenAI embeddings request failed: ${detail}`);
+      const detail =
+        err instanceof APIError && typeof err.status === "number" ? `(${err.status}) ${err.message}` : (err as Error).message;
+      const message = `OpenAI embeddings request failed: ${detail}`;
+      // Consistent with the Gemini provider (Phase 9.1): a transient
+      // provider-side failure is AIProviderUnavailableError so callers can
+      // answer 503 "try again" instead of a generic 500.
+      throw isTransientOpenAIError(err) ? new AIProviderUnavailableError(message) : new Error(message);
     }
 
     if (response.data.length !== texts.length) {
@@ -75,7 +125,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     vectors.forEach((vector, i) => {
       if (vector.length !== EMBEDDING_DIMENSIONS) {
         throw new Error(
-          `OpenAI returned a ${vector.length}-dimensional embedding for input ${i}, but ` +
+          `OpenAI returned a ${vector.length}-dimensional embedding for input ${globalOffset + i}, but ` +
             `MaterialChunk.embedding is a fixed vector(${EMBEDDING_DIMENSIONS}) column. Refusing to write an ` +
             "invalid vector to PostgreSQL — see docs/ai-setup.md before changing OPENAI_EMBEDDING_MODEL or its " +
             "requested `dimensions`."
@@ -98,5 +148,7 @@ export function createOpenAIEmbeddingService(): OpenAIEmbeddingService {
   if (!apiKey) {
     throw new ServiceNotConfiguredError("OpenAI EmbeddingService", ["OPENAI_API_KEY"]);
   }
-  return new OpenAIEmbeddingService(new OpenAI({ apiKey }));
+  return new OpenAIEmbeddingService(
+    new OpenAI({ apiKey, timeout: OPENAI_EMBEDDING_TIMEOUT_MS, maxRetries: OPENAI_EMBEDDING_MAX_RETRIES })
+  );
 }

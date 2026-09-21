@@ -1,9 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { APIError } from "openai";
+import { APIError, APIConnectionError, APIConnectionTimeoutError } from "openai";
 import type { EmbeddingCreateParams, CreateEmbeddingResponse } from "openai/resources/embeddings";
 import { OpenAIEmbeddingService, createOpenAIEmbeddingService } from "@/lib/services/embedding-openai";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 /** A minimal fake of the one OpenAI client surface OpenAIEmbeddingService touches. */
 function fakeClient(create: (body: EmbeddingCreateParams) => Promise<CreateEmbeddingResponse>) {
@@ -242,5 +242,78 @@ describe("getEmbeddingService (registry) with EMBEDDING_PROVIDER=openai", () => 
   it.skip("still throws ServiceNotConfiguredError when EMBEDDING_PROVIDER=openai but OPENAI_API_KEY is missing (untestable under Vitest's require() resolution — see comment above)", () => {
     process.env.EMBEDDING_PROVIDER = "openai";
     expect(() => getEmbeddingService()).toThrow(ServiceNotConfiguredError);
+  });
+});
+
+describe("OpenAIEmbeddingService — Phase 9.4 resilience", () => {
+  function respond(body: EmbeddingCreateParams, tokens = 1): CreateEmbeddingResponse {
+    const inputs = body.input as string[];
+    return {
+      data: inputs.map((_, index) => ({ index, object: "embedding", embedding: vector(0.1) })),
+      model: "text-embedding-3-small",
+      object: "list",
+      usage: { prompt_tokens: tokens, total_tokens: tokens },
+    } as CreateEmbeddingResponse;
+  }
+
+  it("splits a large input into bounded batches (OpenAI caps inputs per request) and returns vectors in input order", async () => {
+    const create = vi.fn(async (body: EmbeddingCreateParams) => respond(body, 7));
+    const service = new OpenAIEmbeddingService(fakeClient(create));
+
+    const texts = Array.from({ length: 250 }, (_, i) => `text ${i}`);
+    const result = await service.embed(texts);
+
+    expect(create).toHaveBeenCalledTimes(3);
+    expect((create.mock.calls[0]![0].input as string[]).length).toBeLessThanOrEqual(100);
+    expect(result.vectors).toHaveLength(250);
+    expect(result.totalTokens).toBe(21); // real billed tokens, summed across batches
+  });
+
+  it("reports totalTokens as null (never a partial sum) if any batch lacks usage", async () => {
+    let call = 0;
+    const create = vi.fn(async (body: EmbeddingCreateParams) => {
+      const r = respond(body, 5);
+      if (++call === 2) (r as { usage?: unknown }).usage = undefined;
+      return r;
+    });
+    const service = new OpenAIEmbeddingService(fakeClient(create));
+
+    const result = await service.embed(Array.from({ length: 150 }, (_, i) => `t${i}`));
+    expect(result.totalTokens).toBeNull();
+  });
+
+  it.each([
+    ["rate limited (429)", new APIError(429, undefined, "slow down", undefined)],
+    ["server error (503)", new APIError(503, undefined, "overloaded", undefined)],
+    ["request timeout (408)", new APIError(408, undefined, "timeout", undefined)],
+    ["connection failure", new APIConnectionError({ message: "Connection error." })],
+    ["client-side timeout", new APIConnectionTimeoutError()],
+  ])("maps a transient provider failure (%s) to AIProviderUnavailableError so callers answer 503, not 500", async (_label, err) => {
+    const service = new OpenAIEmbeddingService(fakeClient(vi.fn().mockRejectedValue(err)));
+    await expect(service.embed(["x"])).rejects.toBeInstanceOf(AIProviderUnavailableError);
+  });
+
+  it.each([
+    ["bad request (400)", new APIError(400, undefined, "invalid input", undefined)],
+    ["unauthorized (401)", new APIError(401, undefined, "bad key", undefined)],
+    ["forbidden (403)", new APIError(403, undefined, "no access", undefined)],
+  ])("does NOT classify a %s as provider-unavailable — it can't succeed on retry and shouldn't read as an outage", async (_label, err) => {
+    const service = new OpenAIEmbeddingService(fakeClient(vi.fn().mockRejectedValue(err)));
+    const rejection = await service.embed(["x"]).catch((e) => e);
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection).not.toBeInstanceOf(AIProviderUnavailableError);
+  });
+
+  it("builds the real client with an explicit timeout and bounded retries instead of the SDK's 10-minute / 2-retry defaults", () => {
+    const originalKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-test-placeholder";
+    try {
+      const service = createOpenAIEmbeddingService() as unknown as { client: { timeout: number; maxRetries: number } };
+      expect(service.client.timeout).toBeLessThanOrEqual(60_000);
+      expect(service.client.maxRetries).toBeLessThanOrEqual(1);
+    } finally {
+      if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalKey;
+    }
   });
 });

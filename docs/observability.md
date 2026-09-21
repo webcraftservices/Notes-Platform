@@ -21,6 +21,11 @@ Datadog side once you do.
   chat/tutor, `outcome` success/failure, and `failure_category`
   unavailable/unexpected on failure) and `ai.chat.latency_ms` (gauge, on
   success). Never the prompt, the reply, or retrieved chunks.
+  Phase 9.4 adds two more count metrics, same no-content rule:
+  `ai.generation.requests` (flashcard/quiz routes — tagged `kind`,
+  `outcome:failure`, `failure_category`; failures only) and
+  `processing_job.failures` (tagged `job_type`; emitted whenever a background
+  job is recorded as FAILED).
 - **Request/correlation ID** — `getOrCreateRequestId()`
   (`src/lib/observability/request-id.ts`). Reuses an incoming
   `x-request-id` or `x-vercel-id` header if present, otherwise generates
@@ -45,10 +50,19 @@ Datadog side once you do.
     `checkRedisHealth()` in `lib/rate-limit.ts`) or `not_configured`.
     Unconfigured/unreachable Redis does **not** flip overall status to
     503 — rate limiting has a documented, working in-memory fallback.
+    (Phase 9.4: a configured-but-unreachable Redis, or misconfigured storage,
+    now reports top-level `status: "degraded"` — still HTTP 200 — so a monitor
+    on the body can alert; `status` is `ok` / `degraded` / `error`.)
   - `storage`: `local` / `s3` / `misconfigured` — configuration only, no
     real S3 call.
   - `ai`: `configured` / `not_configured` — configuration only, no real
     AI request.
+  - `config` (Phase 9.4): `ok` / `misconfigured` — in production, whether
+    mandatory configuration (`NEXTAUTH_SECRET`) is present; never names the
+    variable. `misconfigured` → 503. DB and Redis checks are bounded to 3s.
+  - `GET /api/health/live` (Phase 9.4) is a dependency-free **liveness**
+    probe (always 200 while the process serves requests) — point orchestrator
+    restarts at it and readiness/load-balancing at `/api/health`.
 
 ## Datadog components actually used
 

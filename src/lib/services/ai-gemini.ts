@@ -21,6 +21,27 @@ import { NOTE_BLOCK_KIND_LABELS, NOTE_BLOCK_KIND_ORDER } from "@/lib/note-block-
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
 /**
+ * Phase 9.4 — explicit request bounds. The SDK's own defaults are: no
+ * timeout at all (a stalled connection waits on the runtime's socket
+ * timeouts, i.e. minutes) and no retries. Both are set deliberately here:
+ *
+ * - `GEMINI_TIMEOUT_MS` bounds ONE attempt (the SDK gives each attempt a
+ *   fresh signal), sized for a chat/flashcard/quiz-sized completion.
+ * - Note generation feeds an entire transcript through the model and
+ *   returns a long structured response, so it gets its own, longer
+ *   per-request budget (`GEMINI_NOTE_GENERATION_TIMEOUT_MS`).
+ * - Retries are limited to ONE extra attempt and only for 5xx statuses,
+ *   which are transient by definition. 429 is intentionally NOT retried
+ *   (it usually means the project's quota/rate limit is exhausted, where an
+ *   immediate retry only adds load), and 4xx validation/auth failures are
+ *   never retried. A generation call has no side effects, so a retry is
+ *   safe — the worst case is one extra billed attempt during an outage.
+ */
+const GEMINI_TIMEOUT_MS = 60_000;
+const GEMINI_NOTE_GENERATION_TIMEOUT_MS = 180_000;
+const GEMINI_RETRY_OPTIONS = { attempts: 2, initialDelay: 1, maxDelay: 4, httpStatusCodes: [500, 502, 503, 504] };
+
+/**
  * Fixed hallucination-control instruction (spec §24 / CLAUDE.md's "never
  * fake a feature" rule), owned entirely by this concrete provider rather
  * than ai-chat.ts — ai-chat.ts stays a pure, provider-agnostic formatter
@@ -223,6 +244,7 @@ export class GeminiAIService implements AIService {
           systemInstruction: HALLUCINATION_CONTROL_INSTRUCTION,
           responseMimeType: "application/json",
           responseSchema: NOTE_BLOCKS_SCHEMA,
+          httpOptions: { timeout: GEMINI_NOTE_GENERATION_TIMEOUT_MS },
         },
       });
     } catch (err) {
@@ -271,5 +293,7 @@ export function createGeminiAIService(): GeminiAIService {
   if (!apiKey) {
     throw new ServiceNotConfiguredError("Gemini AIService", ["GOOGLE_AI_API_KEY"]);
   }
-  return new GeminiAIService(new GoogleGenAI({ apiKey }));
+  return new GeminiAIService(
+    new GoogleGenAI({ apiKey, httpOptions: { timeout: GEMINI_TIMEOUT_MS, retryOptions: GEMINI_RETRY_OPTIONS } })
+  );
 }

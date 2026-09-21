@@ -1,7 +1,11 @@
 import type { SpeechService, TranscriptSegmentResult } from "./interfaces";
 import { ServiceNotConfiguredError } from "./interfaces";
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
 
 const WHISPER_MAX_BYTES = 25 * 1024 * 1024; // OpenAI's hard limit for this endpoint
+// Phase 9.4 — explicit budget (upload of up to 25MB + transcription). Not retried:
+// each successful call is billed, and an ambiguous failure could otherwise pay twice.
+const WHISPER_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface WhisperSegment {
   start: number;
@@ -51,11 +55,11 @@ export class OpenAIWhisperSpeechService implements SpeechService {
     form.append("timestamp_granularities[]", "segment");
     if (input.languageHint) form.append("language", input.languageHint);
 
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      body: form,
-    });
+    const res = await fetchWithTimeout(
+      "https://api.openai.com/v1/audio/transcriptions",
+      { method: "POST", headers: { Authorization: `Bearer ${this.apiKey}` }, body: form },
+      { timeoutMs: WHISPER_TIMEOUT_MS, label: "OpenAI Whisper request" }
+    );
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");

@@ -164,3 +164,107 @@ describe("GET /api/health", () => {
     expect(text).not.toMatch(/admin/);
   });
 });
+
+describe("GET /api/health — Phase 9.4 readiness semantics", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    observability.sendDatadogMetric.mockResolvedValue(undefined);
+    observability.sendDatadogLog.mockResolvedValue(undefined);
+    db.$queryRaw.mockResolvedValue([{ "?column?": 1 }]);
+    rateLimitModule.checkRedisHealth.mockResolvedValue({ configured: false });
+    storageModule.getStorageService.mockReturnValue({});
+    aiModule.getAIService.mockReturnValue({ providerName: "gemini", modelName: "m", chat: vi.fn() });
+    delete process.env.STORAGE_PROVIDER;
+  });
+
+  it("answers 503 promptly when the database HANGS, instead of hanging the probe itself", async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      db.$queryRaw.mockReturnValue(new Promise(() => {})); // connection accepted, query never answers
+
+      const pending = GET();
+      await vi.advanceTimersByTimeAsync(3500);
+      const res = await pending;
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).database).toBe("unreachable");
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports status 'degraded' (still HTTP 200) when Redis is configured but unreachable, so monitors can alert without pulling the instance", async () => {
+    rateLimitModule.checkRedisHealth.mockResolvedValue({ configured: true, reachable: false });
+
+    const res = await GET();
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.status).toBe("degraded");
+    expect(json.redis).toBe("unreachable");
+  });
+
+  it("reports 'degraded' when storage is misconfigured", async () => {
+    storageModule.getStorageService.mockImplementation(() => {
+      throw new Error("bucket credentials missing");
+    });
+    process.env.STORAGE_PROVIDER = "s3";
+
+    const res = await GET();
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("degraded");
+  });
+
+  it("reports 503 in production when mandatory configuration is missing — without naming the variable", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXTAUTH_SECRET", "");
+    try {
+      const res = await GET();
+      const json = await res.json();
+
+      expect(res.status).toBe(503);
+      expect(json.status).toBe("error");
+      expect(json.config).toBe("misconfigured");
+      expect(JSON.stringify(json)).not.toMatch(/NEXTAUTH/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is ok in production once mandatory configuration is present", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXTAUTH_SECRET", "placeholder-not-a-real-secret");
+    try {
+      const res = await GET();
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("ok");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is explicitly dynamic, so Next never serves a build-time snapshot as the readiness result", async () => {
+    const mod = await import("@/app/api/health/route");
+    expect(mod.dynamic).toBe("force-dynamic");
+  });
+});
+
+describe("GET /api/health/live", () => {
+  it("answers 200 without touching the database, Redis, storage or AI — a dependency outage can never fail liveness", async () => {
+    vi.resetAllMocks();
+    const { GET: live, dynamic } = await import("@/app/api/health/live/route");
+
+    const res = await live();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "alive" });
+    expect(dynamic).toBe("force-dynamic");
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(rateLimitModule.checkRedisHealth).not.toHaveBeenCalled();
+    expect(storageModule.getStorageService).not.toHaveBeenCalled();
+    expect(aiModule.getAIService).not.toHaveBeenCalled();
+  });
+});

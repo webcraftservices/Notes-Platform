@@ -3,6 +3,11 @@ import { db } from "@/lib/db";
 import { getSessionUser, getAccessibleMaterial, NotAuthorizedError } from "@/lib/access";
 import { runNoteGenerationJob } from "@/lib/note-generation";
 import { jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
+import { createJobIfNoneActive } from "@/lib/processing-jobs";
+import { rateLimit } from "@/lib/rate-limit";
+
+/** Phase 9.4 — this AI generation route had no throttle; same class/limit as flashcard and quiz generation. */
+const NOTE_GENERATION_RATE_LIMIT = { limit: 5, windowSeconds: 60 };
 
 /**
  * Mirrors POST /api/materials/[materialId]/transcribe exactly: creates a
@@ -15,6 +20,13 @@ import { jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-respons
 export async function POST(_req: Request, { params }: { params: { materialId: string } }) {
   const user = await getSessionUser();
   if (!user) return UNAUTHORIZED();
+
+  const { success: withinRateLimit } = await rateLimit(`note-generation:${user.id}`, NOTE_GENERATION_RATE_LIMIT);
+  if (!withinRateLimit) {
+    return jsonError("You're generating notes too quickly. Please wait a moment and try again.", 429, {
+      code: "AI_RATE_LIMITED",
+    });
+  }
 
   try {
     const material = await getAccessibleMaterial(params.materialId, user.id);
@@ -32,16 +44,15 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
       return jsonError("This material doesn't have a ready transcript yet — transcribe it first.", 409);
     }
 
-    const existingActiveJob = await db.processingJob.findFirst({
-      where: { materialId: material.id, type: "AI_NOTE_GENERATION", status: { in: ["QUEUED", "RUNNING"] } },
+    // Atomic check-and-create (Phase 9.4). Previously two overlapping
+    // requests could both pass the "no active job" check and each append a
+    // full set of AI blocks to the user's note.
+    const { job, created } = await createJobIfNoneActive({
+      userId: user.id,
+      materialId: material.id,
+      type: "AI_NOTE_GENERATION",
     });
-    if (existingActiveJob) {
-      return NextResponse.json({ job: existingActiveJob });
-    }
-
-    const job = await db.processingJob.create({
-      data: { userId: user.id, materialId: material.id, type: "AI_NOTE_GENERATION", status: "QUEUED" },
-    });
+    if (!created) return NextResponse.json({ job });
 
     void runNoteGenerationJob(job.id);
 

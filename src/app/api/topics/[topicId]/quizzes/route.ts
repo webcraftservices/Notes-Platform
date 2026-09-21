@@ -8,6 +8,8 @@ import {
 import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 import { jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import { rateLimit } from "@/lib/rate-limit";
+import { aiGenerationFailureResponse } from "@/lib/ai-route-errors";
+import { getOrCreateRequestId } from "@/lib/observability/request-id";
 import { assertWithinAIQuota, AIQuotaExceededError } from "@/lib/ai-quota";
 import { toPublicQuiz } from "@/lib/quiz-serialization";
 
@@ -27,7 +29,8 @@ const QUIZ_GENERATION_RATE_LIMIT = { limit: 5, windowSeconds: 60 };
  * authorize the Topic (for correct 404 vs 403) → quota → generation,
  * which re-resolves scope itself (see quiz-generation.ts's doc comment).
  */
-export async function POST(_req: Request, { params }: { params: { topicId: string } }) {
+export async function POST(req: Request, { params }: { params: { topicId: string } }) {
+  const requestId = getOrCreateRequestId(req);
   const user = await getSessionUser();
   if (!user) return UNAUTHORIZED();
 
@@ -70,6 +73,6 @@ export async function POST(_req: Request, { params }: { params: { topicId: strin
       return jsonError(err.message, 502, { code: "QUIZ_GENERATION_FAILED" });
     }
     if (err instanceof ServiceNotConfiguredError) return jsonError(err.message, 503);
-    throw err;
+    return aiGenerationFailureResponse(err, { route: "topics/[topicId]/quizzes", kind: "quiz", userId: user.id, requestId });
   }
 }

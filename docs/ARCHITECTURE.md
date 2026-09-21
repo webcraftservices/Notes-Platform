@@ -656,3 +656,85 @@ not just here.
       `GET /api/groups/[groupId]/activity`, not just a hidden tab
 - [ ] `npm run test`, `npm run lint`, `npm run typecheck` — see
       `PROJECT_STATE.md` for the exact currently-expected numbers
+
+# Phase 9.4 — Reliability, resilience & operational hardening
+
+An evidence-driven audit of the existing architecture; **no new infrastructure
+(no queue, no new datastore, no schema change)**. The fire-and-forget
+`ProcessingJob` model from Phases 4–7 is unchanged, including its documented
+serverless caveat.
+
+## What changed and why
+
+- **Explicit timeouts on every outbound call.** `lib/fetch-timeout.ts`
+  (`fetchWithTimeout`) now wraps Google Drive/OAuth, AssemblyAI, Whisper and
+  Datadog calls; the Gemini and OpenAI SDK clients are constructed with explicit
+  timeouts, S3 calls carry an `abortSignal`. Before this, almost none had one.
+- **Bounded, transient-only retries.** Gemini: 1 extra attempt, 5xx only (not
+  429, not 4xx). OpenAI embeddings: 1 retry, 30s per attempt. Google import:
+  `isRetryableGoogleError` (429/5xx/timeouts/network only, max 3 attempts).
+  AssemblyAI: status polling tolerates up to 5 consecutive transient failures
+  (a read-only GET on a job still running remotely); the billed upload and
+  create-transcript calls are **never** retried.
+- **Consistent provider-unavailable behavior.** OpenAI embedding failures map to
+  `AIProviderUnavailableError` (→ 503) like Gemini; flashcard/quiz routes map it
+  through `lib/ai-route-errors.ts` instead of `throw err`; Google routes go
+  through `lib/google-route-errors.ts`, which shows only `GoogleApiError.publicMessage`
+  and never echoes raw error text.
+- **Job lifecycle helpers (`lib/processing-jobs.ts`).**
+  `createJobIfNoneActive` makes "is one already running? / create one" atomic per
+  (material, type) with a transaction-scoped Postgres advisory lock (no schema
+  change), and marks jobs stranded by a restart (QUEUED/RUNNING past a
+  per-type threshold) as FAILED so they cannot block retries forever.
+  `claimJob` (QUEUED→RUNNING exactly once) and `failJob` (never throws; never
+  overwrites a finished job) are used by every job runner. Post-success side
+  effects (queueing indexing, activity log) are best-effort and can no longer
+  flip an already-successful job/material to FAILED.
+- **Index writes.** Chunk inserts are multi-row batches in one transaction with
+  an explicit timeout and a per-material advisory lock (Prisma's 5s default
+  interactive-transaction timeout would roll back a large document *after* the
+  paid embedding calls succeeded; concurrent writers could duplicate chunks).
+  Embedding requests are split into batches of 100 inputs.
+- **Upload completion (S3).** `POST /materials/[id]/complete` now HEADs the
+  object: missing → 409 (stays UPLOADING, retryable); real size recorded in
+  `sizeBytes` (previously never set, so S3 uploads never counted toward the
+  storage quota); over per-file/quota limit → object deleted, FAILED, 413;
+  storage unreachable → 503 (stays UPLOADING). The UPLOADING→READY transition is
+  a status-guarded `updateMany`, so only one of two concurrent completes runs
+  the follow-up side effects.
+- **Google import.** Lookup + create + job creation are one transaction
+  serialized per (user, Drive file) (no duplicate Materials on double-click);
+  downloads are capped at the plan's per-file limit (declared length, then
+  streaming count) instead of being fully buffered first; a failed *re*-import
+  restores the material to READY with its previous content instead of wiping it.
+- **Rate limiting.** Redis client `retry: false`, 1s per-call timeout, and a
+  10s per-process cool-down after a failure; during an outage checks fall back
+  to the per-process in-memory limiter (was: fully open). Transcribe and
+  generate-notes routes gained per-user rate limits (they had none).
+- **Health.** `/api/health` is `force-dynamic` (Next 14 otherwise prerenders a
+  request-less `GET` handler at build time — `PROJECT_STATE.md` already records
+  the build reaching that step), bounds DB/Redis checks to 3s, reports
+  `status: "ok" | "degraded" | "error"` (degraded = Redis configured but
+  unreachable, or storage misconfigured; still HTTP 200), and requires
+  `NEXTAUTH_SECRET` in production (`config`). New `GET /api/health/live` is a
+  dependency-free liveness probe.
+
+## Known limitations (deliberately not addressed)
+
+- Jobs still run inside the request-receiving process (see Phase 4). Stale-job
+  reaping is on demand (next request for the same job), not a background sweep.
+- An in-flight AssemblyAI transcript id is not persisted, so a process death
+  mid-poll loses the (already billed) remote transcript; the retry re-uploads.
+- Audio is still buffered in memory for transcription (large files rely on plan
+  size limits); Google downloads are capped, uploads/transcription are not streamed.
+- Abandoned `UPLOADING` materials (client never called `/complete`) are not
+  cleaned up automatically. A `DELETE` that fails after soft-delete can orphan
+  an object (logged, not retried).
+- Redis rate limiting: an `EXPIRE` failing right after the first `INCR` leaves a
+  counter without a TTL until manually cleared (pre-existing pattern).
+- `retrieval.ts` binds one parameter per material id for workspace-wide scope
+  (bounded by Postgres' bind-parameter limit at extreme material counts).
+- Concurrent first `GET /api/ai/conversations` calls can create a duplicate empty
+  conversation (harmless: the most recently updated one is used).
+- Flashcard/quiz generation has no server-side in-flight lock; duplicates are
+  bounded by the UI loading state, the 5/min rate limit and the monthly quota.

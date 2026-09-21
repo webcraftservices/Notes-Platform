@@ -1,7 +1,8 @@
-import { Prisma, type Material } from "@prisma/client";
+import { Prisma, type Material, type ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getDocumentProcessingService } from "@/lib/services/document-processing";
-import { runEmbeddingJob } from "@/lib/ingestion";
+import { queueEmbeddingJob } from "@/lib/ingestion";
+import { claimJob, createJobIfNoneActive, failJob } from "@/lib/processing-jobs";
 import { DOCUMENT_EXTRACTION_TYPES, resolveExtractedPages, shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
 
 /**
@@ -26,15 +27,27 @@ export async function queueDocumentExtractionIfNeeded(
 ): Promise<void> {
   if (!shouldQueueDocumentExtraction(material)) return;
 
-  const existingActiveJob = await db.processingJob.findFirst({
-    where: { materialId: material.id, type: "DOCUMENT_EXTRACTION", status: { in: ["QUEUED", "RUNNING"] } },
-  });
-  if (existingActiveJob) return;
-
-  const job = await db.processingJob.create({
-    data: { userId, materialId: material.id, type: "DOCUMENT_EXTRACTION", status: "QUEUED" },
-  });
-  void runDocumentExtractionJob(job.id);
+  // Atomic "one active extraction per material" (Phase 9.4 — this used to
+  // be a separate findFirst + create, which two overlapping callers, e.g.
+  // a retried /complete request, could both pass).
+  try {
+    const { job, created } = await createJobIfNoneActive({
+      userId,
+      materialId: material.id,
+      type: "DOCUMENT_EXTRACTION",
+    });
+    if (!created) return;
+    void runDocumentExtractionJob(job.id);
+  } catch (err) {
+    // Callers fire this without awaiting it (`void queue...(...)`), so a
+    // rejection here would be unhandled. The upload/import that led here
+    // has already succeeded; the material stays READY and extraction can
+    // be retried by re-completing/re-importing.
+    console.error("[document-extraction] could not queue extraction job", {
+      materialId: material.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -60,15 +73,15 @@ export async function queueDocumentExtractionIfNeeded(
  * transcription failure never reverts an audio Material out of READY.
  */
 export async function runDocumentExtractionJob(jobId: string): Promise<void> {
-  const job = await db.processingJob.findUnique({ where: { id: jobId } });
-  if (!job || job.type !== "DOCUMENT_EXTRACTION" || !job.materialId) return;
-
-  await db.processingJob.update({
-    where: { id: jobId },
-    data: { status: "RUNNING", startedAt: new Date() },
-  });
+  // Phase 9.4: see runTranscriptionJob — everything runs inside the try
+  // and `failJob` never throws.
+  let job: ProcessingJob | null = null;
 
   try {
+    job = await db.processingJob.findUnique({ where: { id: jobId } });
+    if (!job || job.type !== "DOCUMENT_EXTRACTION" || !job.materialId) return;
+    if (!(await claimJob(jobId))) return;
+
     const material = await db.material.findUnique({ where: { id: job.materialId } });
     if (!material || !material.storageKey) {
       throw new Error("Material or its stored file could not be found.");
@@ -92,38 +105,37 @@ export async function runDocumentExtractionJob(jobId: string): Promise<void> {
     // no extractable text.
     const pages = resolveExtractedPages(result);
 
-    await db.material.update({
-      where: { id: material.id },
-      data: {
-        extractedText: text.length > 0 ? text : null,
-        // Nullable Json fields require the explicit Prisma.DbNull sentinel
-        // to write a real SQL NULL — passing plain `null` here is a type
-        // error under Prisma's advanced JSON-null handling (the default
-        // since Prisma 3+, still in effect at the ^5.20.0 pinned in this
-        // project).
-        extractedPages: pages ? (pages as Prisma.InputJsonValue) : Prisma.DbNull,
-      },
-    });
-
-    await db.processingJob.update({
-      where: { id: jobId },
-      data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-    });
+    // Text and job completion are committed together: previously these
+    // were two statements, so a failure between them left extracted text
+    // saved but the job reported FAILED.
+    await db.$transaction([
+      db.material.update({
+        where: { id: material.id },
+        data: {
+          extractedText: text.length > 0 ? text : null,
+          // Nullable Json fields require the explicit Prisma.DbNull sentinel
+          // to write a real SQL NULL — passing plain `null` here is a type
+          // error under Prisma's advanced JSON-null handling (the default
+          // since Prisma 3+, still in effect at the ^5.20.0 pinned in this
+          // project).
+          extractedPages: pages ? (pages as Prisma.InputJsonValue) : Prisma.DbNull,
+        },
+      }),
+      db.processingJob.update({
+        where: { id: jobId },
+        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
+      }),
+    ]);
 
     if (text.length > 0) {
       // Real, chunkable text is now available — index it right away,
       // same pattern as runGoogleImportJob's Google Doc branch and
-      // runTranscriptionJob's post-success embedding trigger.
-      const embeddingJob = await db.processingJob.create({
-        data: { userId: job.userId, materialId: material.id, type: "EMBEDDING", status: "QUEUED" },
-      });
-      void runEmbeddingJob(embeddingJob.id);
+      // runTranscriptionJob's post-success embedding trigger. Best-effort
+      // (queueEmbeddingJob never throws): extraction itself already
+      // succeeded and must stay reported as such.
+      await queueEmbeddingJob(job.userId, material.id);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Document extraction failed for an unknown reason.";
-    await db.processingJob.update({
-      where: { id: jobId },
-      data: { status: "FAILED", error: message, completedAt: new Date() },
-    });
+    await failJob(jobId, "DOCUMENT_EXTRACTION", err, "Document extraction failed for an unknown reason.");
   }
 }

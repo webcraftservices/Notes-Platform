@@ -1,8 +1,19 @@
 import type { SpeechService, TranscriptSegmentResult } from "./interfaces";
 import { ServiceNotConfiguredError } from "./interfaces";
+import { fetchWithTimeout, RequestTimeoutError } from "@/lib/fetch-timeout";
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_MS = 20 * 60 * 1000; // 20 minutes — generous for a long lecture
+
+// Phase 9.4 — explicit per-request budgets. `fetch` has no timeout of its
+// own, so a stalled connection used to hang the whole transcription job.
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000; // whole audio file, possibly hundreds of MB
+const API_TIMEOUT_MS = 30 * 1000; // small JSON create/poll calls
+const MAX_BODY_EXCERPT = 300;
+// A status poll is a read-only GET on a transcript that is still running
+// server-side, so one blip (5xx, 429, timeout, dropped connection) should
+// not throw away a job that has been running — and billing — for minutes.
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 const ASSEMBLYAI_TRANSCRIPTION_MODELS = ["universal-2"];
 
 interface AssemblyAIUtterance {
@@ -68,33 +79,41 @@ export class AssemblyAISpeechService implements SpeechService {
   }
 
   private async upload(buffer: Buffer): Promise<string> {
-    const res = await fetch("https://api.assemblyai.com/v2/upload", {
-      method: "POST",
-      headers: { authorization: this.apiKey },
-      body: new Uint8Array(buffer),
-    });
+    // Not retried: re-sending the whole file is expensive and, if the
+    // first attempt actually landed, would just duplicate the upload.
+    const res = await fetchWithTimeout(
+      "https://api.assemblyai.com/v2/upload",
+      { method: "POST", headers: { authorization: this.apiKey }, body: new Uint8Array(buffer) },
+      { timeoutMs: UPLOAD_TIMEOUT_MS, label: "AssemblyAI upload" }
+    );
     if (!res.ok) {
-      throw new Error(`AssemblyAI upload failed (${res.status}): ${await res.text().catch(() => "")}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`AssemblyAI upload failed (${res.status}): ${body.slice(0, MAX_BODY_EXCERPT)}`);
     }
     const { upload_url } = (await res.json()) as { upload_url: string };
     return upload_url;
   }
 
   private async requestTranscript(audioUrl: string, languageHint?: string): Promise<string> {
-    const res = await fetch("https://api.assemblyai.com/v2/transcript", {
-      method: "POST",
-      headers: { authorization: this.apiKey, "content-type": "application/json" },
-      body: JSON.stringify({
-        audio_url: audioUrl,
-        speech_models: ASSEMBLYAI_TRANSCRIPTION_MODELS,
-        speaker_labels: true,
-        language_code: languageHint,
-      }),
-    });
+    // Not retried: every successful POST here creates a separate, billed
+    // transcript, so a retry after an ambiguous failure could pay twice.
+    const res = await fetchWithTimeout(
+      "https://api.assemblyai.com/v2/transcript",
+      {
+        method: "POST",
+        headers: { authorization: this.apiKey, "content-type": "application/json" },
+        body: JSON.stringify({
+          audio_url: audioUrl,
+          speech_models: ASSEMBLYAI_TRANSCRIPTION_MODELS,
+          speaker_labels: true,
+          language_code: languageHint,
+        }),
+      },
+      { timeoutMs: API_TIMEOUT_MS, label: "AssemblyAI transcript request" }
+    );
     if (!res.ok) {
-      throw new Error(
-        `AssemblyAI transcript request failed (${res.status}): ${await res.text().catch(() => "")}`
-      );
+      const body = await res.text().catch(() => "");
+      throw new Error(`AssemblyAI transcript request failed (${res.status}): ${body.slice(0, MAX_BODY_EXCERPT)}`);
     }
     const data = (await res.json()) as AssemblyAITranscriptResponse;
     return data.id;
@@ -102,19 +121,49 @@ export class AssemblyAISpeechService implements SpeechService {
 
   private async pollUntilDone(id: string): Promise<AssemblyAITranscriptResponse> {
     const deadline = Date.now() + MAX_POLL_MS;
+    let consecutiveFailures = 0;
+
     while (Date.now() < deadline) {
-      const res = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-        headers: { authorization: this.apiKey },
-      });
-      if (!res.ok) {
-        throw new Error(`AssemblyAI status check failed (${res.status})`);
+      try {
+        const res = await fetchWithTimeout(
+          `https://api.assemblyai.com/v2/transcript/${id}`,
+          { headers: { authorization: this.apiKey } },
+          { timeoutMs: API_TIMEOUT_MS, label: "AssemblyAI status check" }
+        );
+        if (!res.ok) {
+          // 429/5xx are transient; anything else (401/403/404...) will not
+          // fix itself, so fail immediately instead of polling it for 20 minutes.
+          if (res.status === 429 || res.status >= 500) {
+            throw new TransientPollError(`AssemblyAI status check failed (${res.status})`);
+          }
+          throw new Error(`AssemblyAI status check failed (${res.status})`);
+        }
+        const data = (await res.json()) as AssemblyAITranscriptResponse;
+        consecutiveFailures = 0;
+        if (data.status === "completed" || data.status === "error") return data;
+      } catch (err) {
+        if (!isTransientPollFailure(err)) throw err;
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+          throw new Error(
+            `AssemblyAI status checks failed ${MAX_CONSECUTIVE_POLL_FAILURES} times in a row: ${
+              err instanceof Error ? err.message : "unknown error"
+            }`
+          );
+        }
       }
-      const data = (await res.json()) as AssemblyAITranscriptResponse;
-      if (data.status === "completed" || data.status === "error") return data;
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     throw new Error("AssemblyAI transcription timed out after 20 minutes.");
   }
+}
+
+class TransientPollError extends Error {}
+
+function isTransientPollFailure(err: unknown): boolean {
+  if (err instanceof TransientPollError || err instanceof RequestTimeoutError) return true;
+  // Transport-level failure (connection reset, DNS blip) — fetch rejects with a TypeError.
+  return err instanceof TypeError;
 }
 
 export function createAssemblyAIService(): AssemblyAISpeechService {

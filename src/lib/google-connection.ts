@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import { refreshGoogleAccessToken, revokeGoogleToken, GOOGLE_DRIVE_SCOPES } from "@/lib/services/google-oauth";
+import { GoogleApiError, GOOGLE_RECONNECT_REQUIRED } from "@/lib/services/google-errors";
 
 /**
  * A single OAuth grant covers both Drive and Docs scopes (see the
@@ -90,7 +91,7 @@ export async function getValidGoogleAccessToken(userId: string): Promise<string>
   }
 
   if (!account.refreshToken) {
-    throw new Error("Google Drive access has expired or was revoked. Reconnect Google Drive to continue.");
+    throw new GoogleApiError(GOOGLE_RECONNECT_REQUIRED, { publicMessage: GOOGLE_RECONNECT_REQUIRED });
   }
 
   const refreshed = await refreshGoogleAccessToken(decryptSecret(account.refreshToken));

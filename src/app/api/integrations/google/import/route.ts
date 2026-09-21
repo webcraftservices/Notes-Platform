@@ -10,6 +10,7 @@ import {
 } from "@/lib/google-import";
 import { rateLimit } from "@/lib/rate-limit";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, zodError, jsonError } from "@/lib/api-response";
+import { googleFailureResponse } from "@/lib/google-route-errors";
 
 export async function POST(req: Request) {
   const user = await getSessionUser();
@@ -31,7 +32,6 @@ export async function POST(req: Request) {
     if (err instanceof GoogleFileUnsupportedError) return jsonError(err.message, 415);
     if (err instanceof GoogleDriveNotEnabledError) return jsonError(err.message, 403);
     if (err instanceof GoogleNotConnectedError) return jsonError(err.message, 409);
-    const message = err instanceof Error ? err.message : "Import failed for an unknown reason.";
-    return jsonError(message, 502);
+    return googleFailureResponse(err, { route: "integrations/google/import", op: "import", userId: user.id });
   }
 }

@@ -1,3 +1,9 @@
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
+import { GoogleApiError, GOOGLE_RECONNECT_REQUIRED, GOOGLE_TEMPORARILY_UNAVAILABLE } from "./google-errors";
+
+/** Every OAuth endpoint call is a small JSON exchange — a stalled one is a failure, not something to wait on. */
+const GOOGLE_OAUTH_TIMEOUT_MS = 15_000;
+
 /** Thrown when Google OAuth client credentials aren't configured. Kept
  * distinct from ServiceNotConfiguredError (interfaces.ts) because that
  * error's message hardcodes a pointer to docs/ai-setup.md, which isn't
@@ -81,41 +87,58 @@ export async function exchangeCodeForTokens(input: {
   redirectUri: string;
 }): Promise<GoogleTokenResponse> {
   const { clientId, clientSecret } = getGoogleOAuthConfig();
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      code: input.code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: input.redirectUri,
-      grant_type: "authorization_code",
-    }),
-  });
+  const res = await fetchWithTimeout(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: input.code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: input.redirectUri,
+        grant_type: "authorization_code",
+      }),
+    },
+    { timeoutMs: GOOGLE_OAUTH_TIMEOUT_MS, label: "Google token exchange" }
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Google token exchange failed (${res.status}): ${body.slice(0, 300)}`);
+    throw new GoogleApiError(`Google token exchange failed (${res.status}): ${body.slice(0, 300)}`, {
+      status: res.status,
+      publicMessage: "Google Drive connection could not be completed.",
+    });
   }
   return res.json();
 }
 
 export async function refreshGoogleAccessToken(refreshToken: string): Promise<GoogleTokenResponse> {
   const { clientId, clientSecret } = getGoogleOAuthConfig();
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      refresh_token: refreshToken,
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "refresh_token",
-    }),
-  });
+  const res = await fetchWithTimeout(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+      }),
+    },
+    { timeoutMs: GOOGLE_OAUTH_TIMEOUT_MS, label: "Google access token refresh" }
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(
+    // 400/401 from the token endpoint means the grant itself is dead
+    // (revoked, expired, or invalid_grant) — retrying can never help and
+    // the user must reconnect. Anything else (429/5xx) is Google being
+    // unavailable and is worth retrying / trying again later.
+    const grantDead = res.status === 400 || res.status === 401;
+    throw new GoogleApiError(
       `Google access token refresh failed (${res.status}): ${body.slice(0, 300)}. ` +
-        `Google Drive access may have been revoked — reconnect it in Settings.`
+        `Google Drive access may have been revoked — reconnect it in Settings.`,
+      { status: res.status, publicMessage: grantDead ? GOOGLE_RECONNECT_REQUIRED : GOOGLE_TEMPORARILY_UNAVAILABLE }
     );
   }
   return res.json();
@@ -125,15 +148,19 @@ export async function revokeGoogleToken(token: string): Promise<void> {
   // Best-effort — a failed revoke call shouldn't block disconnecting inside
   // this app (the ConnectedAccount row's revokedAt is the source of truth
   // for whether *this app* will use the token again either way).
-  await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`, {
-    method: "POST",
-  }).catch(() => undefined);
+  await fetchWithTimeout(
+    `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`,
+    { method: "POST" },
+    { timeoutMs: GOOGLE_OAUTH_TIMEOUT_MS, label: "Google token revoke" }
+  ).catch(() => undefined);
 }
 
 export async function fetchGoogleUserEmail(accessToken: string): Promise<string> {
-  const res = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await fetchWithTimeout(
+    "https://www.googleapis.com/oauth2/v2/userinfo",
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+    { timeoutMs: GOOGLE_OAUTH_TIMEOUT_MS, label: "Google account lookup" }
+  );
   if (!res.ok) throw new Error(`Could not read the connected Google account's email (${res.status}).`);
   const data = (await res.json()) as { email?: string };
   if (!data.email) throw new Error("Google did not return an email for this account.");

@@ -34,7 +34,7 @@ const generationModule = vi.hoisted(() => {
 vi.mock("@/lib/services/flashcard-generation", () => generationModule);
 
 import { POST } from "@/app/api/topics/[topicId]/flashcards/route";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 function makeRequest(): Request {
   return new Request("https://example.test/api/topics/topic-1/flashcards", { method: "POST" });
@@ -179,5 +179,32 @@ describe("POST /api/topics/[topicId]/flashcards", () => {
       userId: "user-1",
       topicId: "topic-1",
     });
+  });
+
+  it("returns 503 with a stable AI_PROVIDER_UNAVAILABLE code (not a bare 500) when the AI provider is down", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    generationModule.generateFlashcardsForTopic.mockRejectedValue(new AIProviderUnavailableError("Gemini request failed (503): overloaded"));
+
+    const res = await POST(makeRequest(), { params: { topicId: "topic-1" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(json.code).toBe("AI_PROVIDER_UNAVAILABLE");
+    expect(JSON.stringify(json)).not.toMatch(/overloaded|Gemini/);
+    consoleSpy.mockRestore();
+  });
+
+  it("returns a safe, logged 500 for an unexpected failure — never leaking the underlying error text", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    generationModule.generateFlashcardsForTopic.mockRejectedValue(new Error("Invalid `prisma.x.create()` invocation: secret detail"));
+
+    const res = await POST(makeRequest(), { params: { topicId: "topic-1" } });
+    const json = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(json)).not.toMatch(/prisma|secret detail/);
+    expect(json.requestId).toEqual(expect.any(String));
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
   });
 });

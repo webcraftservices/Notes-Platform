@@ -3,9 +3,24 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { StorageService } from "./storage";
+
+/**
+ * Phase 9.4 — explicit per-call budgets. The AWS SDK v3 sets no request
+ * timeout of its own (only its built-in retry policy), so a stalled S3
+ * endpoint would otherwise hold the caller open indefinitely.
+ */
+const S3_METADATA_TIMEOUT_MS = 15_000; // head/delete — tiny requests
+const S3_TRANSFER_TIMEOUT_MS = 10 * 60 * 1000; // whole-object get/put
+
+/** True for the "object does not exist" outcome of a HEAD/GET, across AWS S3 and S3-compatible providers. */
+export function isS3NotFoundError(err: unknown): boolean {
+  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
+  return e?.name === "NotFound" || e?.name === "NoSuchKey" || e?.$metadata?.httpStatusCode === 404;
+}
 
 /**
  * Production storage backend. Works against AWS S3 or any S3-compatible
@@ -53,8 +68,8 @@ export class S3StorageService implements StorageService {
       // URL's headers in a portable way across providers, so the app layer
       // still validates sizeBytes against the plan limit before ever
       // requesting this URL (see /api/materials/upload-url) and again once
-      // the object exists (see the "complete" step, which checks the
-      // actual stored object size).
+      // the object exists (see the "complete" step, which — since Phase
+      // 9.4 — HEADs the object and checks its actual stored size).
       ContentLength: undefined,
     });
     const uploadUrl = await getSignedUrl(this.client, command, { expiresIn: 60 * 10 });
@@ -67,7 +82,29 @@ export class S3StorageService implements StorageService {
   }
 
   async deleteObject(key: string): Promise<void> {
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }), {
+      abortSignal: AbortSignal.timeout(S3_METADATA_TIMEOUT_MS),
+    });
+  }
+
+  /**
+   * Not part of the StorageService interface — used by the upload
+   * "complete" step to confirm the browser's direct-to-S3 upload actually
+   * landed and to learn its REAL size (never the client's declared one).
+   * Returns null when the object does not exist; any other failure
+   * (outage, timeout, permissions) is thrown so the caller can tell
+   * "missing" apart from "couldn't check".
+   */
+  async headObject(key: string): Promise<{ sizeBytes: number } | null> {
+    try {
+      const res = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }), {
+        abortSignal: AbortSignal.timeout(S3_METADATA_TIMEOUT_MS),
+      });
+      return { sizeBytes: res.ContentLength ?? 0 };
+    } catch (err) {
+      if (isS3NotFoundError(err)) return null;
+      throw err;
+    }
   }
 
   /**
@@ -78,7 +115,9 @@ export class S3StorageService implements StorageService {
    * arbitrarily large objects.
    */
   async getObjectBuffer(key: string): Promise<Buffer> {
-    const res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    const res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), {
+      abortSignal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS),
+    });
     const body = res.Body;
     if (!body) throw new Error(`Object ${key} has no body`);
     const chunks: Uint8Array[] = [];
@@ -99,7 +138,8 @@ export class S3StorageService implements StorageService {
    */
   async putObjectBuffer(key: string, data: Buffer, contentType: string): Promise<void> {
     await this.client.send(
-      new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: contentType })
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: contentType }),
+      { abortSignal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS) }
     );
   }
 }

@@ -65,12 +65,39 @@ function inMemoryRateLimit(key: string, opts: RateLimitOptions): RateLimitResult
  * no persistent connection to hold open), so this costs nothing at
  * runtime, and it keeps this module free of long-lived state that would
  * otherwise need explicit resetting between requests/tests.
+ *
+ * Phase 9.4: `retry: false`. The client's default is 5 automatic retries
+ * with exponential backoff (~4s in total), and since every rate-limited
+ * endpoint (auth, AI chat, uploads, search…) awaits this before doing its
+ * own work, a Redis outage used to add several seconds to each of those
+ * requests before the check finally "failed open". A rate-limit counter
+ * is not worth retrying — see `withRedisTimeout` and the outage handling
+ * in `redisRateLimit`.
  */
 function getRedisClient(): Redis | null {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
-  return new Redis({ url, token });
+  return new Redis({ url, token, retry: false });
+}
+
+/** Upper bound for any single Redis call made on a request's hot path. */
+const REDIS_CALL_TIMEOUT_MS = 1000;
+/** After a Redis failure, skip Redis entirely for this long (per process) so a sustained outage costs each request nothing. */
+const REDIS_OUTAGE_COOLDOWN_MS = 10_000;
+
+let redisUnavailableUntil = 0;
+
+async function withRedisTimeout<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Redis call timed out after ${REDIS_CALL_TIMEOUT_MS}ms`)), REDIS_CALL_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -87,16 +114,20 @@ function getRedisClient(): Redis | null {
  * unrelated data if the same Redis instance is reused for something else.
  */
 async function redisRateLimit(redis: Redis, key: string, opts: RateLimitOptions): Promise<RateLimitResult> {
+  // Redis is known to be down (recent failure): don't pay for another
+  // timeout on every request — use the local limiter until the cool-down ends.
+  if (Date.now() < redisUnavailableUntil) return inMemoryRateLimit(key, opts);
+
   const redisKey = `ratelimit:${key}`;
 
   try {
-    const count = await redis.incr(redisKey);
+    const count = await withRedisTimeout(redis.incr(redisKey));
     if (count === 1) {
       // Only the request that just created the key sets its expiry, so a
       // concurrent request that also observes count === 1 (a benign race
       // right at window creation) just re-issues the same TTL — never a
       // correctness problem, at worst a redundant EXPIRE call.
-      await redis.expire(redisKey, opts.windowSeconds);
+      await withRedisTimeout(redis.expire(redisKey, opts.windowSeconds));
     }
 
     if (count > opts.limit) {
@@ -104,18 +135,20 @@ async function redisRateLimit(redis: Redis, key: string, opts: RateLimitOptions)
     }
     return { success: true, remaining: Math.max(0, opts.limit - count) };
   } catch (err) {
-    // Fail OPEN, not closed: a Redis-side hiccup should not take down
-    // every rate-limited endpoint in the app (auth, AI chat, uploads,
-    // search — see every rateLimit() call site). The alternative
-    // (fail closed) would turn a transient Redis outage into a total
-    // outage of those features. This is logged loudly so a sustained
-    // Redis outage is visible in server logs rather than silently
-    // disabling rate limiting.
-    console.error("[rate-limit] Redis request failed — failing open for this check", {
+    // Degrade to the per-process in-memory limiter (Phase 9.4) instead of
+    // failing fully OPEN. A Redis-side hiccup must not take down every
+    // rate-limited endpoint (auth, AI chat, uploads, search — see every
+    // rateLimit() call site), so we never fail CLOSED; but before this
+    // change a Redis outage also meant *no* limiting at all, including on
+    // sign-in and registration. The local limiter is not distributed — see
+    // the module doc — but it is still a real bound on a single instance.
+    // Logged loudly so a sustained outage is visible in server logs.
+    redisUnavailableUntil = Date.now() + REDIS_OUTAGE_COOLDOWN_MS;
+    console.error("[rate-limit] Redis request failed — using the in-memory limiter for this check", {
       key,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { success: true, remaining: opts.limit };
+    return inMemoryRateLimit(key, opts);
   }
 }
 
@@ -147,7 +180,7 @@ export async function checkRedisHealth(): Promise<RedisHealthStatus> {
   if (!redis) return { configured: false };
 
   try {
-    await redis.ping();
+    await withRedisTimeout(redis.ping());
     return { configured: true, reachable: true };
   } catch (err) {
     return { configured: true, reachable: false, error: err instanceof Error ? err.message : String(err) };

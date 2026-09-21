@@ -1,8 +1,40 @@
+import { Prisma, type ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
 import { chunkPagedText, chunkTranscriptSegments, chunkText, parseExtractedPages, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 import { recordAIUsage } from "@/lib/ai-usage";
+import { claimJob, failJob } from "@/lib/processing-jobs";
+
+/**
+ * Creates and starts an EMBEDDING job for a material whose text was just
+ * produced by another job (transcription, document extraction, Google
+ * import). Best-effort by design (Phase 9.4): the caller's own work has
+ * already been committed and reported as successful, so a failure to
+ * *queue indexing* must never be reported back as a failure of that work.
+ * Never throws.
+ */
+export async function queueEmbeddingJob(userId: string, materialId: string): Promise<void> {
+  try {
+    const job = await db.processingJob.create({ data: { userId, materialId, type: "EMBEDDING", status: "QUEUED" } });
+    void runEmbeddingJob(job.id);
+  } catch (err) {
+    console.error("[ingestion] could not queue indexing job", {
+      materialId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Chunk rows are inserted in multi-row batches, all inside one
+ * transaction, so a large document doesn't pay one database round-trip
+ * (and one 1536-float payload) per chunk. Prisma's interactive
+ * transactions default to a 5-second timeout, which one INSERT per chunk
+ * exceeds for a long lecture or a large PDF — the whole index write
+ * would roll back *after* the paid embedding calls had already succeeded.
+ */
+const CHUNK_INSERT_BATCH_SIZE = 50;
+const CHUNK_WRITE_TX_OPTIONS = { maxWait: 10_000, timeout: 60_000 };
 
 /**
  * Runs a single EMBEDDING job end to end: RUNNING → chunk the material's
@@ -40,15 +72,14 @@ import { recordAIUsage } from "@/lib/ai-usage";
  * transcription jobs (see that file's doc comment).
  */
 export async function runEmbeddingJob(jobId: string): Promise<void> {
-  const job = await db.processingJob.findUnique({ where: { id: jobId } });
-  if (!job || job.type !== "EMBEDDING" || !job.materialId) return;
-
-  await db.processingJob.update({
-    where: { id: jobId },
-    data: { status: "RUNNING", startedAt: new Date() },
-  });
-
+  // Phase 9.4: see runTranscriptionJob — everything runs inside the try
+  // and `failJob` never throws, so `void runEmbeddingJob(id)` can't leak
+  // an unhandled rejection.
   try {
+    const job: ProcessingJob | null = await db.processingJob.findUnique({ where: { id: jobId } });
+    if (!job || job.type !== "EMBEDDING" || !job.materialId) return;
+    if (!(await claimJob(jobId))) return;
+
     const material = await db.material.findUnique({ where: { id: job.materialId } });
     if (!material) throw new Error("Material could not be found.");
 
@@ -125,22 +156,31 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
     });
 
     await db.$transaction(async (tx) => {
+      // Serialize concurrent index writes for one material (e.g. a
+      // re-import racing a manual re-index). Without this, two jobs could
+      // interleave "delete old chunks" with "insert new chunks" and leave
+      // duplicated chunks behind. Transaction-scoped: released on commit.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`chunks:${material.id}`}, 0))`;
+
       await tx.materialChunk.deleteMany({ where: { materialId: material.id } });
 
-      for (const [i, chunk] of chunks.entries()) {
-        const vector = vectors[i];
-        if (!vector) throw new Error("EmbeddingService returned fewer vectors than chunks were requested.");
-        const vectorLiteral = `[${vector.join(",")}]`;
-        // MaterialChunk.embedding is Unsupported("vector(1536)") in the
-        // Prisma schema — the typed client can neither read nor write it,
-        // so raw SQL is required for this one column. Every other field
-        // still goes through normal parameterized values.
+      // MaterialChunk.embedding is Unsupported("vector(1536)") in the
+      // Prisma schema — the typed client can neither read nor write it,
+      // so raw SQL is required for this one column. Every other field
+      // still goes through normal parameterized values.
+      for (let start = 0; start < chunks.length; start += CHUNK_INSERT_BATCH_SIZE) {
+        const rows = chunks.slice(start, start + CHUNK_INSERT_BATCH_SIZE).map((chunk, offset) => {
+          const vector = vectors[start + offset];
+          if (!vector) throw new Error("EmbeddingService returned fewer vectors than chunks were requested.");
+          const vectorLiteral = `[${vector.join(",")}]`;
+          return Prisma.sql`(${crypto.randomUUID()}, ${material.id}, ${chunk.content}, ${chunk.order}, ${chunk.pageNumber},
+             ${chunk.startSeconds}, ${chunk.endSeconds}, ${chunk.tokenCount}, ${vectorLiteral}::vector, now())`;
+        });
+
         await tx.$executeRaw`
           INSERT INTO "MaterialChunk"
             (id, "materialId", content, "order", "pageNumber", "startSeconds", "endSeconds", "tokenCount", embedding, "createdAt")
-          VALUES
-            (${crypto.randomUUID()}, ${material.id}, ${chunk.content}, ${chunk.order}, ${chunk.pageNumber},
-             ${chunk.startSeconds}, ${chunk.endSeconds}, ${chunk.tokenCount}, ${vectorLiteral}::vector, now())
+          VALUES ${Prisma.join(rows)}
         `;
       }
 
@@ -148,18 +188,8 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
         where: { id: jobId },
         data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
       });
-    });
+    }, CHUNK_WRITE_TX_OPTIONS);
   } catch (err) {
-    const message =
-      err instanceof ServiceNotConfiguredError
-        ? err.message
-        : err instanceof Error
-          ? err.message
-          : "Indexing failed for an unknown reason.";
-
-    await db.processingJob.update({
-      where: { id: jobId },
-      data: { status: "FAILED", error: message, completedAt: new Date() },
-    });
+    await failJob(jobId, "EMBEDDING", err, "Indexing failed for an unknown reason.");
   }
 }

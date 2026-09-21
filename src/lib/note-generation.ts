@@ -1,7 +1,8 @@
+import type { ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
+import { claimJob, failJob } from "@/lib/processing-jobs";
 import { getOrCreateTopicNote } from "@/lib/notes";
 import { getAIService } from "@/lib/services/ai";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
 import { NOTE_BLOCK_KIND_ORDER, EMPTY_TIPTAP_DOC } from "@/lib/note-block-style";
 
 /**
@@ -24,15 +25,13 @@ import { NOTE_BLOCK_KIND_ORDER, EMPTY_TIPTAP_DOC } from "@/lib/note-block-style"
  * non-destructive action a user can undo via version history.
  */
 export async function runNoteGenerationJob(jobId: string): Promise<void> {
-  const job = await db.processingJob.findUnique({ where: { id: jobId } });
-  if (!job || job.type !== "AI_NOTE_GENERATION" || !job.materialId) return;
-
-  await db.processingJob.update({
-    where: { id: jobId },
-    data: { status: "RUNNING", startedAt: new Date() },
-  });
-
+  // Phase 9.4: see runTranscriptionJob — everything runs inside the try
+  // and `failJob` never throws.
   try {
+    const job: ProcessingJob | null = await db.processingJob.findUnique({ where: { id: jobId } });
+    if (!job || job.type !== "AI_NOTE_GENERATION" || !job.materialId) return;
+    if (!(await claimJob(jobId))) return;
+
     const material = await db.material.findUnique({ where: { id: job.materialId } });
     if (!material) throw new Error("Material could not be found.");
     if (!material.topicId) {
@@ -96,17 +95,7 @@ export async function runNoteGenerationJob(jobId: string): Promise<void> {
       });
     });
   } catch (err) {
-    const message =
-      err instanceof ServiceNotConfiguredError
-        ? err.message
-        : err instanceof Error
-          ? err.message
-          : "AI note generation failed for an unknown reason.";
-
-    await db.processingJob.update({
-      where: { id: jobId },
-      data: { status: "FAILED", error: message, completedAt: new Date() },
-    });
+    await failJob(jobId, "AI_NOTE_GENERATION", err, "AI note generation failed for an unknown reason.");
   }
 }
 

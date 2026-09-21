@@ -63,7 +63,10 @@ export function useMaterialUpload() {
 
       const completeRes = await fetch(`/api/materials/${materialId}/complete`, { method: "POST" });
       if (!completeRes.ok) {
-        throw new Error("Upload finished but processing failed.");
+        // Surface the server's own explanation when it gave one (e.g. the
+        // file exceeded the plan limit, or storage couldn't be verified).
+        const detail = tryParseError(await completeRes.text().catch(() => ""));
+        throw new Error(detail ?? "Upload finished but processing failed.");
       }
 
       return { materialId };

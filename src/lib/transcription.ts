@@ -1,10 +1,11 @@
+import type { ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
 import { getSpeechService } from "@/lib/services/speech";
-import { ServiceNotConfiguredError } from "@/lib/services/interfaces";
-import { runEmbeddingJob } from "@/lib/ingestion";
+import { queueEmbeddingJob } from "@/lib/ingestion";
+import { claimJob, failJob } from "@/lib/processing-jobs";
 
 /**
  * Resolves raw audio bytes regardless of which storage backend is active.
@@ -37,15 +38,19 @@ async function getAudioBuffer(storageKey: string): Promise<Buffer> {
  * (a real queue: BullMQ+Redis, SQS, etc.) that removes this constraint.
  */
 export async function runTranscriptionJob(jobId: string): Promise<void> {
-  const job = await db.processingJob.findUnique({ where: { id: jobId } });
-  if (!job || job.type !== "TRANSCRIPTION" || !job.materialId) return;
-
-  await db.processingJob.update({
-    where: { id: jobId },
-    data: { status: "RUNNING", startedAt: new Date() },
-  });
+  // Phase 9.4: every step — including the first two DB reads/writes — runs
+  // inside this try, and the catch's own DB write (`failJob`) never
+  // throws, so `void runTranscriptionJob(id)` at the call sites can never
+  // turn a database blip into an unhandled promise rejection.
+  let job: ProcessingJob | null = null;
 
   try {
+    job = await db.processingJob.findUnique({ where: { id: jobId } });
+    if (!job || job.type !== "TRANSCRIPTION" || !job.materialId) return;
+
+    // Only one runner may execute a given job (see processing-jobs.ts).
+    if (!(await claimJob(jobId))) return;
+
     const material = await db.material.findUnique({ where: { id: job.materialId } });
     if (!material || !material.storageKey) {
       throw new Error("Material or its stored file could not be found.");
@@ -98,37 +103,32 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
         data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
       });
     });
-
-    // Phase 5 integration point: a successful transcript is real,
-    // chunkable text, so kick off indexing right away rather than making
-    // the user take a separate action. Fire-and-forget, same execution
-    // model (and same serverless caveat) as this function itself — see
-    // runEmbeddingJob's doc comment. If no EmbeddingService is configured
-    // (always true in this codebase state, see lib/services/embedding.ts),
-    // this job will honestly end up FAILED with a real configuration
-    // error rather than silently doing nothing — the Topic's AI Chat tab
-    // surfaces that so it isn't a silent gap.
-    const embeddingJob = await db.processingJob.create({
-      data: { userId: job.userId, materialId: job.materialId, type: "EMBEDDING", status: "QUEUED" },
-    });
-    void runEmbeddingJob(embeddingJob.id);
   } catch (err) {
-    const message =
-      err instanceof ServiceNotConfiguredError
-        ? err.message
-        : err instanceof Error
-          ? err.message
-          : "Transcription failed for an unknown reason.";
+    // ServiceNotConfiguredError messages are already actionable and
+    // user-safe, so every error type takes the same path here.
+    await failJob(jobId, "TRANSCRIPTION", err, "Transcription failed for an unknown reason.");
 
-    await db.processingJob.update({
-      where: { id: jobId },
-      data: { status: "FAILED", error: message, completedAt: new Date() },
-    });
-
-    if (job.materialId) {
+    if (job?.materialId) {
+      // A failed (re-)run must not demote a transcript that is already
+      // READY and usable — only a not-yet-usable one is marked FAILED.
       await db.transcript
-        .updateMany({ where: { materialId: job.materialId }, data: { status: "FAILED" } })
+        .updateMany({ where: { materialId: job.materialId, status: { not: "READY" } }, data: { status: "FAILED" } })
         .catch(() => {});
     }
+    return;
   }
+
+  // Phase 5 integration point: a successful transcript is real,
+  // chunkable text, so kick off indexing right away rather than making
+  // the user take a separate action. Deliberately OUTSIDE the try above
+  // (Phase 9.4): the transcript is already committed and the job already
+  // SUCCEEDED, so a failure to *queue indexing* must not be reported as a
+  // failed transcription — queueEmbeddingJob is best-effort and logs its
+  // own failure. Same fire-and-forget execution model (and same
+  // serverless caveat) as this function itself — see runEmbeddingJob's
+  // doc comment. If no EmbeddingService is configured, that job will
+  // honestly end up FAILED with a real configuration error rather than
+  // silently doing nothing — the Topic's AI Chat tab surfaces that so it
+  // isn't a silent gap.
+  if (job?.materialId) await queueEmbeddingJob(job.userId, job.materialId);
 }

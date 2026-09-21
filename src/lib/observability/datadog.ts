@@ -30,6 +30,17 @@
  * exists mainly so tests can await it).
  */
 
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
+
+/**
+ * Phase 9.4 — bound every intake call. Callers fire these without awaiting
+ * them, so without a timeout a Datadog outage that accepts connections but
+ * never answers would leave one hung request (socket + buffered payload)
+ * behind for every log/metric emitted, growing for as long as the outage
+ * lasts. Failure is already swallowed and only noted locally.
+ */
+const DATADOG_INTAKE_TIMEOUT_MS = 3000;
+
 export type DatadogLogLevel = "error" | "warn" | "info";
 
 export interface DatadogLogEntry {
@@ -87,20 +98,24 @@ export async function sendDatadogLog(entry: DatadogLogEntry): Promise<void> {
 
   try {
     const { level, message, ...rest } = entry;
-    const res = await fetch(logIntakeUrl(), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "DD-API-KEY": process.env.DD_API_KEY! },
-      body: JSON.stringify([
-        {
-          message,
-          status: level,
-          ddsource: "nodejs",
-          service: process.env.DD_SERVICE || "notes-platform",
-          ddtags: baseTags().join(","),
-          ...rest,
-        },
-      ]),
-    });
+    const res = await fetchWithTimeout(
+      logIntakeUrl(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "DD-API-KEY": process.env.DD_API_KEY! },
+        body: JSON.stringify([
+          {
+            message,
+            status: level,
+            ddsource: "nodejs",
+            service: process.env.DD_SERVICE || "notes-platform",
+            ddtags: baseTags().join(","),
+            ...rest,
+          },
+        ]),
+      },
+      { timeoutMs: DATADOG_INTAKE_TIMEOUT_MS, label: "Datadog log intake" }
+    );
     if (!res.ok) {
       console.error("[observability] Datadog log intake rejected the request", { status: res.status });
     }
@@ -124,20 +139,24 @@ export async function sendDatadogMetric(
 
   try {
     const type = options?.type ?? "count";
-    const res = await fetch(metricsIntakeUrl(), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "DD-API-KEY": process.env.DD_API_KEY! },
-      body: JSON.stringify({
-        series: [
-          {
-            metric: name,
-            type: METRIC_TYPE_CODE[type],
-            points: [{ timestamp: Math.floor(Date.now() / 1000), value }],
-            tags: [...baseTags(), ...(options?.tags ?? [])],
-          },
-        ],
-      }),
-    });
+    const res = await fetchWithTimeout(
+      metricsIntakeUrl(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "DD-API-KEY": process.env.DD_API_KEY! },
+        body: JSON.stringify({
+          series: [
+            {
+              metric: name,
+              type: METRIC_TYPE_CODE[type],
+              points: [{ timestamp: Math.floor(Date.now() / 1000), value }],
+              tags: [...baseTags(), ...(options?.tags ?? [])],
+            },
+          ],
+        }),
+      },
+      { timeoutMs: DATADOG_INTAKE_TIMEOUT_MS, label: "Datadog metrics intake" }
+    );
     if (!res.ok) {
       console.error("[observability] Datadog metrics intake rejected the request", { metric: name, status: res.status });
     }

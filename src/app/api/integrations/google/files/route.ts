@@ -8,6 +8,7 @@ import { assertGoogleDriveSyncAllowed, GoogleDriveNotEnabledError } from "@/lib/
 import { getMaterialLabel } from "@/lib/material-style";
 import { rateLimit } from "@/lib/rate-limit";
 import { UNAUTHORIZED, zodError, jsonError } from "@/lib/api-response";
+import { googleFailureResponse } from "@/lib/google-route-errors";
 
 export async function GET(req: Request) {
   const user = await getSessionUser();
@@ -52,7 +53,6 @@ export async function GET(req: Request) {
   } catch (err) {
     if (err instanceof GoogleNotConnectedError) return jsonError(err.message, 409);
     if (err instanceof GoogleDriveNotEnabledError) return jsonError(err.message, 403);
-    const message = err instanceof Error ? err.message : "Unable to load Google Drive.";
-    return jsonError(message, 502);
+    return googleFailureResponse(err, { route: "integrations/google/files", op: "list", userId: user.id });
   }
 }
