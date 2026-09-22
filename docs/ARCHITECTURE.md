@@ -738,3 +738,67 @@ serverless caveat.
   conversation (harmless: the most recently updated one is used).
 - Flashcard/quiz generation has no server-side in-flight lock; duplicates are
   bounded by the UI loading state, the 5/min rate limit and the monthly quota.
+
+# Phase 9.5 — Performance, database efficiency & runtime optimization
+
+An evidence-driven audit (Prisma schema/query patterns, API routes, RAG
+retrieval, storage, client code) against baseline `46cef33`. Only two
+findings had concrete, reproducible evidence and low-risk fixes; both are
+implemented. No new infrastructure, no schema changes, no caching added.
+
+## Implemented
+
+- **S3 storage-read proxy no longer buffers whole objects to serve a byte
+  range.** `GET /api/storage/read`'s S3 branch called `getObjectBuffer()`
+  (downloads the entire object) and then sliced the requested range out of
+  it in JS — for every `<audio>`/`<video>` seek and the suffix-range
+  duration probe (see `lib/http-range.ts`), not just a full download.
+  `S3StorageService.getObjectRange(key, range?)` now passes a real S3
+  `Range` header (`GetObjectCommand`'s built-in support) so only the
+  requested bytes are ever fetched; the route first calls `headObject` for
+  the real size (needed to resolve a suffix range like `bytes=-100`), then
+  fetches exactly the resolved slice. `getObjectBuffer` itself is
+  unchanged and still used where the whole file is genuinely needed
+  (transcription, document extraction).
+- **Six material-list queries stopped fetching each material's full
+  extracted text/pages.** `Material.extractedText` (`@db.Text`) and
+  `Material.extractedPages` (`Json`) can each hold a full document's
+  extracted text; a plain `findMany()` with no `select` returns every
+  column. None of the list UIs (`MaterialCard`/`MaterialActionsMenu`) read
+  either field — only the material detail route and the Google Doc viewer
+  do. New `lib/material-list-select.ts` (`MATERIAL_LIST_SELECT` /
+  `MaterialListItem`) is now used by the Materials page, `GET
+  /api/materials`, the Subject/Chapter/Topic pages, the Group page, and
+  the dashboard's recent materials — with matching prop-type updates
+  through `MaterialCard`, `MaterialsPanel`, `GroupMaterialsPanel`, and the
+  four Subject/Chapter/Topic/Group tab components. Measured against a real
+  Postgres 16 + pgvector database (all 9 real migrations applied) with 50
+  materials seeded with ~300KB of extracted text/pages each: the same list
+  query returned 30.2MB of JSON before this change and 22.8KB after.
+
+## Investigated, not changed (evidence didn't justify a fix, or the fix
+## would change behavior rather than pure performance)
+
+- **AI chat loads the entire conversation history on every message.**
+  `GET .../messages`'s `db.aIMessage.findMany` has no `take`, and the full
+  result is sent to the model as context on every turn — a real,
+  measurable, and growing cost (linear DB read, and effectively quadratic
+  total tokens billed across a long conversation), with an eventual
+  context-window failure mode for very long AI Tutor sessions. Not fixed
+  here: bounding what history reaches the model changes what the AI can
+  "remember" mid-conversation, which is a product decision (message-count
+  cap? sliding window? summarization of older turns?), not an incidental
+  performance change — see the master prompt's "do NOT change model
+  behavior... merely for performance."
+- **Dashboard's `subjectsWithChapters` query has no `take`.** Bounded in
+  practice by how many Subjects one workspace has; no evidence of this
+  being a real problem at any scale this app runs at today.
+- **`GET /api/search` uses `ILIKE` (`contains`) with no trigram index.**
+  Low-traffic surface (workspace-scoped name/description search, not full
+  content search — that's the separate RAG-backed retrieval path); no
+  index was added without an actual slow-query finding.
+- **`retrieval.ts` binds one SQL parameter per in-scope material id.**
+  Already documented as a Phase 9.4 limitation; no new evidence of it
+  being a practical problem, and duplicating/extending Phase 9.4's
+  concurrency/query design without a concrete regression is explicitly
+  out of scope for this phase.

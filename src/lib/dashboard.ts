@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 
 export async function getDashboardData(workspaceId: string) {
   const [recentSubjects, recentTopics, subjectsWithChapters, subjectCount, recentMaterials] = await Promise.all([
@@ -24,6 +25,7 @@ export async function getDashboardData(workspaceId: string) {
     db.subject.count({ where: { workspaceId, deletedAt: null, archivedAt: null } }),
     db.material.findMany({
       where: { workspaceId, deletedAt: null, archivedAt: null },
+      select: MATERIAL_LIST_SELECT,
       orderBy: { createdAt: "desc" },
       take: 6,
     }),

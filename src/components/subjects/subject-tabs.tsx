@@ -1,6 +1,7 @@
 "use client";
 
-import type { Chapter, Material, Subject } from "@prisma/client";
+import type { Chapter, Subject } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import Link from "next/link";
 import { Library } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -34,7 +35,7 @@ export function SubjectTabs({
   subject: Subject;
   canManage: boolean;
   chapters: ChapterWithTopicCount[];
-  materials: Material[];
+  materials: MaterialListItem[];
 }) {
   const Icon = getSubjectIcon(subject.icon);
   const palette = getSubjectColor(subject.color);

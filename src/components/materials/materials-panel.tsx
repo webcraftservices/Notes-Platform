@@ -1,4 +1,4 @@
-import type { Material } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import { FolderOpen } from "lucide-react";
 import { MaterialCard } from "@/components/materials/material-card";
 import { UploadMaterialDialog } from "@/components/materials/upload-material-dialog";
@@ -15,7 +15,7 @@ export function MaterialsPanel({
   scope,
   emptyDescription,
 }: {
-  materials: Material[];
+  materials: MaterialListItem[];
   scope: Scope;
   emptyDescription?: string;
 }) {

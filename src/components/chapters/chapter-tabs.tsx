@@ -1,6 +1,7 @@
 "use client";
 
-import type { Chapter, Material, Topic } from "@prisma/client";
+import type { Chapter, Topic } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import Link from "next/link";
 import { ListTree } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -30,7 +31,7 @@ export function ChapterTabs({
   chapter: Chapter;
   subjectId: string;
   topics: Topic[];
-  materials: Material[];
+  materials: MaterialListItem[];
 }) {
   return (
     <Tabs defaultValue="overview">

@@ -1,5 +1,6 @@
 import { requireUser, requireChapter } from "@/lib/access";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { CreateTopicDialog } from "@/components/topics/create-topic-dialog";
@@ -22,6 +23,7 @@ export default async function ChapterDetailPage({
     }),
     db.material.findMany({
       where: { chapterId: chapter.id, topicId: null, deletedAt: null, archivedAt: null },
+      select: MATERIAL_LIST_SELECT,
       orderBy: { createdAt: "desc" },
     }),
   ]);

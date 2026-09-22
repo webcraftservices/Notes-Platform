@@ -1,6 +1,6 @@
 "use client";
 
-import type { Material } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { EditableHeader } from "@/components/shared/editable-header";
 import { NotesTabPanel } from "@/components/notes/notes-tab-panel";
@@ -22,7 +22,7 @@ export function TopicTabs({
   topicId: string;
   name: string;
   description: string | null;
-  materials: Material[];
+  materials: MaterialListItem[];
   transcribableMaterials: TranscribableMaterial[];
   /** Phase 8.4 — PlanLimits.advancedFeatures.aiTutor for the current user, resolved server-side in page.tsx. Gates the Tutor entry point below; the real enforcement is server-side in the API routes (assertAiTutorEntitlement) — this is UX only, same "frontend hides, backend is authoritative" split as every other entitlement in this app. */
   aiTutorEnabled: boolean;

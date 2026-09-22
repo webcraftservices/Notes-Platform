@@ -1,6 +1,7 @@
 import { FolderOpen } from "lucide-react";
 import { requireUser, getPrimaryWorkspace } from "@/lib/access";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -41,7 +42,7 @@ export default async function MaterialsPage({
   }
 
   const [materials, usage] = await Promise.all([
-    db.material.findMany({ where, orderBy: { createdAt: "desc" }, take: 200 }),
+    db.material.findMany({ where, select: MATERIAL_LIST_SELECT, orderBy: { createdAt: "desc" }, take: 200 }),
     getStorageUsage(user.id),
   ]);
 

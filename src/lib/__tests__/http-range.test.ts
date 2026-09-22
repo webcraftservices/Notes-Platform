@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRangeHeader } from "@/lib/http-range";
+import { parseRangeHeader, resolveRangeHeader } from "@/lib/http-range";
 
 describe("parseRangeHeader", () => {
   it("returns null when there is no Range header", () => {
@@ -48,5 +48,48 @@ describe("parseRangeHeader", () => {
 
   it("returns null for a non-positive file size", () => {
     expect(parseRangeHeader("bytes=0-10", 0)).toBeNull();
+  });
+});
+
+describe("resolveRangeHeader — Phase 9.5 correction", () => {
+  it("reports 'none' for no header, and parseRangeHeader still returns null for it", () => {
+    expect(resolveRangeHeader(null, 1000)).toEqual({ kind: "none" });
+    expect(resolveRangeHeader(undefined, 1000)).toEqual({ kind: "none" });
+  });
+
+  it("reports 'satisfiable' with the resolved bounds for a normal range", () => {
+    expect(resolveRangeHeader("bytes=0-499", 1000)).toEqual({ kind: "satisfiable", start: 0, end: 499 });
+  });
+
+  it("reports 'unsatisfiable' — not 'none' — when the range starts at or beyond the resource size", () => {
+    expect(resolveRangeHeader("bytes=1000-1500", 1000)).toEqual({ kind: "unsatisfiable" });
+    expect(resolveRangeHeader("bytes=2000-", 1000)).toEqual({ kind: "unsatisfiable" });
+    // The exact case this correction was written for: a huge open-ended
+    // start used to make `start > end` trivially true and get misread as
+    // a malformed header rather than an out-of-bounds one.
+    expect(resolveRangeHeader("bytes=999999999-", 1000)).toEqual({ kind: "unsatisfiable" });
+  });
+
+  it("still reports 'none' (not 'unsatisfiable') for genuinely malformed range syntax", () => {
+    expect(resolveRangeHeader("bytes=500-100", 1000)).toEqual({ kind: "none" }); // start after end, both in-bounds
+    expect(resolveRangeHeader("not-a-range", 1000)).toEqual({ kind: "none" });
+    expect(resolveRangeHeader("bytes=", 1000)).toEqual({ kind: "none" });
+  });
+
+  it("still clamps an oversized suffix range to the whole file — that's satisfiable, not unsatisfiable", () => {
+    expect(resolveRangeHeader("bytes=-5000", 1000)).toEqual({ kind: "satisfiable", start: 0, end: 999 });
+  });
+
+  it("agrees with parseRangeHeader on every case: satisfiable maps to {start,end}, everything else maps to null", () => {
+    const cases = ["bytes=0-499", "bytes=500-", "bytes=-100", "bytes=1000-1500", "bytes=999999999-", "not-a-range", ""];
+    for (const header of cases) {
+      const resolved = resolveRangeHeader(header, 1000);
+      const parsed = parseRangeHeader(header, 1000);
+      if (resolved.kind === "satisfiable") {
+        expect(parsed).toEqual({ start: resolved.start, end: resolved.end });
+      } else {
+        expect(parsed).toBeNull();
+      }
+    }
   });
 });

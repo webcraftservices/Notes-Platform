@@ -1,5 +1,6 @@
 import { requireUser, requireTopic } from "@/lib/access";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import { getPlanLimits } from "@/lib/plans";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
@@ -20,6 +21,7 @@ export default async function TopicDetailPage({
     db.chapter.findUniqueOrThrow({ where: { id: params.chapterId } }),
     db.material.findMany({
       where: { topicId: topic.id, deletedAt: null, archivedAt: null },
+      select: MATERIAL_LIST_SELECT,
       orderBy: { createdAt: "desc" },
     }),
     // Phase 8.4 — resolved here (not inside TopicTabs, a client component)

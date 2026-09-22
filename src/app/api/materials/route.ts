@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import {
   getSessionUser,
   getPrimaryWorkspace,
@@ -67,6 +68,7 @@ export async function GET(req: Request) {
 
   const materials = await db.material.findMany({
     where,
+    select: MATERIAL_LIST_SELECT,
     orderBy: { createdAt: "desc" },
     take: 200,
   });

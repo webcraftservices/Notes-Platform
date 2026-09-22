@@ -15,7 +15,8 @@ import { GroupMaterialsPanel } from "@/components/groups/group-materials-panel";
 import { GroupActivityPanel, type GroupActivityEntry } from "@/components/groups/group-activity-panel";
 import { AIChatPanel } from "@/components/ai/ai-chat-panel";
 import type { SubjectCardData } from "@/components/subjects/subject-card";
-import type { MemberRole, Material } from "@prisma/client";
+import type { MemberRole } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 
 export function GroupTabs({
   groupId,
@@ -40,7 +41,7 @@ export function GroupTabs({
   invitations: GroupInvitationData[];
   canManage: boolean;
   subjects: SubjectCardData[];
-  materials: Material[];
+  materials: MaterialListItem[];
   activity: GroupActivityEntry[];
   activityNextCursor: string | null;
 }) {

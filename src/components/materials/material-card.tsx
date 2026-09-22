@@ -1,11 +1,11 @@
 import Link from "next/link";
-import type { Material } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import { getMaterialIcon, getMaterialLabel, formatBytes, formatDuration } from "@/lib/material-style";
 import { MaterialActionsMenu } from "@/components/materials/material-actions-menu";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, AlertCircle } from "lucide-react";
 
-export function MaterialCard({ material }: { material: Material }) {
+export function MaterialCard({ material }: { material: MaterialListItem }) {
   const Icon = getMaterialIcon(material.type);
 
   return (

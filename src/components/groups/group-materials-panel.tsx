@@ -1,5 +1,5 @@
 import { FileText } from "lucide-react";
-import type { Material } from "@prisma/client";
+import type { MaterialListItem } from "@/lib/material-list-select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaterialCard } from "@/components/materials/material-card";
 
@@ -14,7 +14,7 @@ import { MaterialCard } from "@/components/materials/material-card";
  * app/(app)/groups/[groupId]/page.tsx and passed down as props, same as
  * GroupSubjectsPanel.
  */
-export function GroupMaterialsPanel({ materials }: { materials: Material[] }) {
+export function GroupMaterialsPanel({ materials }: { materials: MaterialListItem[] }) {
   if (materials.length === 0) {
     return (
       <EmptyState

@@ -1,6 +1,7 @@
 import { requireUser, requireSubject, getGroupRole } from "@/lib/access";
 import { roleMeetsMinimum } from "@/lib/group-role";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { CreateChapterDialog } from "@/components/chapters/create-chapter-dialog";
@@ -45,6 +46,7 @@ export default async function SubjectDetailPage({ params }: { params: { subjectI
     }),
     db.material.findMany({
       where: { subjectId: subject.id, chapterId: null, deletedAt: null, archivedAt: null },
+      select: MATERIAL_LIST_SELECT,
       orderBy: { createdAt: "desc" },
     }),
   ]);

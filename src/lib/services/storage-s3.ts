@@ -112,7 +112,9 @@ export class S3StorageService implements StorageService {
    * the transcription orchestrator) when a real cloud API needs the actual
    * bytes rather than a URL the browser can fetch. Downloads the object
    * fully into memory; fine for audio files, not something to do for
-   * arbitrarily large objects.
+   * arbitrarily large objects. For serving partial content to a browser
+   * (seeking playback, PDF byte-range viewers), use getObjectRange instead
+   * — it never buffers more than what was actually requested.
    */
   async getObjectBuffer(key: string): Promise<Buffer> {
     const res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), {
@@ -123,6 +125,37 @@ export class S3StorageService implements StorageService {
     const chunks: Uint8Array[] = [];
     // AWS SDK v3's Body is a web/node ReadableStream depending on runtime;
     // both expose an async iterator.
+    for await (const chunk of body as AsyncIterable<Uint8Array>) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * Phase 9.5 — fetches exactly the requested byte range (or the whole
+   * object, if `range` is omitted) using S3's own `Range` request header,
+   * instead of always downloading the entire object and slicing it in
+   * memory. Used by `/api/storage/read` so a seek in a long lecture
+   * recording, or a PDF viewer's page-range fetch, transfers only the
+   * bytes actually requested — not the whole file every time.
+   *
+   * `range` must already be a validated, in-bounds `{start, end}` pair
+   * (inclusive, 0-indexed) — get one from `parseRangeHeader` against a
+   * real object size (`headObject`) before calling this; a range is
+   * never guessed or normalized here.
+   */
+  async getObjectRange(key: string, range?: { start: number; end: number }): Promise<Buffer> {
+    const res = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+      }),
+      { abortSignal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS) }
+    );
+    const body = res.Body;
+    if (!body) throw new Error(`Object ${key} has no body`);
+    const chunks: Uint8Array[] = [];
     for await (const chunk of body as AsyncIterable<Uint8Array>) {
       chunks.push(chunk);
     }

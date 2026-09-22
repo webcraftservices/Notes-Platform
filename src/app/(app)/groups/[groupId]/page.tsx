@@ -1,5 +1,6 @@
 import { requireUser, requireGroup, getGroupRole } from "@/lib/access";
 import { db } from "@/lib/db";
+import { MATERIAL_LIST_SELECT } from "@/lib/material-list-select";
 import { roleMeetsMinimum } from "@/lib/group-role";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
@@ -49,6 +50,7 @@ export default async function GroupDetailPage({ params }: { params: { groupId: s
     }),
     db.material.findMany({
       where: { groupId: group.id, deletedAt: null, archivedAt: null },
+      select: MATERIAL_LIST_SELECT,
       orderBy: { createdAt: "desc" },
       take: 50,
     }),
