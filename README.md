@@ -105,6 +105,9 @@ Drive/Docs file-access scopes (Phase 7) are a separate, later consent step
   structure, full 9-phase roadmap, and the Phase 1 verification checklist.
 - `.env.example` — every environment variable used across all 9 phases,
   with notes on which phase activates each one.
+- `docs/production-readiness.md` — Phase 9.6 production-readiness audit
+  findings and the operational runbook (backup/restore, secret recovery,
+  post-deploy smoke checklist).
 
 ## Status
 
