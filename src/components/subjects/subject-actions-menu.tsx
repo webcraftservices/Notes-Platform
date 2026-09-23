@@ -50,6 +50,7 @@ export function SubjectActionsMenu({
       <DropdownMenu>
         <DropdownMenuTrigger
           onClick={(e) => e.preventDefault()}
+          aria-label="Subject actions"
           className="flex h-7 w-7 items-center justify-center rounded-sm bg-paper-raised text-ink-muted shadow-subtle transition-colors hover:text-ink dark:bg-graphite-800 dark:text-white/50 dark:hover:text-white"
         >
           <MoreHorizontal className="h-4 w-4" />

@@ -26,6 +26,20 @@ export function computeSafeProgress(currentTime: number, duration: number): numb
   return Math.min(1, Math.max(0, p));
 }
 
+/** Accessible name for the play/pause button — Phase 9.7 (P1 audit finding). */
+export function getPlaybackLabel(playing: boolean): string {
+  return playing ? "Pause" : "Play";
+}
+
+/**
+ * Accessible name for the mute button — Phase 9.7 (P1 audit finding).
+ * Mirrors the icon's own condition (`muted || volume === 0` shows the
+ * "muted" glyph) so the label never disagrees with what's displayed.
+ */
+export function getMuteLabel(muted: boolean, volume: number): string {
+  return muted || volume === 0 ? "Unmute" : "Mute";
+}
+
 export const AudioPlayer = forwardRef<
   AudioPlayerHandle,
   { src: string; title: string; fallbackDurationSeconds?: number | null; startAtSeconds?: number }
@@ -369,6 +383,7 @@ export const AudioPlayer = forwardRef<
           <button
             onClick={togglePlay}
             disabled={!loaded}
+            aria-label={getPlaybackLabel(playing)}
             className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-ink text-paper transition-transform hover:scale-105 disabled:opacity-50 dark:bg-white dark:text-graphite-950"
           >
             {playing ? <Pause className="h-5 w-5" fill="currentColor" /> : <Play className="ml-0.5 h-5 w-5" fill="currentColor" />}
@@ -445,7 +460,11 @@ export const AudioPlayer = forwardRef<
           >
             {speed}×
           </button>
-          <button onClick={toggleMute} className="text-ink-muted dark:text-white/50">
+          <button
+            onClick={toggleMute}
+            aria-label={getMuteLabel(muted, volume)}
+            className="text-ink-muted dark:text-white/50"
+          >
             {muted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
           <input

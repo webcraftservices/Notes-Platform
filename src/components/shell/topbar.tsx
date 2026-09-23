@@ -26,6 +26,7 @@ export function Topbar({ children, actions }: { children: React.ReactNode; actio
         <NotificationBell />
         <button
           onClick={() => setOpen(true)}
+          aria-label="Search or jump to…"
           className="flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-xs text-ink-faint transition-colors hover:border-ink-faint hover:text-ink-muted dark:border-line-dark dark:hover:text-white/70"
         >
           <Search className="h-3.5 w-3.5" />

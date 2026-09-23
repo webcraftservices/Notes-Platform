@@ -7,6 +7,14 @@ import { cn } from "@/lib/utils";
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
 
+/**
+ * Phase 9.7 (P2 audit finding) — keeps the dialog fully reachable
+ * (title, description, close button, tabs, body) on short viewports by
+ * capping height and allowing the whole dialog chrome to scroll, rather
+ * than relying on each dialog body to cap itself individually.
+ */
+export const DIALOG_CONTENT_VIEWPORT_SAFE_CLASSES = "max-h-[90vh] overflow-y-auto";
+
 export function DialogContent({
   className,
   children,
@@ -24,6 +32,7 @@ export function DialogContent({
       <DialogPrimitive.Content
         className={cn(
           "fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg bg-paper-raised p-6 shadow-panel",
+          DIALOG_CONTENT_VIEWPORT_SAFE_CLASSES,
           "dark:bg-graphite-900 dark:border dark:border-line-dark",
           "data-[state=open]:animate-in data-[state=open]:fade-in data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=closed]:zoom-out-95",
           className

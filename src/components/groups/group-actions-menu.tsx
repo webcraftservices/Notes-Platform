@@ -67,7 +67,10 @@ export function GroupActionsMenu({
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger className="flex h-8 w-8 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-paper hover:text-ink dark:text-white/50 dark:hover:bg-graphite-800 dark:hover:text-white">
+        <DropdownMenuTrigger
+          aria-label="Group actions"
+          className="flex h-8 w-8 items-center justify-center rounded-sm text-ink-muted transition-colors hover:bg-paper hover:text-ink dark:text-white/50 dark:hover:bg-graphite-800 dark:hover:text-white"
+        >
           <MoreHorizontal className="h-4 w-4" />
         </DropdownMenuTrigger>
         <DropdownMenuContent>
