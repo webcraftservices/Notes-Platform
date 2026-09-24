@@ -226,6 +226,23 @@ describe("POST /api/ai/conversations/[conversationId]/messages", () => {
     );
   });
 
+  it("bounds the prior-message history fetch instead of loading the entire conversation", async () => {
+    await POST(makeRequest({ content: "hello" }), { params: { conversationId: "conv-1" } });
+
+    expect(db.aIMessage.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { conversationId: "conv-1" },
+        orderBy: { createdAt: "asc" },
+        take: expect.any(Number),
+      })
+    );
+    // Negative take = "last N, still oldest-first" (Prisma's documented
+    // pattern) — a positive/zero value here would silently flip back to
+    // fetching the *oldest* messages instead of the most recent ones.
+    const call = db.aIMessage.findMany.mock.calls[0]?.[0];
+    expect(call?.take).toBeLessThan(0);
+  });
+
   it("attributes usage to the requesting user even for a group-scoped conversation, never to the group itself", async () => {
     access.getAccessibleAIScope.mockResolvedValue({
       ownerType: "group",

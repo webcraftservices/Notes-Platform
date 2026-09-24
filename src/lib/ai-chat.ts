@@ -53,6 +53,24 @@ export interface StoredMessage {
   content: string;
 }
 
+/**
+ * Caps how many prior turns of a conversation are replayed into the
+ * AIService.chat() call (POST .../messages/route.ts). Without a bound, the
+ * `db.aIMessage.findMany` there was genuinely unbounded — every message a
+ * conversation had ever accumulated was re-sent as context on every new
+ * message, growing token cost per turn without limit and, in a long-running
+ * conversation (Tutor mode in particular), eventually exceeding the
+ * provider's context window outright.
+ *
+ * Deliberately scoped to only the messages sent to the model: the
+ * conversation's full history is still stored forever and still returned in
+ * full for on-screen display (GET /api/ai/conversations) — this constant
+ * changes what the AI reasons over, not what the user can see or scroll
+ * back through. 40 messages (~20 exchanges) is generous headroom for normal
+ * conversational continuity while keeping per-request token cost bounded.
+ */
+export const MAX_CHAT_HISTORY_MESSAGES = 40;
+
 /** Maps persisted AIMessage rows to the AIChatMessage[] shape AIService.chat() expects. */
 export function toChatMessages(messages: StoredMessage[]): AIChatMessage[] {
   return messages.map((m) => ({ role: m.role.toLowerCase() as AIChatMessage["role"], content: m.content }));

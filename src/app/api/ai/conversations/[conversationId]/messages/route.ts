@@ -3,7 +3,13 @@ import { db } from "@/lib/db";
 import { getSessionUser, getAccessibleAIConversation, getAccessibleAIScope, NotAuthorizedError } from "@/lib/access";
 import { sendAIMessageSchema } from "@/lib/validation/ai";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
-import { buildContextBlock, chunksToSources, toChatMessages, TUTOR_SYSTEM_INSTRUCTION } from "@/lib/ai-chat";
+import {
+  buildContextBlock,
+  chunksToSources,
+  toChatMessages,
+  TUTOR_SYSTEM_INSTRUCTION,
+  MAX_CHAT_HISTORY_MESSAGES,
+} from "@/lib/ai-chat";
 import { getAIService } from "@/lib/services/ai";
 import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 import { zodError, jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, logServerError } from "@/lib/api-response";
@@ -139,9 +145,15 @@ export async function POST(req: Request, { params }: { params: { conversationId:
     // rethrow — mapped to its own stable 429 below.
     await assertWithinAIQuota(user.id);
 
+    // Bounded to the most recent MAX_CHAT_HISTORY_MESSAGES turns — see that
+    // constant's doc comment (lib/ai-chat.ts) for why. Negative `take` with
+    // an ascending orderBy is Prisma's documented way to get the last N
+    // rows while still returning them oldest-first, exactly the order
+    // toChatMessages()/AIService.chat() expect.
     const priorMessages = await db.aIMessage.findMany({
       where: { conversationId: conversation.id },
       orderBy: { createdAt: "asc" },
+      take: -MAX_CHAT_HISTORY_MESSAGES,
     });
 
     const chunks = await retrieveRelevantChunks(parsed.data.content, scope, user.id);
