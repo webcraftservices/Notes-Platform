@@ -107,7 +107,7 @@ export async function getQuizProgress(userId: string, scope?: ResolvedAIScope): 
 
   return {
     attempts: attempts.length,
-    latest: history[0],
+    latest: history[0] ?? null,
     bestScore,
     averageScore,
     history,
