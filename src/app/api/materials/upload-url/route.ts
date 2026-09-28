@@ -18,6 +18,7 @@ export async function POST(req: Request) {
   if (!parsed.success) return zodError(parsed.error);
   const { filename, mimeType, sizeBytes, ...scopeInput } = parsed.data;
 
+  // Normalize MIME: strip any parameters (e.g. "audio/webm;codecs=opus")
   const mimeTypeStr = String(mimeType ?? "");
   const baseMimeType = ((mimeTypeStr.split(";")[0] ?? "").trim()).toLowerCase();
 
@@ -73,6 +74,7 @@ export async function POST(req: Request) {
       type: materialType,
       title: String(filename).replace(/\.[^/.]+$/, "") || String(filename),
       originalFilename: String(filename),
+      // Persist the normalized base MIME type (without parameters)
       mimeType: baseMimeType,
       storageKey,
       status: "UPLOADING",
@@ -89,6 +91,9 @@ export async function POST(req: Request) {
   return NextResponse.json({
     materialId: material.id,
     uploadUrl,
+    // For the S3 backend the browser needs to PUT with this exact method +
+    // header; for the local backend it's the same PUT-with-body contract,
+    // so the client doesn't need to branch on provider at all.
     method: "PUT",
     headers: { "Content-Type": baseMimeType },
   });

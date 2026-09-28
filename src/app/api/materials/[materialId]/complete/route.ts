@@ -10,6 +10,7 @@ import { extractMetadata } from "@/lib/metadata-extraction";
 import { queueDocumentExtractionIfNeeded } from "@/lib/document-extraction";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, jsonError, logServerError } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
+import type { PlanLimits } from "@/lib/plans";
 
 /** Logs "material.added" once a group Material actually reaches READY (not on FAILED). */
 async function logMaterialAddedIfGroup(
@@ -103,7 +104,7 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
   // server-side after the upload.
   if (storage instanceof S3StorageService) {
     let head: { sizeBytes: number } | null = null;
-    let plan: any;
+    let plan: PlanLimits;
     let remainingBytes: number = 0;
 
     try {
