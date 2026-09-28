@@ -1,5 +1,4 @@
 import path from "path";
-import JSZipImport from "jszip";
 import type { DocumentProcessingService } from "./interfaces";
 import { getStorageService } from "./storage";
 import { LocalStorageService } from "./storage-local";
@@ -24,9 +23,6 @@ interface JSZipFileEntry {
 interface JSZipInstance {
   files: Record<string, JSZipFileEntry>;
 }
-const JSZip = JSZipImport as unknown as {
-  loadAsync(data: Buffer): Promise<JSZipInstance>;
-};
 
 /**
  * Local, provider-free DocumentProcessingService for PDF/DOCX/PPTX text
@@ -184,6 +180,8 @@ function extractSlideText(xml: string): string {
 async function extractPptxText(buffer: Buffer): Promise<{ text: string; pages: { pageNumber: number; text: string }[] }> {
   let zip: JSZipInstance;
   try {
+    const JSZipModule = await import("jszip");
+    const JSZip = JSZipModule.default as unknown as { loadAsync(data: Buffer): Promise<JSZipInstance> };
     zip = await JSZip.loadAsync(buffer);
   } catch (err) {
     throw new Error(

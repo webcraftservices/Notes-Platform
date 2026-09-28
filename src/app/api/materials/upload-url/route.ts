@@ -18,7 +18,6 @@ export async function POST(req: Request) {
   if (!parsed.success) return zodError(parsed.error);
   const { filename, mimeType, sizeBytes, ...scopeInput } = parsed.data;
 
-  // Normalize MIME: strip any parameters (e.g. "audio/webm;codecs=opus")
   const mimeTypeStr = String(mimeType ?? "");
   const baseMimeType = ((mimeTypeStr.split(";")[0] ?? "").trim()).toLowerCase();
 
@@ -30,7 +29,12 @@ export async function POST(req: Request) {
     );
   }
 
-  const { plan, remainingBytes } = await getStorageUsage(user.id);
+  const [usage, workspace] = await Promise.all([
+    getStorageUsage(user.id),
+    getPrimaryWorkspace(user.id)
+  ]);
+  const { plan, remainingBytes } = usage;
+
   if (sizeBytes > plan.maxFileSizeBytes) {
     return jsonError(
       `File exceeds your plan's ${Math.round(plan.maxFileSizeBytes / (1024 * 1024))}MB per-file limit.`,
@@ -40,8 +44,6 @@ export async function POST(req: Request) {
   if (sizeBytes > remainingBytes) {
     return jsonError("This would exceed your plan's storage limit.", 413);
   }
-
-  const workspace = await getPrimaryWorkspace(user.id);
 
   let scope;
   try {
@@ -71,7 +73,6 @@ export async function POST(req: Request) {
       type: materialType,
       title: String(filename).replace(/\.[^/.]+$/, "") || String(filename),
       originalFilename: String(filename),
-      // Persist the normalized base MIME type (without parameters)
       mimeType: baseMimeType,
       storageKey,
       status: "UPLOADING",
@@ -88,9 +89,6 @@ export async function POST(req: Request) {
   return NextResponse.json({
     materialId: material.id,
     uploadUrl,
-    // For the S3 backend the browser needs to PUT with this exact method +
-    // header; for the local backend it's the same PUT-with-body contract,
-    // so the client doesn't need to branch on provider at all.
     method: "PUT",
     headers: { "Content-Type": baseMimeType },
   });

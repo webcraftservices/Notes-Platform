@@ -49,6 +49,7 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
   if (!user) return UNAUTHORIZED();
 
   const material = await db.material.findUnique({ where: { id: params.materialId } });
+
   if (!material) return NOT_FOUND();
   if (material.ownerId !== user.id) return FORBIDDEN();
   if (material.status !== "UPLOADING") {
@@ -101,9 +102,18 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
   // the storage quota and the per-file plan limit was never enforced
   // server-side after the upload.
   if (storage instanceof S3StorageService) {
-    let head: { sizeBytes: number } | null;
+    let head: { sizeBytes: number } | null = null;
+    let plan: any;
+    let remainingBytes: number = 0;
+
     try {
-      head = await storage.headObject(material.storageKey);
+      const [headResult, usageResult] = await Promise.all([
+        storage.headObject(material.storageKey),
+        getStorageUsage(user.id)
+      ]);
+      head = headResult;
+      plan = usageResult.plan;
+      remainingBytes = usageResult.remainingBytes;
     } catch (err) {
       // Could not check (outage/timeout). The material stays UPLOADING —
       // completing is idempotent, so the client can simply try again.
@@ -121,7 +131,6 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
       });
     }
 
-    const { plan, remainingBytes } = await getStorageUsage(user.id);
     const rejection =
       head.sizeBytes === 0
         ? { message: "The uploaded file is empty.", status: 400 }
@@ -147,12 +156,14 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
     }
 
     const { material: updated, won } = await settleUpload(material.id, { status: "READY", sizeBytes: head.sizeBytes });
+
     if (won) {
       await logMaterialAddedIfGroup(updated, user.id);
       // Document extraction always runs as a fire-and-forget background job
       // regardless of storage backend — it never blocks this response.
       void queueDocumentExtractionIfNeeded(updated, user.id);
     }
+
     return NextResponse.json({ material: updated });
   }
 

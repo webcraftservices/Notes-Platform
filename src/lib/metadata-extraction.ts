@@ -1,6 +1,3 @@
-import { imageSize } from "image-size";
-import { PDFDocument } from "pdf-lib";
-import { parseBuffer } from "music-metadata";
 import type { MaterialType } from "@prisma/client";
 
 export interface ExtractedMetadata {
@@ -28,16 +25,19 @@ export async function extractMetadata(
 ): Promise<ExtractedMetadata> {
   try {
     if (type === "IMAGE") {
+      const { imageSize } = await import("image-size");
       const dimensions = imageSize(buffer);
       return { width: dimensions.width, height: dimensions.height };
     }
 
     if (type === "PDF") {
+      const { PDFDocument } = await import("pdf-lib");
       const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
       return { pageCount: doc.getPageCount() };
     }
 
     if (type === "AUDIO" || type === "VIDEO") {
+      const { parseBuffer } = await import("music-metadata");
       const parsed = await parseBuffer(buffer);
       return { durationSeconds: parsed.format.duration ? Math.round(parsed.format.duration) : undefined };
     }

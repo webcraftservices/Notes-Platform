@@ -16,12 +16,12 @@
  */
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  process.env.NODE_ENV === 'development' ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "media-src 'self' blob:",
-  "connect-src 'self'",
+  "connect-src 'self' https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com",
   "frame-src 'self'",
   "frame-ancestors 'self'",
   "object-src 'none'",
