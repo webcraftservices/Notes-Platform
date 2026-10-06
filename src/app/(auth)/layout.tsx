@@ -6,9 +6,9 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <div className="mx-auto w-full max-w-sm">
           <div className="mb-10 flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-sm bg-ink text-[13px] font-display font-semibold text-paper dark:bg-white dark:text-graphite-950">
-              K
+              Z
             </div>
-            <span className="font-display text-[15px] font-semibold tracking-tight">Knowledge</span>
+            <span className="font-display text-[15px] font-semibold tracking-tight">Zenote</span>
           </div>
           {children}
         </div>

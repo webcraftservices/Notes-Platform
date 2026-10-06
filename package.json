@@ -1,10 +1,10 @@
 {
-  "name": "knowledge-platform",
+  "name": "zenote",
   "version": "0.1.0",
   "private": true,
   "description": "AI-powered notes, lecture intelligence & collaborative knowledge platform",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 127.0.0.1",
     "postinstall": "patch-package",
     "build": "next build",
     "start": "next start",

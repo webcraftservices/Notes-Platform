@@ -48,7 +48,7 @@ const GEMINI_RETRY_OPTIONS = { attempts: 2, initialDelay: 1, maxDelay: 4, httpSt
  * (buildContextBlock/chunksToSources), and every provider is free to
  * phrase its own grounding instructions however suits that model best.
  */
-const HALLUCINATION_CONTROL_INSTRUCTION = `You are the AI assistant built into Notes Platform, a study and knowledge
+const HALLUCINATION_CONTROL_INSTRUCTION = `You are the AI assistant built into Zenote, a study and knowledge
 platform. You help the user understand their own uploaded course materials
 (lecture recordings, PDFs, documents, and notes).
 

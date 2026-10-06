@@ -147,9 +147,9 @@ describe("getQuizProgress", () => {
 
     await getQuizProgress("user-a");
 
-    const callArgs = db.quizAttempt.findMany.mock.calls[0][0];
-    expect(callArgs.where.userId).toBe("user-a");
-    expect(callArgs.where.userId).not.toBe("user-b");
+    const callArgs = db.quizAttempt.findMany.mock.calls[0]?.[0] as any;
+    expect(callArgs?.where?.userId).toBe("user-a");
+    expect(callArgs?.where?.userId).not.toBe("user-b");
   });
 });
 
@@ -212,8 +212,8 @@ describe("getTutorActivity", () => {
 
     const activity = await getTutorActivity("user-1");
 
-    const callArgs = db.aIConversation.findMany.mock.calls[0][0];
-    expect(callArgs.where.kind).toBe("TUTOR");
+    const callArgs = db.aIConversation.findMany.mock.calls[0]?.[0] as any;
+    expect(callArgs?.where?.kind).toBe("TUTOR");
     expect(activity.sessions).toBe(1);
   });
 });

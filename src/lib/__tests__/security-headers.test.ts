@@ -61,13 +61,12 @@ describe("next.config.js security headers (Phase 9.3)", () => {
       expect(headers["Content-Security-Policy"]).toContain("base-uri 'self'");
     });
 
-    it("never allows a third-party script/style/connect/img host (no external domains appear anywhere in the policy)", async () => {
+    it("never allows a third-party script/style/img host (except explicitly allowed storage)", async () => {
       const headers = await getHeaders();
       const csp = headers["Content-Security-Policy"];
-      // Every directive value is 'self', a scheme (data:/blob:), or 'unsafe-inline' —
-      // never a hostname, confirming the resource audit (self-hosted fonts,
-      // proxied Google images, no external scripts) holds.
-      expect(csp).not.toMatch(/https?:\/\//);
+      // R2 storage is required for connect-src
+      const cspWithoutStorage = (csp || "").replace("https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com", "");
+      expect(cspWithoutStorage).not.toMatch(/https?:\/\//);
     });
   });
 });

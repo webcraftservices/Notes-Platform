@@ -177,6 +177,37 @@ mandated by the current architecture.
   the object store (or vice versa) will leave `Material` rows pointing at
   missing or renamed keys. Restore both stores to the same point in time
   where possible.
+- **CORS Configuration**: Because the application uses direct presigned uploads,
+  the browser (from your application's origin) uploads files directly to the S3 bucket.
+  You MUST configure a CORS policy on the bucket to allow these `PUT` requests.
+  For local development against Cloudflare R2, configure the following CORS rules
+  via the Cloudflare Dashboard (or AWS CLI if your key has bucket-level permissions):
+  ```json
+  [
+    {
+      "AllowedOrigins": [
+        "http://localhost:3000",
+        "http://localhost:3001"
+      ],
+      "AllowedMethods": [
+        "PUT",
+        "GET",
+        "HEAD",
+        "POST"
+      ],
+      "AllowedHeaders": [
+        "*"
+      ],
+      "ExposeHeaders": [
+        "ETag",
+        "Content-Length",
+        "Content-Type"
+      ],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+  ```
+  Ensure you add your actual production domain to `AllowedOrigins` for production deployment.
 
 ### Environment secrets
 

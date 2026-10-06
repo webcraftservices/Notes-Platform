@@ -41,7 +41,7 @@ export function MobileNavDrawer({
           <div className="flex h-14 items-center justify-between px-4">
             <div className="flex items-center gap-2">
               <div className="flex h-6 w-6 items-center justify-center rounded-sm bg-ink text-[12px] font-display font-semibold text-paper dark:bg-white dark:text-graphite-950">
-                K
+                Z
               </div>
               <span className="truncate font-display text-sm font-semibold text-ink dark:text-white">
                 {workspaceName}

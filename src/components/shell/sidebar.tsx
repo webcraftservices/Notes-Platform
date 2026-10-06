@@ -26,7 +26,7 @@ export function Sidebar({
     <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-line bg-paper dark:border-line-dark dark:bg-graphite-950 lg:flex">
       <div className="flex h-14 items-center gap-2 px-4">
         <div className="flex h-6 w-6 items-center justify-center rounded-sm bg-ink text-[12px] font-display font-semibold text-paper dark:bg-white dark:text-graphite-950">
-          K
+          Z
         </div>
         <span className="truncate font-display text-sm font-semibold text-ink dark:text-white">
           {workspaceName}

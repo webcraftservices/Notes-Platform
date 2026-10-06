@@ -46,8 +46,8 @@ interface GoogleOAuthConfig {
 }
 
 export function getGoogleOAuthConfig(): GoogleOAuthConfig {
-  const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+  const clientId = (process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || "").trim();
   if (!clientId || !clientSecret) {
     throw new GoogleNotConfiguredError([
       "GOOGLE_DRIVE_CLIENT_ID (or GOOGLE_CLIENT_ID)",

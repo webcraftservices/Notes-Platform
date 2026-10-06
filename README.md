@@ -1,4 +1,4 @@
-# Knowledge Platform
+# Zenote
 
 AI-powered notes, lecture intelligence & collaborative knowledge platform.
 Built in phases — see `docs/ARCHITECTURE.md` for the full roadmap and

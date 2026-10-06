@@ -1,5 +1,5 @@
 /**
- * Design tokens for the Knowledge Platform.
+ * Design tokens for Zenote.
  *
  * Direction: "scholar's desk, not SaaS dashboard." The product's core act is
  * marking up source material — a lecture, a PDF, a photographed whiteboard —

@@ -67,7 +67,7 @@ describe("GeminiAIService.chat", () => {
 
     const params = generateContent.mock.calls[0]![0] as GenerateContentParameters;
     const systemInstruction = params.config?.systemInstruction as string;
-    expect(systemInstruction).toContain("Notes Platform");
+    expect(systemInstruction).toContain("Zenote");
     expect(systemInstruction.toLowerCase()).toContain("wasn't found in the user's uploaded materials");
     expect(systemInstruction.toLowerCase()).toContain("never fabricate");
   });
@@ -228,7 +228,7 @@ describe("GeminiAIService.generateNotes", () => {
     const params = generateContent.mock.calls[0]![0] as GenerateContentParameters;
     expect(params.config?.responseMimeType).toBe("application/json");
     expect(params.config?.responseSchema).toBeDefined();
-    expect(params.config?.systemInstruction).toContain("Notes Platform");
+    expect(params.config?.systemInstruction).toContain("Zenote");
   });
 
   it("rejects a non-array JSON response", async () => {

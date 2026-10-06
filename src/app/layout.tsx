@@ -12,7 +12,7 @@ const sans = Inter({ subsets: ["latin"], variable: "--font-sans" });
 const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "Knowledge Platform",
+  title: "Zenote",
   description: "Record, understand, organize, search, and ask — an AI-native knowledge workspace.",
 };
 
