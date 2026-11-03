@@ -1,8 +1,17 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
+
+export const metadata: Metadata = {
+  title: "Onboarding",
+  robots: {
+    index: false,
+    follow: false,
+  },
+};
 
 export default async function OnboardingPage() {
   const session = await getServerSession(authOptions);

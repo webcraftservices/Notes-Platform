@@ -1,0 +1,560 @@
+/* ==========================================================================
+   FolderTransfer Styles — Seamless, frameless, transparent canvas
+   ========================================================================== */
+
+.ft-wrap {
+  width: 100%;
+  max-width: 680px;
+  margin-inline: auto;
+  background: transparent;
+  overflow: visible;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ft-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1230 / 630;
+  container-type: inline-size;
+  user-select: none;
+  background: transparent;
+}
+
+/* Scaled illustration scene — fills visual space without altering internal alignments */
+.ft-scene {
+  position: absolute;
+  inset: 0;
+  transform: scale(1.24);
+  transform-origin: 50% 54%;
+}
+
+/* ---------- link between folder and server ---------- */
+.ft-link {
+  position: absolute;
+  left: 45cqw;
+  width: 16cqw;
+  top: 0;
+  height: 100%;
+  overflow: hidden;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.ft-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed rgba(255, 255, 255, 0.18);
+}
+
+.ft-streak {
+  position: absolute;
+  left: 0;
+  width: 5.5cqw;
+  height: max(1.5px, 0.3cqw);
+  margin-top: calc(max(1.5px, 0.3cqw) / -2);
+  border-radius: 99px;
+  background: linear-gradient(90deg, transparent 0%, rgba(59, 130, 246, 0.9) 65%, #bfdbfe 100%);
+  filter: drop-shadow(0 0 3px rgba(59, 130, 246, 0.95));
+  opacity: 0;
+  animation: ft-flow var(--d, 3s) cubic-bezier(0.4, 0, 0.6, 1) var(--delay, 0s) infinite;
+}
+
+@keyframes ft-flow {
+  0%   { transform: translateX(-6cqw); opacity: 0; }
+  15%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { transform: translateX(16cqw); opacity: 0; }
+}
+
+/* ---------- folder ---------- */
+.ft-folder {
+  position: absolute;
+  left: 23.8cqw;
+  top: 20.9cqw;
+  width: 22cqw;
+  height: 16.5cqw;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  z-index: 3;
+  outline: none;
+  font: inherit;
+}
+
+.ft-folder:focus-visible {
+  outline: 2px solid #a07cfe;
+  outline-offset: 1.2cqw;
+  border-radius: 2.4cqw;
+}
+
+.ft-back {
+  position: absolute;
+  inset: 0;
+  border-radius: 2.1cqw;
+  background: linear-gradient(180deg, #ffa30f 0%, #ec8400 100%);
+  box-shadow: 0 0.1cqw 0 rgba(255, 255, 255, 0.25) inset;
+}
+
+.ft-back::before {
+  /* tab */
+  content: "";
+  position: absolute;
+  left: 9%;
+  bottom: calc(100% - 1px);
+  width: 35%;
+  height: 2.5cqw;
+  background: linear-gradient(180deg, #ffb02a, #ffa30f);
+  border-radius: 1.1cqw 1.1cqw 0 0;
+}
+
+.ft-pocket {
+  /* depth shadow inside the folder */
+  position: absolute;
+  inset: 0;
+  border-radius: 2.1cqw;
+  background: linear-gradient(180deg, rgba(120, 50, 0, 0) 0%, rgba(120, 50, 0, 0.35) 100%);
+  transition: opacity 0.5s ease;
+  opacity: 0.55;
+}
+
+.ft-front {
+  position: absolute;
+  left: -0.25cqw;
+  right: -0.25cqw;
+  bottom: 0;
+  height: 78%;
+  border-radius: 2cqw;
+  background: linear-gradient(180deg, #ffc125 0%, #ffab0a 45%, #ff9a00 100%);
+  box-shadow:
+    0 0.12cqw 0 rgba(255, 255, 255, 0.4) inset,
+    0 -0.7cqw 1.4cqw rgba(110, 45, 0, 0.35),
+    0 2cqw 3cqw -0.5cqw rgba(0, 0, 0, 0.55);
+  transition: height 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 5;
+}
+
+/* ---------- cards (sandwiched between back and front) ---------- */
+.ft-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16.5cqw;
+  height: 11.5cqw;
+  margin: -5.75cqw 0 0 -8.25cqw;
+  border-radius: 1.3cqw;
+  overflow: hidden;
+  background: #16161a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2) inset, 0 0.8cqw 1.8cqw rgba(0, 0, 0, 0.5);
+  transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.ft-card::after {
+  /* subtle glossy paper sheen */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 45%);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ft-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Idle: tucked into folder pocket, only badges/tops peek out */
+.ft-c1 { transform: translate(2.6cqw, -4.2cqw) rotate(5deg)  scale(0.66); z-index: 1; }
+.ft-c2 { transform: translate(-1.2cqw, -4.5cqw) rotate(-4deg) scale(0.68); z-index: 2; }
+.ft-c3 { transform: translate(0.4cqw, -4.9cqw) rotate(0deg)   scale(0.7);  z-index: 3; }
+
+/* Open: cards fan out smoothly */
+.ft-folder.is-open .ft-front  { height: 54%; }
+.ft-folder.is-open .ft-pocket { opacity: 1; }
+.ft-folder.is-open .ft-c1     { transform: translate(-9.4cqw, -12.6cqw) rotate(-12deg) scale(1); }
+.ft-folder.is-open .ft-c2     { transform: translate(0.2cqw, -10.6cqw)  rotate(0deg)   scale(1); transition-delay: 0.04s; }
+.ft-folder.is-open .ft-c3     { transform: translate(6.8cqw, -8cqw)    rotate(8deg)   scale(1); transition-delay: 0.08s; }
+
+/* ---------- document representations inside cards ---------- */
+.ft-doc {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 1.1cqw 1.2cqw;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  box-sizing: border-box;
+  text-align: left;
+  user-select: none;
+}
+
+.ft-doc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5cqw;
+}
+
+.ft-badge {
+  font-family: var(--font-manrope), -apple-system, sans-serif;
+  font-weight: 700;
+  font-size: clamp(6.5px, 0.85cqw, 9.5px);
+  line-height: 1;
+  padding: 0.22cqw 0.45cqw;
+  border-radius: 0.3cqw;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.ft-doc-name {
+  font-family: var(--font-mono), monospace;
+  font-size: clamp(6px, 0.75cqw, 8.5px);
+  color: rgba(255, 255, 255, 0.45);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 8.5cqw;
+}
+
+.ft-doc-title {
+  display: block;
+  height: 0.75cqw;
+  border-radius: 0.2cqw;
+  margin-bottom: 0.4cqw;
+}
+
+.ft-doc-line {
+  display: block;
+  height: 0.32cqw;
+  border-radius: 0.15cqw;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.ft-w-90 { width: 90%; }
+.ft-w-85 { width: 85%; }
+.ft-w-80 { width: 80%; }
+.ft-w-75 { width: 75%; }
+.ft-w-70 { width: 70%; }
+.ft-w-65 { width: 65%; }
+.ft-w-60 { width: 60%; }
+
+/* Card 1: PDF Document */
+.ft-doc-pdf {
+  background: linear-gradient(150deg, #1c1518 0%, #110e11 100%);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+}
+.ft-badge-pdf {
+  background: #ef4444;
+  color: #fff;
+  box-shadow: 0 0 0.8cqw rgba(239, 68, 68, 0.35);
+}
+.ft-title-pdf {
+  width: 62%;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.6));
+}
+.ft-doc-pdf .ft-doc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32cqw;
+}
+.ft-doc-figure {
+  height: 2.6cqw;
+  border-radius: 0.4cqw;
+  background: rgba(239, 68, 68, 0.07);
+  border: 1px dashed rgba(239, 68, 68, 0.3);
+  padding: 0.4cqw 0.7cqw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ft-doc-fig-bar {
+  width: 40%;
+  height: 0.3cqw;
+  border-radius: 99px;
+  background: rgba(239, 68, 68, 0.5);
+  display: block;
+}
+.ft-doc-fig-dots {
+  display: flex;
+  gap: 0.35cqw;
+}
+.ft-doc-fig-dots i {
+  display: block;
+  width: 0.4cqw;
+  height: 0.4cqw;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.6);
+}
+
+/* Card 2: Presentation / Deck */
+.ft-doc-deck {
+  background: linear-gradient(150deg, #1c1813 0%, #13100c 100%);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+}
+.ft-badge-deck {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #000;
+  font-weight: 800;
+  box-shadow: 0 0 0.8cqw rgba(245, 158, 11, 0.35);
+}
+.ft-deck-dots {
+  display: flex;
+  gap: 0.35cqw;
+}
+.ft-deck-dots i {
+  display: block;
+  width: 0.45cqw;
+  height: 0.45cqw;
+  border-radius: 50%;
+  background: rgba(245, 158, 11, 0.45);
+}
+.ft-title-deck {
+  width: 72%;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.6));
+}
+.ft-deck-body {
+  display: flex;
+  gap: 1cqw;
+  align-items: center;
+}
+.ft-deck-left {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.38cqw;
+}
+.ft-deck-bullet {
+  display: flex;
+  align-items: center;
+  gap: 0.4cqw;
+}
+.ft-deck-point {
+  width: 0.4cqw;
+  height: 0.4cqw;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex: none;
+  display: block;
+}
+.ft-deck-right {
+  width: 4.2cqw;
+  height: 3.6cqw;
+  border-radius: 0.4cqw;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.4cqw 0.5cqw;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  flex: none;
+}
+.ft-deck-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4cqw;
+  height: 100%;
+}
+.ft-chart-bar {
+  width: 0.65cqw;
+  border-radius: 0.18cqw 0.18cqw 0 0;
+  background: linear-gradient(180deg, #fbbf24, #d97706);
+  display: block;
+}
+.ft-h-45 { height: 45%; }
+.ft-h-90 { height: 90%; }
+.ft-h-65 { height: 65%; }
+.ft-doc-footer {
+  display: flex;
+  align-items: center;
+}
+
+/* Card 3: Text Document / Notes */
+.ft-doc-notes {
+  background: linear-gradient(150deg, #121622 0%, #0c0f17 100%);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+}
+.ft-badge-notes {
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 0 0.8cqw rgba(59, 130, 246, 0.35);
+}
+.ft-title-notes {
+  width: 65%;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.6));
+}
+.ft-doc-notes .ft-doc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32cqw;
+}
+/* Signature Zenote Highlighter Mark */
+.ft-highlight-line {
+  display: block;
+  background: rgba(198, 134, 42, 0.28);
+  border-left: 2px solid #C6862A;
+  border-radius: 0.15cqw;
+  padding: 0.12cqw 0.35cqw;
+  margin: 0.12cqw 0;
+}
+.ft-highlight-line .ft-doc-line {
+  background: rgba(255, 230, 175, 0.6);
+}
+.ft-check-line {
+  display: flex;
+  align-items: center;
+  gap: 0.45cqw;
+  margin-top: 0.15cqw;
+}
+.ft-check-box {
+  display: block;
+  width: 0.75cqw;
+  height: 0.75cqw;
+  border-radius: 0.18cqw;
+  background: rgba(59, 130, 246, 0.25);
+  border: 1px solid #3b82f6;
+  position: relative;
+  flex: none;
+}
+.ft-check-box::after {
+  content: "";
+  position: absolute;
+  left: 0.22cqw;
+  top: 0.08cqw;
+  width: 0.2cqw;
+  height: 0.35cqw;
+  border: solid #fff;
+  border-width: 0 1px 1px 0;
+  transform: rotate(45deg);
+}
+
+/* ---------- server ---------- */
+.ft-server {
+  position: absolute;
+  left: 60.5cqw;
+  top: 16cqw;
+  width: 17cqw;
+  height: 22cqw;
+  border-radius: 2.8cqw;
+  padding: 1.8cqw 1.5cqw;
+  display: flex;
+  flex-direction: column;
+  gap: 1.4cqw;
+  background: linear-gradient(180deg, #464646 0%, #2c2c2d 38%, #222223 100%);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.8),
+    0 0.12cqw 0 rgba(255, 255, 255, 0.14) inset,
+    0 0 0 0.14cqw rgba(255, 255, 255, 0.04) inset,
+    0 2.4cqw 4cqw -1cqw rgba(0, 0, 0, 0.8);
+  z-index: 2;
+}
+
+.ft-slot {
+  position: relative;
+  height: 3.4cqw;
+  flex: none;
+  border-radius: 1.2cqw;
+  background: linear-gradient(180deg, #0e0e0f, #161617);
+  box-shadow: 0 0.25cqw 0.5cqw rgba(0, 0, 0, 0.8) inset, 0 0.1cqw 0 rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ft-ticks {
+  width: 3.6cqw;
+  height: 1.8cqw;
+  background: repeating-linear-gradient(90deg, #8d8d90 0 0.17cqw, transparent 0.17cqw 0.6cqw);
+  opacity: 0.85;
+}
+
+.ft-led {
+  position: absolute;
+  right: 1.2cqw;
+  top: 50%;
+  width: 0.7cqw;
+  height: 0.7cqw;
+  margin-top: -0.35cqw;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 0.9cqw 0.15cqw rgba(59, 130, 246, 0.9);
+  animation: ft-blink 2.4s ease-in-out infinite;
+}
+
+@keyframes ft-blink {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
+.ft-bay {
+  position: relative;
+  flex: 1;
+  border-radius: 1.6cqw;
+  background: linear-gradient(180deg, #1b1b1c, #252526);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: 0 0.3cqw 0.7cqw rgba(0, 0, 0, 0.7) inset, 0 0.1cqw 0 rgba(255, 255, 255, 0.05);
+}
+
+.ft-bay::before {
+  /* drive handle */
+  content: "";
+  position: absolute;
+  left: 9%;
+  top: 24%;
+  width: 19%;
+  height: max(1.5px, 0.32cqw);
+  background: #8a8a8d;
+  border-radius: 99px;
+}
+
+.ft-bay::after {
+  /* activity light */
+  content: "";
+  position: absolute;
+  right: 9%;
+  bottom: 20%;
+  width: 0.55cqw;
+  height: 0.55cqw;
+  border-radius: 50%;
+  background: #4b5563;
+}
+
+.ft-bay.b2::after {
+  animation: ft-act 1.8s steps(1) infinite;
+}
+
+@keyframes ft-act {
+  0%   { background: #4b5563; }
+  30%  { background: #3b82f6; box-shadow: 0 0 0.8cqw rgba(59, 130, 246, 0.9); }
+  55%  { background: #4b5563; box-shadow: none; }
+}
+
+.ft-stage.is-open .ft-led {
+  animation-duration: 1s;
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .ft-streak,
+  .ft-led,
+  .ft-bay::after {
+    animation: none;
+  }
+  .ft-streak {
+    opacity: 0;
+  }
+  .ft-card,
+  .ft-front,
+  .ft-pocket {
+    transition-duration: 0.01ms;
+  }
+}

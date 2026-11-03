@@ -18,10 +18,10 @@ const CSP = [
   "default-src 'self'",
   process.env.NODE_ENV === 'development' ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data: blob: https://assets.aceternity.com",
   "font-src 'self' data:",
   "media-src 'self' blob:",
-  "connect-src 'self' https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com",
+  "connect-src 'self' https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com https://api.web3forms.com",
   "frame-src 'self'",
   "frame-ancestors 'self'",
   "object-src 'none'",
@@ -53,6 +53,7 @@ const nextConfig = {
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "lh3.googleusercontent.com" }, // Google profile photos
+      { protocol: "https", hostname: "assets.aceternity.com" },
     ],
   },
   async headers() {

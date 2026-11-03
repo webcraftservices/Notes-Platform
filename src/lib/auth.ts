@@ -6,6 +6,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { signInSchema } from "@/lib/validation/auth";
 import { provisionNewUser } from "@/lib/provision";
+import { rateLimit } from "@/lib/rate-limit";
 
 /**
  * Central NextAuth config, shared by the [...nextauth] route handler and
@@ -41,12 +42,28 @@ export const authOptions: NextAuthOptions = {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-      async authorize(raw) {
+      async authorize(raw, req) {
         const parsed = signInSchema.safeParse(raw);
         if (!parsed.success) return null;
         const { email, password } = parsed.data;
 
-        const user = await db.user.findUnique({ where: { email } });
+        // Rate limiting by client IP (10 attempts per 15 minutes)
+        const headers = req?.headers as Record<string, string | undefined> | undefined;
+        const forwarded = headers?.["x-forwarded-for"];
+        const ip = (typeof forwarded === "string" ? forwarded.split(",")[0] : undefined)?.trim() || "unknown";
+
+        const { success } = await rateLimit(`signin:${ip}`, { limit: 10, windowSeconds: 60 * 15 });
+        if (!success) {
+          throw new Error("Too many sign-in attempts. Please try again later.");
+        }
+
+        // Exact match lookup, with case-insensitive fallback for legacy casing compatibility
+        let user = await db.user.findUnique({ where: { email } });
+        if (!user) {
+          user = await db.user.findFirst({
+            where: { email: { equals: email, mode: "insensitive" }, deletedAt: null },
+          });
+        }
         if (!user?.passwordHash) return null;
 
         const valid = await bcrypt.compare(password, user.passwordHash);

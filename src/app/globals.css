@@ -1,6 +1,58 @@
+@import url('https://fonts.googleapis.com/css2?family=Maname&family=Noto+Serif:wght@100..900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@font-face {
+  font-family: 'Noto Serif';
+  src: url('/fonts/NotoSerif-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Maname';
+  src: url('/fonts/Maname-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Manrope';
+  src: url('/fonts/Manrope-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/fonts/Satoshi-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/fonts/Satoshi-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/fonts/Satoshi-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 @layer base {
   :root {
@@ -50,6 +102,14 @@
     background-position: 0 88%;
   }
 
+  .dark .highlight-mark {
+    background-image: linear-gradient(
+      to right,
+      rgba(198, 134, 42, 0.3) 0%,
+      rgba(198, 134, 42, 0.3) 100%
+    );
+  }
+
   .card {
     @apply rounded bg-paper-raised dark:bg-graphite-900 border border-line dark:border-line-dark shadow-subtle;
   }
@@ -85,5 +145,223 @@
   }
   .prose-note a {
     @apply text-accent-strong underline underline-offset-2;
+  }
+}
+
+@layer utilities {
+  .mask-b-from-10\%,
+  .mask-b-from-10 {
+    -webkit-mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+  }
+}
+
+@keyframes orbit {
+  0% {
+    transform: rotate(calc(var(--angle) * 1deg)) translateY(calc(var(--radius) * 1px)) rotate(calc(var(--angle) * -1deg));
+  }
+  100% {
+    transform: rotate(calc(var(--angle) * 1deg + 360deg)) translateY(calc(var(--radius) * 1px)) rotate(calc((var(--angle) * -1deg) - 360deg));
+  }
+}
+
+@keyframes zenoteWave {
+  0%, 100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-zenote-wave {
+  animation: zenoteWave 1.4s ease-in-out infinite;
+  transform-origin: bottom;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-zenote-wave {
+    animation: none !important;
+    transform: scaleY(0.55) !important;
+  }
+  .animate-border-beam {
+    animation: none !important;
+  }
+}
+
+@keyframes border-beam {
+  0% {
+    offset-distance: 0%;
+  }
+  100% {
+    offset-distance: 100%;
+  }
+}
+
+/* ========================================================================= */
+/* Welcome Screen Entrance Animations                                        */
+/* Pre-loaded in critical layout.css to prevent raw text flash or jumps      */
+/* ========================================================================= */
+@keyframes welcome-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.welcome-animate-logo {
+  opacity: 0;
+  animation: welcome-fade-up 0.75s cubic-bezier(0.16, 1, 0.3, 1) 0.05s forwards;
+  will-change: opacity, transform;
+}
+
+.welcome-animate-headline {
+  opacity: 0;
+  animation: welcome-fade-up 0.75s cubic-bezier(0.16, 1, 0.3, 1) 0.18s forwards;
+  will-change: opacity, transform;
+}
+
+.welcome-animate-text {
+  opacity: 0;
+  animation: welcome-fade-up 0.75s cubic-bezier(0.16, 1, 0.3, 1) 0.30s forwards;
+  will-change: opacity, transform;
+}
+
+.welcome-animate-button {
+  opacity: 0;
+  animation: welcome-fade-up 0.75s cubic-bezier(0.16, 1, 0.3, 1) 0.42s forwards;
+  will-change: opacity, transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-animate-logo,
+  .welcome-animate-headline,
+  .welcome-animate-text,
+  .welcome-animate-button {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* ========================================================================= */
+/* Auth Split-Screen Editorial Gradient Atmosphere                           */
+/* Inspired by Aceternity Pro: organic, continuous GPU-accelerated motion    */
+/* ========================================================================= */
+@keyframes auth-drift-champagne {
+  0% {
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translate(48px, -36px) scale(1.14) rotate(4deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-32px, 24px) scale(0.96) rotate(-3deg);
+    opacity: 0.9;
+  }
+}
+
+@keyframes auth-drift-violet {
+  0% {
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(-42px, 34px) scale(1.1) rotate(-6deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(25px, -20px) scale(0.94) rotate(3deg);
+    opacity: 0.85;
+  }
+}
+
+@keyframes auth-drift-magenta {
+  0% {
+    transform: translate(0px, 0px) scale(0.95);
+    opacity: 0.75;
+  }
+  50% {
+    transform: translate(36px, -28px) scale(1.12);
+    opacity: 0.95;
+  }
+  100% {
+    transform: translate(-24px, 18px) scale(1.02);
+    opacity: 0.8;
+  }
+}
+
+@keyframes auth-float-diamond-1 {
+  0%, 100% {
+    transform: rotate(45deg) translateY(0px) scale(1);
+  }
+  50% {
+    transform: rotate(43deg) translateY(-10px) scale(1.02);
+  }
+}
+
+@keyframes auth-float-diamond-2 {
+  0%, 100% {
+    transform: rotate(45deg) translateY(0px) scale(1);
+  }
+  50% {
+    transform: rotate(47deg) translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes auth-float-diamond-3 {
+  0%, 100% {
+    transform: rotate(45deg) translateY(0px) scale(1);
+  }
+  50% {
+    transform: rotate(44deg) translateY(-6px) scale(1.01);
+  }
+}
+
+.animate-auth-champagne {
+  animation: auth-drift-champagne 18s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.animate-auth-violet {
+  animation: auth-drift-violet 22s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.animate-auth-magenta {
+  animation: auth-drift-magenta 20s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.animate-auth-diamond-1 {
+  animation: auth-float-diamond-1 16s ease-in-out infinite;
+  will-change: transform;
+}
+
+.animate-auth-diamond-2 {
+  animation: auth-float-diamond-2 20s ease-in-out infinite;
+  will-change: transform;
+}
+
+.animate-auth-diamond-3 {
+  animation: auth-float-diamond-3 14s ease-in-out infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-auth-champagne,
+  .animate-auth-violet,
+  .animate-auth-magenta,
+  .animate-auth-diamond-1,
+  .animate-auth-diamond-2,
+  .animate-auth-diamond-3 {
+    animation: none !important;
   }
 }

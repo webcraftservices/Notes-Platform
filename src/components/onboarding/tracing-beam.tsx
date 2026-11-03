@@ -1,26 +1,37 @@
 "use client";
-import React, { useId, useRef } from "react";
-import { motion, useScroll, useSpring } from "motion/react";
-import { cx, useMediaQuery, ZENOTE_ACCENT } from "./shared";
 
-const STOPS: Array<[number, string]> = [
-  [0, ZENOTE_ACCENT.violet],
-  [0.35, ZENOTE_ACCENT.magenta],
-  [0.65, ZENOTE_ACCENT.pink],
-  [0.85, ZENOTE_ACCENT.orange],
-  [1, ZENOTE_ACCENT.gold],
+import React, { useEffect, useId, useRef, useState } from "react";
+import { motion, useScroll, useTransform } from "motion/react";
+import { cx, useMediaQuery, ZENOTE_ACCENT } from "./shared";
+import { type LucideIcon } from "lucide-react";
+
+/**
+ * Zenote brand multicolour beam stops:
+ * Violet -> Magenta -> Pink -> Orange -> Gold.
+ * Restored from the original brand identity.
+ */
+const STOPS: Array<{ offset: string; color: string; opacity?: number }> = [
+  { offset: "0%", color: ZENOTE_ACCENT.violet, opacity: 0.1 },
+  { offset: "5%", color: ZENOTE_ACCENT.violet, opacity: 1 },
+  { offset: "28%", color: ZENOTE_ACCENT.magenta, opacity: 1 },
+  { offset: "52%", color: ZENOTE_ACCENT.pink, opacity: 1 },
+  { offset: "76%", color: ZENOTE_ACCENT.orange, opacity: 1 },
+  { offset: "95%", color: ZENOTE_ACCENT.gold, opacity: 1 },
+  { offset: "100%", color: ZENOTE_ACCENT.gold, opacity: 0.8 },
 ];
 
 /**
- * Tracing Beam — positioned near the RIGHT viewport edge.
+ * TracingBeam — positioned along the RIGHT side of the workflow story.
  *
- * The beam is a thin vertical SVG line that progressively draws as the user
- * scrolls through the content. It sits flush against the right boundary of
- * the viewport, acting as a subtle visual thread guiding the reader down
- * the Zenote story — not as a conventional left-gutter timeline.
- *
- * Height is pure CSS (SVG stretched with preserveAspectRatio="none"), so
- * there is no measuring, no ResizeObserver, and nothing to go stale.
+ * Technical Architecture:
+ * - Stable, fixed-length stationary SVG track.
+ * - Direct, 1:1 scroll-linked progression via `pathLength: scrollYProgress` without
+ *   artificial spring damping or delay, eliminating lag in both forward and reverse scrolling.
+ * - Polished endpoint terminal marker at (30, effectiveHeight) seamlessly revealed as
+ *   the beam reaches the section boundary.
+ * - `vectorEffect="non-scaling-stroke"` ensures the stroke width is strictly 1.25px across all screens.
+ * - Thin, clean stroke with the authentic Zenote violet -> magenta -> pink -> orange -> gold gradient.
+ * - Dedicated right-side rail column co-axial with step indicator nodes.
  */
 export function TracingBeam({
   children,
@@ -29,185 +40,314 @@ export function TracingBeam({
   children: React.ReactNode;
   className?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const gradientId = `zenote-beam-${useId().replace(/:/g, "")}`;
+  const [svgHeight, setSvgHeight] = useState(0);
 
+  // Dynamic measuring via ResizeObserver to guarantee 1:1 pixel coordinate tracking
+  useEffect(() => {
+    const updateHeight = () => {
+      if (contentRef.current) {
+        setSvgHeight(contentRef.current.offsetHeight);
+      }
+    };
+    updateHeight();
+    const ro = new ResizeObserver(updateHeight);
+    if (contentRef.current) {
+      ro.observe(contentRef.current);
+    }
+    window.addEventListener("resize", updateHeight);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, []);
+
+  // Track scroll through the section with natural 1:1 progression.
+  // Direct scroll tracking eliminates spring lag and trailing delay.
   const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start 60%", "end 60%"],
-  });
-  const progress = useSpring(scrollYProgress, {
-    stiffness: 120,
-    damping: 30,
-    restDelta: 0.0005,
+    target: containerRef,
+    offset: ["start 55%", "end 82%"],
   });
 
-  const PATH = "M10 0V100";
-  const stroke = `url(#${gradientId})`;
+  // Reveal the endpoint terminal marker cleanly as the beam finishes its outward bend
+  const endpointOpacity = useTransform(scrollYProgress, [0.88, 0.95], [0, 1]);
+  const endpointScale = useTransform(scrollYProgress, [0.88, 0.95], [0.4, 1]);
+
+  const effectiveHeight = svgHeight || 1800;
+
+  // Characteristic Aceternity endpoint geometry adapted for Zenote's right-side rail:
+  // Runs vertically at x=16 through the step nodes, then near the bottom of Step 04
+  // introduces one short, clean bend curving OUTWARD to the right (dx=+14, from x=16 to x=30)
+  // away from the content cards, terminating cleanly at the right boundary of the rail (x=30)
+  // and bottom boundary (effectiveHeight).
+  const bendOffset = 48;
+  const bendStartY = Math.max(0, effectiveHeight - bendOffset);
+  const pathD = `M 16 0 V ${bendStartY} C 16 ${bendStartY + 10}, 30 ${bendStartY + 14}, 30 ${bendStartY + 24} V ${effectiveHeight}`;
 
   return (
     <div
-      ref={ref}
-      className={cx("relative mx-auto w-full max-w-4xl px-[6vw] md:px-8", className)}
+      ref={containerRef}
+      className={cx(
+        "relative w-full max-w-[780px] sm:max-w-[820px] md:max-w-[860px] mx-auto px-2.5 xs:px-3 sm:px-6 md:px-7",
+        className
+      )}
     >
-      {/* Beam positioned near right viewport edge */}
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 20 100"
-        preserveAspectRatio="none"
-        className="absolute inset-y-0 right-3 h-full w-4 md:right-4 lg:right-0"
+      <div
+        ref={contentRef}
+        className="relative w-full flex flex-col gap-7 sm:gap-11 md:gap-13"
       >
-        <defs>
-          <linearGradient
-            id={gradientId}
-            gradientUnits="userSpaceOnUse"
-            x1="0"
-            y1="0"
-            x2="0"
-            y2="100"
+        {/*
+          RIGHT-SIDE CONTINUOUS SVG BEAM RAIL:
+          Anchored at right-0, width 32px (w-8).
+          The vertical path is centered at x=16 through all step nodes,
+          with a clean outward bend near the bottom meeting the section boundary.
+        */}
+        <div
+          aria-hidden="true"
+          className="absolute top-0 bottom-0 right-0 w-8 pointer-events-none flex justify-center z-0 overflow-visible"
+        >
+          <svg
+            viewBox={`0 0 32 ${effectiveHeight}`}
+            width="32"
+            height={effectiveHeight}
+            className="w-full h-full block overflow-visible"
+            aria-hidden="true"
           >
-            {STOPS.map(([offset, color]) => (
-              <stop key={offset} offset={offset} stopColor={color} />
-            ))}
-          </linearGradient>
-        </defs>
+            <defs>
+              <linearGradient
+                id={gradientId}
+                gradientUnits="userSpaceOnUse"
+                x1="0"
+                y1="0"
+                x2="0"
+                y2={effectiveHeight}
+              >
+                {STOPS.map((stop, i) => (
+                  <stop
+                    key={i}
+                    offset={stop.offset}
+                    stopColor={stop.color}
+                    stopOpacity={stop.opacity ?? 1}
+                  />
+                ))}
+              </linearGradient>
+            </defs>
 
-        {/* Static track */}
-        <path
-          d={PATH}
-          fill="none"
-          stroke="#9091A0"
-          strokeOpacity="0.12"
-          strokeWidth="1"
-        />
-
-        {reduceMotion ? (
-          <path
-            d={PATH}
-            fill="none"
-            stroke={stroke}
-            strokeWidth="1.25"
-            strokeOpacity="0.55"
-          />
-        ) : (
-          <>
-            {/* Soft halo */}
-            <motion.path
-              d={PATH}
+            {/* Stationary subtle background track */}
+            <path
+              d={pathD}
               fill="none"
-              stroke={stroke}
-              strokeWidth="4"
-              strokeOpacity="0.08"
-              style={{ pathLength: progress }}
-            />
-            {/* Core line */}
-            <motion.path
-              d={PATH}
-              fill="none"
-              stroke={stroke}
+              stroke="#FFFFFF"
+              strokeOpacity="0.12"
               strokeWidth="1.25"
-              style={{ pathLength: progress }}
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
-          </>
-        )}
-      </svg>
 
-      {/* Content — no large left padding, beam is on the right edge */}
-      <div className="pr-8 md:pr-12">{children}</div>
+            {/* Drawn beam line with direct 1:1 scroll progression */}
+            {reduceMotion ? (
+              <>
+                <path
+                  d={pathD}
+                  fill="none"
+                  stroke={`url(#${gradientId})`}
+                  strokeWidth="1.25"
+                  strokeOpacity="0.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <circle
+                  cx="30"
+                  cy={effectiveHeight}
+                  r="2.25"
+                  fill={ZENOTE_ACCENT.gold}
+                />
+              </>
+            ) : (
+              <>
+                <motion.path
+                  d={pathD}
+                  fill="none"
+                  stroke={`url(#${gradientId})`}
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ pathLength: scrollYProgress }}
+                />
+                {/* Subtle, polished endpoint terminal cap matching the gold gradient finish */}
+                <motion.circle
+                  cx="30"
+                  cy={effectiveHeight}
+                  r="2.25"
+                  fill={ZENOTE_ACCENT.gold}
+                  style={{
+                    opacity: endpointOpacity,
+                    scale: endpointScale,
+                    transformBox: "fill-box",
+                    transformOrigin: "center",
+                  }}
+                />
+              </>
+            )}
+          </svg>
+        </div>
+
+        {/* Workflow steps */}
+        {children}
+      </div>
     </div>
   );
 }
 
-import { LucideIcon } from "lucide-react";
-
-/** Editorial story marker. Lights up as the beam reaches it. */
-export function TracingBeamStep({
-  index,
-  title,
-  description,
-  tone = ZENOTE_ACCENT.pink,
-  icon: Icon,
-  className,
-  isFirst = false,
-}: {
+export interface TracingBeamStepProps {
   index: string;
-  title: string;
+  tag: string;
+  title?: string;
+  line?: string;
   description: string;
   tone?: string;
   icon?: LucideIcon;
-  className?: string;
+  illustration?: React.ReactNode;
+  anchor?: React.ReactNode;
+  features?: string[];
   isFirst?: boolean;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  isLast?: boolean;
+  totalSteps?: string;
+  className?: string;
+}
+
+/**
+ * Editorial workflow step card with distinct right-side co-axial node indicator.
+ */
+export function TracingBeamStep({
+  index,
+  tag,
+  title,
+  line,
+  description,
+  tone = ZENOTE_ACCENT.violet,
+  icon: Icon,
+  illustration,
+  anchor,
+  className,
+}: TracingBeamStepProps) {
+  const stepRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start 70%", "start 40%"],
+    target: stepRef,
+    offset: ["start 65%", "start 25%"],
   });
+
+  const [isActive, setIsActive] = useState(false);
+
+  useEffect(() => {
+    const check = (latest: number) => {
+      const active = latest > 0.05;
+      setIsActive((prev) => (prev !== active ? active : prev));
+    };
+    check(scrollYProgress.get());
+    return scrollYProgress.on("change", check);
+  }, [scrollYProgress]);
+
+  // Support both `line` or `title` as the headline
+  const headline = line || title;
 
   return (
     <div
-      ref={ref}
+      ref={stepRef}
       className={cx(
-        "relative",
-        isFirst ? "pt-2 md:pt-4 pb-12 md:pb-20" : "py-12 md:py-20",
-        className,
+        "relative w-full group flex items-start gap-2 sm:gap-4 md:gap-6",
+        className
       )}
     >
-      {/* Beam node — positioned on the right side, aligned with the beam */}
-      <span
-        aria-hidden="true"
-        className={cx(
-          "absolute -right-8 flex h-5 w-5 items-center justify-center md:-right-12",
-          isFirst ? "top-6 md:top-8" : "top-16 md:top-24"
-        )}
-      >
-        <span className="relative h-2.5 w-2.5 rounded-full bg-neutral-300 dark:bg-neutral-700">
-          <motion.span
-            style={{
-              background: tone,
-              opacity: reduceMotion ? 1 : scrollYProgress,
-            }}
-            className="absolute inset-0 rounded-full"
-          />
-        </span>
-      </span>
-
-      <motion.div
-        initial={{ opacity: reduceMotion ? 1 : 0, y: reduceMotion ? 0 : 20 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, margin: isFirst ? "0px" : "-10%" }}
-        transition={{ duration: 0.7, ease: [0.25, 0.1, 0.25, 1.0] }}
-        className="relative p-6 md:p-10 rounded-2xl bg-[#141416] border border-white/[0.04] shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
-      >
-        <div className="absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/[0.02] pointer-events-none" />
-        
-        {/* Subtle left gradient accent using the 'tone' color */}
-        <div 
-          className="absolute top-0 bottom-0 left-0 w-[2px] rounded-l-2xl opacity-60"
-          style={{ background: `linear-gradient(180deg, transparent, ${tone}, transparent)` }}
+      {/*
+        Art-Directed Feature Storytelling Card:
+        Clean, near-black surface with fine subtle border, surface contrast, and bespoke illustration.
+      */}
+      <div className="flex-1 min-w-0 relative p-3.5 sm:p-7 md:p-8 rounded-xl sm:rounded-2xl bg-[#121316] border border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.36)] transition-all duration-300 hover:border-white/[0.13] overflow-hidden">
+        {/* Subtle top hairline highlight */}
+        <div
+          aria-hidden="true"
+          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent pointer-events-none"
         />
 
-        <div className="flex items-center gap-4 mb-6">
-          <div 
-            className="flex items-center justify-center w-10 h-10 rounded-full bg-[#1A1A1D] border border-white/5 shadow-inner"
-            style={{ color: tone }}
-          >
-            {Icon ? <Icon size={18} strokeWidth={2.5} /> : null}
+        {/* Card Header: Step Tag and Lucide Icon */}
+        <div className="flex items-center justify-between gap-2.5 mb-2 sm:mb-3">
+          <div className="flex items-center gap-2">
+            <span
+              className="size-1.5 rounded-full"
+              style={{ backgroundColor: tone }}
+              aria-hidden="true"
+            />
+            <span className="font-maname text-[10.5px] sm:text-[12px] font-semibold tracking-[0.2em] uppercase text-neutral-400">
+              {tag}
+            </span>
           </div>
-          <div className="text-xs font-bold tracking-[0.2em] uppercase" style={{ color: tone }}>
-            {index}
-          </div>
+
+          {Icon ? (
+            <div
+              className="flex items-center justify-center size-7 sm:size-9 rounded-lg bg-white/[0.03] border border-white/[0.06] text-neutral-400 group-hover:text-white transition-colors"
+              aria-hidden="true"
+            >
+              <Icon className="size-3.5 sm:size-4" strokeWidth={1.75} />
+            </div>
+          ) : null}
         </div>
 
-        <h3 className="text-2xl font-medium tracking-tight text-neutral-50 sm:text-3xl md:text-4xl">
-          {title}
-        </h3>
-        <p className="mt-4 text-base leading-relaxed text-neutral-400 md:text-lg">
+        {/* Step Proposition Headline */}
+        {headline ? (
+          <h3 className="font-noto text-[18px] sm:text-[23px] md:text-[25px] font-[650] leading-[1.24] tracking-[0.01em] text-white mb-1.5 sm:mb-2.5">
+            {headline}
+          </h3>
+        ) : null}
+
+        {/* Descriptive copy */}
+        <p className="font-maname text-[12.5px] sm:text-[14.5px] font-normal leading-[1.65] sm:leading-[1.7] text-neutral-400 max-w-xl mb-3.5 sm:mb-5">
           {description}
         </p>
-      </motion.div>
+
+        {/* Feature Illustration */}
+        {illustration || anchor ? (
+          <div className="pt-0.5 sm:pt-1">
+            {illustration || anchor}
+          </div>
+        ) : null}
+      </div>
+
+      {/*
+        RIGHT-SIDE STEP NODE INDICATOR:
+        Shares the exact horizontal coordinate column (right-0, width 32px / w-8).
+        pt-[18px] sm:pt-[30px] md:pt-[34px] aligns the node vertically with the card header / tag row.
+        Centered at x = 16px, EXACTLY coaxial with the SVG path M 16.
+        The opaque #0E0E10 background ensures the line meets the outside top edge of the node
+        cleanly and emerges from the outside bottom edge, never running awkwardly through its interior.
+      */}
+      <div
+        aria-hidden="true"
+        className="w-8 shrink-0 flex justify-center pt-[18px] sm:pt-[30px] md:pt-[34px] z-10 pointer-events-none select-none"
+      >
+        <div
+          className={cx(
+            "relative size-4 sm:size-[18px] rounded-full bg-[#0E0E10] border-[1.5px] transition-all duration-300 flex items-center justify-center",
+            isActive ? "shadow-sm" : "border-neutral-700/80"
+          )}
+          style={{
+            borderColor: isActive ? tone : undefined,
+            boxShadow: isActive ? `0 0 8px ${tone}35` : undefined,
+          }}
+        >
+          {/* Legible center dot */}
+          <div
+            className={cx(
+              "size-1.5 sm:size-2 rounded-full transition-all duration-300",
+              isActive ? "scale-100" : "scale-90 bg-neutral-600"
+            )}
+            style={isActive ? { backgroundColor: tone } : undefined}
+          />
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,8 +1,17 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/access";
 import { db } from "@/lib/db";
 import { normalizeEmail } from "@/lib/email";
 import { InvitationActions } from "@/components/invitations/invitation-actions";
+
+export const metadata: Metadata = {
+  title: "Group Invitation",
+  robots: {
+    index: false,
+    follow: false,
+  },
+};
 
 export default async function InvitationPage({ params }: { params: { token: string } }) {
   // Same auth gate as every other page in this app (`requireUser()`

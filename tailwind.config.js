@@ -53,9 +53,20 @@ module.exports = {
         },
       },
       fontFamily: {
+        satoshi: ["Satoshi", "var(--font-sans)", ...fontFamily.sans],
         display: ["var(--font-display)", "Georgia", ...fontFamily.serif],
         sans: ["var(--font-sans)", ...fontFamily.sans],
+        manrope: ["var(--font-manrope)", "'Manrope'", ...fontFamily.sans],
+        jakarta: ["var(--font-jakarta)", "'Plus Jakarta Sans'", ...fontFamily.sans],
+        noto: ["'Noto Serif'", "Georgia", ...fontFamily.serif],
+        maname: ["'Maname'", ...fontFamily.sans],
         mono: ["var(--font-mono)", ...fontFamily.mono],
+      },
+      spacing: {
+        120: "30rem",
+      },
+      aspectRatio: {
+        "9/16": "9 / 16",
       },
       borderRadius: {
         sm: "6px",
@@ -65,6 +76,42 @@ module.exports = {
       boxShadow: {
         subtle: "0 1px 2px rgba(20, 20, 22, 0.04), 0 1px 1px rgba(20,20,22,0.03)",
         panel: "0 4px 16px rgba(20, 20, 22, 0.06), 0 1px 2px rgba(20,20,22,0.04)",
+      },
+      keyframes: {
+        shine: {
+          "0%": { "background-position": "0% 0%" },
+          "50%": { "background-position": "100% 100%" },
+          "100%": { "background-position": "0% 0%" },
+        },
+        "shine-pulse": {
+          "0%": { "background-position": "0% 0%" },
+          "50%": { "background-position": "100% 100%" },
+          "100%": { "background-position": "0% 0%" },
+        },
+        orbit: {
+          "0%": {
+            transform:
+              "rotate(calc(var(--angle) * 1deg)) translateY(calc(var(--radius) * 1px)) rotate(calc(var(--angle) * -1deg))",
+          },
+          "100%": {
+            transform:
+              "rotate(calc(var(--angle) * 1deg + 360deg)) translateY(calc(var(--radius) * 1px)) rotate(calc((var(--angle) * -1deg) - 360deg))",
+          },
+        },
+        "border-beam": {
+          "0%": {
+            "offset-distance": "0%",
+          },
+          "100%": {
+            "offset-distance": "100%",
+          },
+        },
+      },
+      animation: {
+        shine: "shine var(--duration, 10s) infinite linear",
+        "shine-pulse": "shine-pulse var(--duration, 8s) infinite linear",
+        orbit: "orbit calc(var(--duration)*1s) linear infinite",
+        "border-beam": "border-beam calc(var(--duration)*1s) infinite linear",
       },
     },
   },

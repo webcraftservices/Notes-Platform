@@ -28,12 +28,6 @@ export const ZENOTE_SCREENS: ScreenItem[] = [
   { id: "08", label: "Groups", image: placeholder("groups") },
 ];
 
-/** Single large preview used by ContainerScroll. */
-export const PRODUCT_PREVIEW = {
-  image: placeholder("product-preview", 1800, 1400),
-  alt: "Zenote product preview",
-};
-
 /** Narrative steps used by TracingBeam. */
 export const STORY_STEPS = [
   { index: "01", title: "Capture", description: "Bring your learning together." },

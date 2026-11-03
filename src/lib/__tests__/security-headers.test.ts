@@ -64,9 +64,17 @@ describe("next.config.js security headers (Phase 9.3)", () => {
     it("never allows a third-party script/style/img host (except explicitly allowed storage)", async () => {
       const headers = await getHeaders();
       const csp = headers["Content-Security-Policy"];
-      // R2 storage is required for connect-src
-      const cspWithoutStorage = (csp || "").replace("https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com", "");
-      expect(cspWithoutStorage).not.toMatch(/https?:\/\//);
+      // R2 storage and Web3Forms are required for connect-src; Aceternity for onboarding assets
+      const allowedHosts = [
+        "https://f03d7c364f5dd204ce76f719835c5c28.r2.cloudflarestorage.com",
+        "https://assets.aceternity.com",
+        "https://api.web3forms.com",
+      ];
+      let cspFiltered = csp || "";
+      for (const host of allowedHosts) {
+        cspFiltered = cspFiltered.split(host).join("");
+      }
+      expect(cspFiltered).not.toMatch(/https?:\/\//);
     });
   });
 });

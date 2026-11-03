@@ -1,6 +1,6 @@
 "use client"; // remove this line if you're not using Next.js App Router
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * LinesGradientShader (v4 – motion traced from the reference video)
@@ -12,6 +12,7 @@ import { useEffect, useRef } from "react";
  *
  * Plain WebGL2, no dependencies. Put it in a `relative` parent, content above.
  */
+
 
 /** Ribbon motion extracted from the reference video: a seamless, periodic cubic B-spline
  *  through 28 control points. Each row = [top-edge cubic x4, thickness cubic x4, band splits x4]. */
@@ -143,15 +144,28 @@ type Props = {
   startTime?: number;
   /** background colour (default #0a0a0a) */
   background?: string;
+  /** when true, pauses continuous animation and holds the static frame */
+  paused?: boolean;
 };
 
 export default function LinesGradientShader({
   className = "",
   speed = 1,
   startTime = 0,
-  background = "#0a0a0a",
+  background = "#101116",
+  paused = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isReady, setIsReady] = useState(false);
+  const isPausedRef = useRef(paused);
+  const resumeAnimationRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    isPausedRef.current = paused;
+    if (!paused && resumeAnimationRef.current) {
+      resumeAnimationRef.current();
+    }
+  }, [paused]);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -176,6 +190,25 @@ export default function LinesGradientShader({
     const uP = gl.getUniformLocation(prog, "u_p");
     gl.uniform3fv(gl.getUniformLocation(prog, "u_bg"), hexToRgb(background));
 
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    let raf = 0;
+    let isLoopRunning = false;
+    let last = performance.now();
+    let time = reduceMotion ? PERIOD * 0.42 : startTime; // reduced motion: parked on the wide arc
+    let hasRenderedFirstFrame = false;
+
+    const renderCurrentFrame = () => {
+      gl.uniform1fv(uP, evalRibbon(time));
+      gl.uniform1f(uTime, time);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      if (!hasRenderedFirstFrame) {
+        hasRenderedFirstFrame = true;
+        setIsReady(true);
+      }
+    };
+
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
@@ -186,28 +219,48 @@ export default function LinesGradientShader({
       }
       gl.viewport(0, 0, w, h);
       gl.uniform2f(uRes, w, h);
+      if (hasRenderedFirstFrame) {
+        renderCurrentFrame();
+      }
     };
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
     resize();
 
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    let raf = 0;
-    let last = performance.now();
-    let time = reduceMotion ? PERIOD * 0.42 : startTime; // reduced motion: parked on the wide arc
     const draw = (now: number) => {
+      if (isPausedRef.current || reduceMotion) {
+        isLoopRunning = false;
+        return;
+      }
+
       const dt = Math.min((now - last) / 1000, 0.1); // ignore tab-switch jumps
       last = now;
-      if (!reduceMotion) time += dt * speed;
-      gl.uniform1fv(uP, evalRibbon(time));
-      gl.uniform1f(uTime, time);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      if (!reduceMotion) raf = requestAnimationFrame(draw);
+      time += dt * speed;
+
+      renderCurrentFrame();
+
+      raf = requestAnimationFrame(draw);
     };
-    raf = requestAnimationFrame(draw);
+
+    const startLoop = () => {
+      if (isLoopRunning || reduceMotion || isPausedRef.current) return;
+      isLoopRunning = true;
+      last = performance.now();
+      raf = requestAnimationFrame(draw);
+    };
+
+    resumeAnimationRef.current = startLoop;
+
+    // Render the initial static frame immediately
+    renderCurrentFrame();
+
+    // Start continuous rendering loop only if not paused and not reduced-motion
+    if (!isPausedRef.current && !reduceMotion) {
+      startLoop();
+    }
 
     return () => {
+      resumeAnimationRef.current = null;
       cancelAnimationFrame(raf);
       ro.disconnect();
       gl.deleteProgram(prog);
@@ -219,7 +272,9 @@ export default function LinesGradientShader({
     <canvas
       ref={canvasRef}
       aria-hidden
-      className={`pointer-events-none absolute inset-0 h-full w-full ${className}`}
+      className={`pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-700 ease-out ${
+        isReady ? "opacity-100" : "opacity-0"
+      } ${className}`}
     />
   );
 }

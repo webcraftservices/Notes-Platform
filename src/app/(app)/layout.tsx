@@ -1,9 +1,23 @@
+import type { Metadata } from "next";
 import { requireUser, getPrimaryWorkspace } from "@/lib/access";
 import { db } from "@/lib/db";
 import { getPlanLimits } from "@/lib/plans";
 import { Sidebar } from "@/components/shell/sidebar";
 import { MobileNavDrawer } from "@/components/shell/mobile-nav-drawer";
 import { CommandPaletteProvider } from "@/components/shell/command-palette";
+
+export const metadata: Metadata = {
+  robots: {
+    index: false,
+    follow: false,
+    nocache: true,
+    googleBot: {
+      index: false,
+      follow: false,
+      noimageindex: true,
+    },
+  },
+};
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();

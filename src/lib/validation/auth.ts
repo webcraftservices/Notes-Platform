@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 export const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
+  email: z.string().trim().toLowerCase().email("Enter a valid email address"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
 export const signUpSchema = z
@@ -23,3 +23,21 @@ export const signUpSchema = z
 
 export type SignInInput = z.infer<typeof signInSchema>;
 export type SignUpInput = z.infer<typeof signUpSchema>;
+
+/**
+ * Validates and sanitizes a callbackUrl to prevent open redirect vulnerabilities
+ * while preserving valid internal navigation paths (e.g. /materials/123, /groups/abc).
+ */
+export function getSafeCallbackUrl(raw: string | null | undefined): string {
+  if (!raw) return "/";
+  // Must start with a single "/", rejecting protocol-relative ("//evil.com") or backslash bypasses
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
+    return "/";
+  }
+  // Prevent infinite auth redirect loops
+  const pathname = raw.split("?")[0];
+  if (pathname === "/sign-in" || pathname === "/sign-up") {
+    return "/";
+  }
+  return raw;
+}

@@ -6,8 +6,10 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
     <input
       ref={ref}
       className={cn(
-        "w-full rounded-sm border border-line bg-paper-raised px-3.5 py-2.5 text-sm text-ink placeholder:text-ink-faint",
+        "w-full rounded-sm border border-line bg-paper-raised px-3.5 py-2.5 text-sm text-ink placeholder:text-ink-faint transition-colors",
         "focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        "aria-invalid:border-signal-danger focus:aria-invalid:border-signal-danger focus:aria-invalid:ring-signal-danger",
         "dark:border-line-dark dark:bg-graphite-800 dark:text-white dark:placeholder:text-white/30",
         className
       )}

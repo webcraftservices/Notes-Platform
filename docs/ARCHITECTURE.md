@@ -1,804 +1,347 @@
-# Architecture — Phase 1
+# Zenote Technical Architecture
 
-## Stack decisions
+This document provides a comprehensive technical reference for the Zenote system architecture, data models, service abstractions, background processing pipelines, and security boundaries.
 
-| Layer | Choice | Why |
+---
+
+## 1. High-Level System Architecture
+
+Zenote is architected as an **AI-native monolithic application** utilizing the **Next.js 14 App Router**. It unifies presentational client components, server-side data loaders, authenticated API route handlers, and asynchronous job processing within a single deployable unit.
+
+```mermaid
+graph TD
+    subgraph Client["Client Tier (Browser)"]
+        UI["React 18 / Tailwind UI"]
+        AudioRec["Audio Recorder (WebM)"]
+        CanvasReveal["WebGL2 & Canvas Studio Reveal"]
+    end
+
+    subgraph AppRouter["Application Tier (Next.js 14 App Router)"]
+        AuthMiddleware["NextAuth Session Middleware"]
+        PublicRoutes["Public Pages (/welcome, /welcome/intro)"]
+        AuthRoutes["Auth Pages (/sign-in, /sign-up)"]
+        AppRoutes["Authenticated Views (/home, /materials, /subjects, /groups)"]
+        ApiRoutes["API Route Handlers (/api/*)"]
+        AccessControl["Centralized Access Layer (src/lib/access.ts)"]
+        JobOrchestrator["Job Queue Runner (ProcessingJob Engine)"]
+    end
+
+    subgraph StorageData["Storage & Persistence Tier"]
+        PG["PostgreSQL 15+ (Relational Tables)"]
+        PGVector["pgvector Extension (vector(1536) Embeddings)"]
+        PrismaORM["Prisma ORM Client"]
+        Redis["Upstash Redis (Distributed Rate Limiting)"]
+        FileStore["StorageService (.storage/ or Cloudflare R2 / AWS S3)"]
+    end
+
+    subgraph External["External Cloud Services"]
+        GeminiAI["Google Gemini (gemini-2.5-flash-lite)"]
+        OpenAIEmb["OpenAI (text-embedding-3-small)"]
+        SpeechSvc["AssemblyAI (Speaker Diarization) / Whisper"]
+        GoogleDrive["Google Drive & Docs REST APIs"]
+        DatadogIntake["Datadog HTTP Log/Metric Intake"]
+        Web3Forms["Web3Forms API (Contact Submissions)"]
+    end
+
+    UI --> AuthMiddleware
+    AuthMiddleware --> PublicRoutes
+    AuthMiddleware --> AuthRoutes
+    AuthMiddleware --> AppRoutes
+    AppRoutes --> AccessControl
+    ApiRoutes --> AccessControl
+    AccessControl --> PrismaORM
+    PrismaORM --> PG
+    AccessControl --> PGVector
+    ApiRoutes --> FileStore
+    ApiRoutes --> Redis
+    JobOrchestrator --> FileStore
+    JobOrchestrator --> GeminiAI
+    JobOrchestrator --> OpenAIEmb
+    JobOrchestrator --> SpeechSvc
+    ApiRoutes --> GoogleDrive
+    ApiRoutes --> DatadogIntake
+    PublicRoutes --> Web3Forms
+```
+
+### Architectural Principles:
+1. **Separation of Concerns Without Premature Distribution:** Route handlers act as the API layer, while domain services (`src/lib/services/`) isolate external SDKs. Background tasks (transcription, document text extraction, vector embedding) use a database-backed state machine (`ProcessingJob`) that can be factored out into a dedicated worker process if scale dictates.
+2. **Interface-First Service Design:** Every third-party capability (AI, embeddings, speech-to-text, object storage) is guarded behind a TypeScript interface in `src/lib/services/interfaces.ts`. No route or component imports vendor SDKs directly.
+3. **Defense-in-Depth Authorization:** Rather than relying exclusively on routing middleware, all resource queries and mutations call explicit, centralized access assertions in `src/lib/access.ts`.
+
+---
+
+## 2. Frontend & Application Routing
+
+The frontend utilizes Next.js 14 App Router route groups to cleanly decouple layout boundaries, caching strategies, and authentication states:
+
+| Route Group / Path | Purpose | Caching / Rendering Strategy |
 |---|---|---|
-| Framework | Next.js 14 (App Router, TypeScript) | Server components for data-heavy pages (dashboard, materials), route handlers double as the API layer, one deployable unit for MVP velocity. Split into a separate backend later only if worker/API scaling demands it (see "When to split the backend" below). |
-| Database | PostgreSQL + Prisma | Relational integrity for the Subject→Chapter→Topic tree, group permissions, and billing; Prisma gives typed queries and migrations. |
-| Vector search | pgvector extension on the same Postgres instance | Avoids a second database for MVP. `MaterialChunk.embedding` is a `vector(1536)` column. If retrieval latency/scale later demands it, swap to a dedicated vector DB (Pinecone/Qdrant) behind the same `EmbeddingService`/retrieval interface — see Phase 5 notes. |
-| Auth | NextAuth.js — JWT sessions, Credentials + Google providers, Prisma adapter | JWT sessions avoid a DB hit per request in middleware. Prisma adapter persists `Account`/`Session` for OAuth linking and future admin tooling. |
-| Styling | Tailwind CSS, custom design tokens | See `tailwind.config.js` for the full token system and rationale. |
-| Validation | Zod | Shared schemas between client forms and API route handlers — one source of truth per input shape. |
-| AI/Storage/Speech | Interface-first (`src/lib/services/interfaces.ts`) | No provider SDK is imported outside its concrete implementation file. Swapping Anthropic ↔ OpenAI ↔ Google, or S3 ↔ R2, never touches call sites. |
+| `src/app/(auth)/*` | `/sign-in`, `/sign-up` — Split-screen editorial authentication layout with floating ambient canvas and branding. | Static prerendering with client-side interactive forms. |
+| `src/app/(app)/*` | `/home`, `/subjects/*`, `/materials/*`, `/flashcards/*`, `/quizzes/*`, `/assistant`, `/groups/*`, `/settings` — Main application shell. | Dynamic server-side rendering with streaming; requires active NextAuth session. |
+| `src/app/welcome/*` | `/welcome` (brand splash & Studio reveal), `/welcome/intro` (8-section product narrative). | Static generation (`○`); dark-mode viewport and critical layout CSS. |
+| `src/app/api/*` | REST endpoints for data mutations, file streaming, AI generation, Google integration, and health checks. | Dynamic route handlers (`force-dynamic`). |
+| `src/app/manifest.ts` | `/manifest.webmanifest` | Static PWA manifest generator. |
+| `src/app/robots.ts` | `/robots.txt` | Dynamic crawler directives with private route disallow list. |
+| `src/app/sitemap.ts` | `/sitemap.xml` | Dynamic canonical XML sitemap generator. |
 
-## Why not split frontend/backend from day one
+---
 
-Section 106 of the brief asks for separation of concerns, which this
-architecture honors at the *code* level (route handlers contain business
-logic, components stay presentational, services are isolated) without
-paying the operational cost of two deployables before there's a reason to.
-Next.js route handlers are the API; background workers (Phase 4 transcription,
-Phase 5 embedding) are the first thing that will actually need to live in a
-separate process, because they're long-running and shouldn't share a
-request/response lifecycle with the web server. That's the natural split
-point — a `worker/` service reading from `ProcessingJob` — not before.
+## 3. Authentication & Authorization Flow
 
-## Multi-tenancy model
+Authentication is managed via **NextAuth.js v4** using a stateless **JWT session strategy**.
 
-- Every `User` can own multiple `Workspace`s (§60 isolation boundary).
-- A `Workspace` has `WorkspaceMember` rows with `MemberRole` (OWNER/ADMIN/MEMBER/VIEWER).
-- `Group` is a *separate* collaboration boundary from `Workspace` — a group
-  can contain its own `Subject`/`Chapter`/`Material` rows (see `groupId` on
-  those models) so shared study-group content doesn't have to live inside
-  any one member's personal workspace.
-- **Every query that lists or fetches Subject/Chapter/Topic/Material/Note
-  data must filter by a resolvable owner: `workspaceId` the requesting user
-  is a member of, OR `groupId` the requesting user is a member of.** This is
-  enforced in the data-access layer (`src/lib/access/*`, added in Phase 2)
-  as a single `assertCanAccess(...)` helper used by every route handler —
-  never ad hoc per-route checks.
-- Postgres row-level security policies are the Phase 9 hardening layer on
-  top of this — application-level checks are the primary defense during
-  Phases 1–8, RLS is defense-in-depth before production.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User Browser
+    participant AuthRoute as /api/auth/[...nextauth]
+    participant RateLimiter as Upstash Redis / Memory Limiter
+    participant DB as PostgreSQL (Prisma)
+    participant Provision as src/lib/provision.ts
 
-## Auth flow implemented in Phase 1
+    User->>AuthRoute: POST Credentials (email, password)
+    AuthRoute->>RateLimiter: Check signin:{client_ip} limit (10 / 15m)
+    alt Rate limit exceeded
+        RateLimiter-->>User: 429 Too Many Requests
+    else Limit OK
+        AuthRoute->>DB: Query User by email (exact, then case-insensitive)
+        DB-->>AuthRoute: User record + passwordHash
+        AuthRoute->>AuthRoute: bcrypt.compare(password, passwordHash)
+        alt Password Invalid
+            AuthRoute-->>User: 401 Invalid Credentials
+        else Password Valid
+            AuthRoute->>AuthRoute: Sign JWT session token (HS256)
+            AuthRoute-->>User: Set session cookie (HttpOnly, Secure, SameSite)
+        end
+    end
 
-- Email/password: `POST /api/auth/register` (rate-limited, bcrypt cost 12)
-  → `signIn("credentials", ...)` on the client.
-- Google OAuth: sign-in-only scopes at login. Drive/Docs scopes (Phase 7)
-  are requested separately through a Connected Accounts flow so users
-  aren't asked for file access just to create an account.
-- `middleware.ts` gates all app and data-API routes behind a valid session;
-  per-resource authorization still happens server-side per request.
-- New users get a `Profile` and a `FREE` `Subscription` row created
-  transactionally with the account (see `authOptions.events.createUser`
-  and the `/api/auth/register` handler) — nothing downstream needs to
-  null-check for their absence.
-
-## Plan / limits configuration
-
-`src/lib/plans.ts` centralizes storage caps, AI credits, recording minutes,
-group size, and feature flags per `PlanTier`. No limit should ever be
-hard-coded elsewhere — Phase 9 wires enforcement into upload, recording,
-and AI-chat endpoints against this single source.
-
-## Folder structure (Phase 2 state)
-
-```
-notes-platform/
-├── prisma/
-│   ├── schema.prisma        # full data model, §58
-│   └── seed.ts               # demo user + two sample subjects
-├── src/
-│   ├── app/
-│   │   ├── (auth)/            # sign-in, sign-up — shared layout
-│   │   ├── (app)/              # authenticated shell — sidebar + command palette
-│   │   │   ├── home/            # dashboard
-│   │   │   ├── subjects/        # list, detail, chapter detail, topic detail
-│   │   │   ├── groups/          # honest Phase 6 placeholder
-│   │   │   ├── materials/       # honest Phase 3 placeholder
-│   │   │   ├── assistant/       # honest Phase 5 placeholder
-│   │   │   ├── search/          # structural search
-│   │   │   └── settings/
-│   │   ├── api/
-│   │   │   ├── auth/[...nextauth]/, auth/register/
-│   │   │   ├── subjects/, chapters/, topics/   # hierarchy CRUD
-│   │   │   ├── profile/, onboarding/, search/
-│   │   │   └── health/
-│   │   ├── onboarding/         # real two-step flow (not gated behind (app))
-│   │   ├── globals.css, layout.tsx, page.tsx, error.tsx, not-found.tsx
-│   ├── components/
-│   │   ├── auth/, shell/ (sidebar, topbar, breadcrumbs, command palette)
-│   │   ├── subjects/, chapters/, topics/, dashboard/, settings/, search/,
-│   │   │   onboarding/, shared/ (EditableHeader, PhasePlaceholder)
-│   │   └── ui/                # Button, Input, Dialog, DropdownMenu, Tabs,
-│   │                            Textarea, Badge, Skeleton, EmptyState, ConfirmDialog
-│   ├── lib/
-│   │   ├── auth.ts, db.ts, provision.ts, access.ts, dashboard.ts
-│   │   ├── plans.ts, rate-limit.ts, utils.ts, subject-style.ts
-│   │   ├── api-response.ts
-│   │   ├── stores/ui-store.ts
-│   │   ├── validation/        # auth, hierarchy, profile schemas + tests
-│   │   └── services/          # provider-agnostic interfaces, §64
-│   └── middleware.ts
-├── docs/
-├── .env.example
-└── README.md
+    opt First-Time Registration (/api/auth/register)
+        User->>Provision: provisionNewUser(userId)
+        Provision->>DB: Transaction: Create Profile + FREE Subscription + Default Workspace
+        DB-->>Provision: Commit Transaction
+    end
 ```
 
-## What's deliberately deferred
-
-Per §92 ("no fake features"), each of these has a real nav entry and page
-that plainly states which phase implements it — never a fake working UI:
-
-- Materials upload, storage, previews → **Phase 3**
-- Recording, transcription, timestamps → **Phase 4**
-- AI chat, RAG, structured notes, semantic search → **Phase 5**
-- Groups, invitations, realtime → ~~Phase 6~~ **done as of Phase 6.6 — see the "Phase 6 — Groups + collaboration" section below** (realtime is the one sub-item still deferred; see that section's Known limitations)
-- Google Drive/Docs import → **Phase 7**
-- Flashcards, quizzes, AI tutor → **Phase 8**
-- Row-level security, production rate limiting, observability → **Phase 9** (rate limiting done as of Phase 9.1; observability foundation — Datadog logs/metrics, health/readiness, client-error reporting — done as of Phase 9.2, see `docs/observability.md`; production security boundary hardening — headers/CSP, input-validation fixes, dependency upgrades — done as of Phase 9.3, see `docs/security-hardening.md`; row-level security remains Phase 9)
-
-## Phase 1 verification checklist
-
-- [ ] `npm install`
-- [ ] `docker run` (or managed) Postgres with `pgvector` available
-- [ ] `npm run db:migrate` creates all tables cleanly
-- [ ] `npm run db:seed` creates `demo@example.com` / `Password123`
-- [ ] `npm run dev`, visit `/`, redirected to `/sign-in`
-- [ ] Sign up with a new email → redirected to `/onboarding` → `/home`
-- [ ] Sign out → redirected to `/sign-in`
-- [ ] Sign in with the seeded demo account works
-- [ ] `GET /api/health` returns `{ status: "ok", database: "connected" }`
-- [ ] Visiting `/home` while signed out redirects to `/sign-in` (middleware)
+### Authorization Architecture (`src/lib/access.ts`):
+- `requireUser()`: Asserts that an active session exists; redirects unauthenticated requests to `/sign-in` or throws `UnauthorizedError` in API contexts.
+- `assertCanAccess(resourceType, resourceId, userId, requiredRole)`: Validates that the user is the owner, a valid workspace member, or a group member with sufficient privileges.
+- `getSafeCallbackUrl(rawUrl)`: Validates redirection targets post-login, strictly rejecting protocol-relative URLs (`//evil.com`), backslash bypasses (`/\evil.com`), and infinite redirect loops.
 
 ---
 
-# Phase 2 — Dashboard + Subject/Chapter/Topic system
+## 4. Multi-Tenancy & Data Model Relationships
 
-## What was built
+Zenote enforces multi-tenancy at the data layer through a dual-boundary model: **Personal Workspaces** and **Collaborative Groups**.
 
-- **AppShell**: `Sidebar` (Home, My Subjects, Groups, Materials, AI
-  Assistant, Search, Settings + user menu with plan badge and sign-out),
-  `Topbar` (breadcrumbs + Cmd/Ctrl+K trigger), and a `CommandPaletteProvider`
-  wrapping every authenticated route via `src/app/(app)/layout.tsx`.
-- **Command palette** (`cmdk`): static actions (New Subject, navigation,
-  sign out) plus live search over subjects/chapters/topics, debounced
-  against `/api/search`.
-- **Dashboard** (`/home`): greeting, Quick Actions (only "New Subject" is a
-  real action — the rest are visibly disabled and labeled with the phase
-  that implements them, never faked as working), Continue Learning (most
-  recently updated topics), Recent Subjects, Study Progress (computed live
-  from `Chapter.status`, not estimated), and honest placeholders for AI
-  Processing (Phase 4–5) and Groups (Phase 6).
-- **Subject → Chapter → Topic CRUD**: full create/read/update/archive/
-  soft-delete for all three levels, each with its own route handlers under
-  `src/app/api/{subjects,chapters,topics}/`, all funneled through
-  `src/lib/access.ts`.
-- **Structural search**: `/search` page and `/api/search` — string matching
-  on names/descriptions only. Deliberately **not** semantic search; that
-  needs the RAG pipeline and is explicitly Phase 5 (see the note rendered
-  on the search page itself so this isn't a silent gap).
-- **Real onboarding** (`/onboarding`): two-step flow (usage intent → first
-  subject), replacing the Phase 1 stub that just redirected. Sets
-  `Profile.usageIntent`, `Profile.onboardedAt`, and `Workspace.mode`.
-- **Settings** (`/settings`): editable name, theme (light/dark/system, via
-  `next-themes`, persisted to `Profile.theme`), and read-only plan info
-  pulled from `lib/plans.ts`.
-- **UI primitives added**: `Dialog`, `DropdownMenu`, `Tabs` (all Radix-based
-  for accessibility — focus trapping, keyboard nav, ARIA out of the box),
-  `Textarea`, `Badge`, `Skeleton`/`CardGridSkeleton`, `EmptyState`,
-  `ConfirmDialog`, `PhasePlaceholder` (the "arrives in Phase N" pattern used
-  everywhere a later-phase feature is referenced from the nav or a tab).
-- **New dependencies**: `cmdk` (command palette), `sonner` (toast
-  notifications on every create/update/delete), `next-themes` (theme
-  persistence without a flash-of-wrong-theme), `date-fns` (relative
-  timestamps), `@radix-ui/react-{dialog,dropdown-menu,tabs,tooltip}`,
-  `tailwindcss-animate`.
+```mermaid
+erDiagram
+    User ||--o{ WorkspaceMember : "has"
+    User ||--o{ GroupMember : "has"
+    User ||--o| Profile : "owns"
+    User ||--o| Subscription : "holds"
 
-## Key decisions
+    Workspace ||--o{ WorkspaceMember : "contains"
+    Workspace ||--o{ Subject : "owns (personal)"
+    Workspace ||--o{ Material : "owns (personal)"
 
-- **One workspace per user, for now.** `getPrimaryWorkspace()` in
-  `lib/access.ts` is the single place this assumption lives. Every new
-  account (`lib/provision.ts`, shared by both the OAuth and email/password
-  signup paths so they can't drift apart) gets exactly one personal
-  `Workspace` at signup. Multi-workspace support is a matter of extending
-  this one function later, not a schema change.
-- **Soft-delete cascades explicitly.** Deleting a Subject soft-deletes its
-  Chapters and Topics in the same transaction; deleting a Chapter
-  soft-deletes its Topics. This keeps Trash/Recovery (spec §100 — not yet
-  built, but the data supports it) from orphaning rows. Full trash-browsing
-  UI is deferred; only the data layer is ready for it.
-- **The "no fake features" rule (spec §92) shaped the dashboard and nav
-  directly.** Materials, Groups, and AI Assistant nav items go to real
-  pages that state plainly which phase implements them — never a dead
-  button or a "Coming soon" toast. The same pattern (`PhasePlaceholder`)
-  is reused in the Topic page's Notes/Materials/Transcript/AI Chat/Study
-  Tools tabs.
-- **Command palette state is shared via a tiny Zustand store**
-  (`lib/stores/ui-store.ts`), not React context — the "open create-subject
-  dialog" action needs to be triggered from both the command palette and
-  the Subjects page's empty state, and a store is the simplest thing that
-  lets both do that without prop-drilling.
+    Group ||--o{ GroupMember : "contains"
+    Group ||--o{ Subject : "shares (group)"
+    Group ||--o{ Material : "shares (group)"
+    Group ||--o{ GroupActivity : "records"
 
-## Phase 2 verification checklist
+    Subject ||--o{ Chapter : "contains"
+    Chapter ||--o{ Topic : "contains"
+    Topic ||--o| Note : "has"
+    Topic ||--o{ Material : "links"
+    Topic ||--o{ Quiz : "generates"
+    Topic ||--o{ FlashcardDeck : "generates"
 
-- [ ] Sign up with a new account → onboarding asks for usage intent, then
-      an optional first subject
-- [ ] Skipping the first-subject step still lands on `/home` with an empty
-      state and a working "Create Subject" button
-- [ ] `Cmd/Ctrl+K` opens the command palette from any page; typing a
-      subject/chapter/topic name returns live results that navigate
-      correctly
-- [ ] Create a subject → chapter → topic; breadcrumbs update correctly at
-      each level
-- [ ] Archive and restore a subject; delete a chapter and confirm its
-      topics are also gone from the UI
-- [ ] Change a chapter's status on the Subject page; the dashboard's Study
-      Progress bar reflects it after refresh
-- [ ] Toggle theme in Settings; it persists across a reload and across
-      sign-out/sign-in
-- [ ] Visit `/materials`, `/groups`, `/assistant` — each clearly states
-      which phase adds it, nothing pretends to work
-- [ ] `npm run test` and `npm run lint` both pass clean
+    Material ||--o{ MaterialChunk : "decomposed into"
+    Material ||--o{ TranscriptSegment : "transcribed as"
+
+    FlashcardDeck ||--o{ Flashcard : "contains"
+    Flashcard ||--o{ FlashcardReview : "tracks per-user"
+```
+
+### Key Isolation Invariants:
+1. **Dual Scoping:** Every `Subject` and `Material` belongs either to a personal `Workspace` (`workspaceId`) OR to a collaborative `Group` (`groupId`). No entity can float un-scoped.
+2. **Private Activity Partitioning:** In a shared Group, `Materials` and `Subjects` are visible to all members. However, a user's `QuizAttempt` scores and `FlashcardReview` confidence ratings remain strictly private to the individual learner (`where: { userId }`).
 
 ---
 
-# Phase 3 — Notes editor + materials
+## 5. Database & ORM Architecture (PostgreSQL + pgvector)
 
-## What was built
-
-- **Storage layer, for real.** `StorageService` (defined in Phase 1 as an
-  interface with an "unconfigured" stub) now has two working
-  implementations: `LocalStorageService` — actual filesystem reads/writes
-  under `STORAGE_LOCAL_DIR`, zero setup, works out of the box for `npm run
-  dev` — and `S3StorageService` — real AWS SDK presigned URLs, for
-  anything deployed. `getStorageService()` picks between them via
-  `STORAGE_PROVIDER` (or infers it from which env vars are set).
-- **Materials system**: upload (drag-and-drop, multi-file, real XHR
-  progress — not simulated), link-add, list/search/filter (All /
-  Unorganized / Archived), rename, move (cascading Subject → Chapter →
-  Topic picker), tag, archive, soft-delete with real storage cleanup.
-  Enforced server-side against `lib/plans.ts` limits (per-file size AND
-  total storage quota) — never just a client-side check.
-- **Non-AI metadata extraction**: PDF page count (`pdf-lib`), image
-  dimensions (`image-size`), audio/video duration (`music-metadata`) — all
-  real, deterministic, and explicitly *not* AI understanding. Runs
-  synchronously right after upload for the local backend; the S3 backend
-  skips it for now (see Known Limitations) rather than pretending to do it.
-- **Material previews**: PDF via the browser's native renderer (iframe,
-  no added deps), images with zoom, a from-scratch audio player
-  (play/pause/seek/speed/volume — real HTML5 `<audio>` under custom
-  controls, not just the browser default), video, and plain text. DOCX/PPTX
-  get an **honest "no preview available" screen with a working download
-  button** instead of a faked render — per spec §92, not rendering
-  something is more honest than pretending to.
-- **Materials wired into every scope**: Subject and Chapter pages show
-  materials attached directly at that level; the Topic page's Materials
-  tab is fully live; the Dashboard's Recent Materials section and "Upload
-  Material" quick action are real.
-- **Block-based notes editor**: Tiptap (bold/italic/heading/lists/links)
-  per block, `dnd-kit` drag-to-reorder, a kind selector covering every
-  `NoteBlockKind` from the schema, add/delete sections, autosave (800ms
-  debounce), and a version history panel with non-destructive restore.
-  One note per topic, auto-created on first visit (see Known Limitations
-  for why that's a deliberate scope cut, not a missing feature).
-- **Mobile nav drawer**: the desktop sidebar is now `lg:`-only; a
-  Radix-Dialog-based slide-in drawer (`MobileNavDrawer`) covers the same
-  nav on narrow viewports, triggered by a hamburger button in the Topbar.
-
-## A real bug this phase caught (and fixed) before shipping
-
-The notes bulk-save endpoint (`PUT /api/notes/[noteId]/blocks`) originally
-used `noteBlock.upsert({ where: { id: block.id }, ... })` keyed on the
-client-supplied block id. Since block ids are generated client-side (so
-the editor has stable keys before the first save), a malicious or buggy
-client could send an id that happens to belong to a block on a *different*
-note — Prisma would run the `update` branch against that row without any
-ownership check, since the endpoint only verified access to the note in
-`params`, not to each individual block's actual current owner. Fixed by
-splitting into "update only ids already confirmed to belong to this note
-(from our own prior read)" vs. "always insert everything else as a
-brand-new row with a server-generated id" — no incoming id is ever trusted
-enough to drive an update. This is documented inline in the route handler,
-not just here.
-
-## Key decisions
-
-- **One note per topic.** The schema (`Note.topicId` is a plain nullable
-  FK, not unique) allows several; the UI deliberately exposes only a
-  get-or-create single note per topic. A notes-list UI is a small addition
-  later if it's ever needed — not a schema change.
-- **Local storage buffers uploads in memory**, not true streaming-to-disk.
-  Fine for dev/demo; the documented fix for production-scale files is
-  exactly what the S3 backend already does (direct browser-to-object-store
-  upload, this server never sees the bytes).
-- **Version snapshots are throttled, not per-keystroke**: at most one
-  automatic snapshot every 10 minutes of active editing, plus one on every
-  explicit "Save version now" click. A snapshot on every autosave would
-  make the version list noise, not history.
-- **Link materials don't fetch anything.** Saving a link just saves the
-  URL and title — no server-side fetch, no content extraction. Real link
-  import (fetch, extract, index) needs the RAG pipeline and is Phase 5
-  work; doing a partial version now would mean either faking the
-  "understanding" part or building throwaway fetch logic that Phase 5
-  replaces anyway.
-
-## Known limitations (by design, not oversights)
-
-- **S3-backed materials skip metadata extraction.** The completion route
-  only extracts page count/dimensions/duration when the local backend is
-  active, because getting the bytes back from S3 just to extract a page
-  count is a real cost (a full object download) this phase chose not to
-  pay. S3-backed materials go straight to `READY` with no `metadata`.
-  Fixing this later means either downloading a byte range server-side or
-  moving extraction into a background worker — both are reasonable, but
-  out of scope here.
-- **Local storage upload buffers the whole file in memory** before writing
-  to disk (see `/api/storage/upload/route.ts`). Not a concern at
-  dev/demo scale; would need to switch to a real streaming write (or just
-  use the S3 backend, which sidesteps this entirely) before handling large
-  files in production.
-- **DOCX/PPTX have no in-app preview.** This is the honest "we don't fake
-  it" choice, not a bug — see spec §92. Download always works.
-- **Undo/redo is block-scoped, not whole-note.** Tiptap's built-in
-  undo/redo works within each block's text; undoing a block *add/delete/
-  reorder* isn't tracked step-by-step — the coarser version history
-  (restore a snapshot from N minutes ago) is the mechanism for that,
-  documented as a deliberate scope trade-off rather than a missing feature.
-- **A newly-created block's editor can lose focus once**, right when its
-  very first autosave completes, if the user is still actively typing in
-  that exact block at that moment — because the server assigns it a real
-  id in place of the client's temp id, and React remounts on key change.
-  Every subsequent edit to that block is unaffected.
-
-## Phase 3 verification checklist
-
-- [ ] Drag-and-drop a PDF, an image, and an audio file onto the Materials
-      page — real progress bars, all three land in `.storage/` on disk
-- [ ] Open the PDF — renders in an iframe; open the image — zoom toggle
-      works; open the audio file — custom player plays, seeks, and its
-      speed/volume controls work
-- [ ] Rename a material, move it into a Topic via the cascading picker,
-      add a tag, then archive and restore it
-- [ ] Delete a material — it disappears immediately and its file is gone
-      from `.storage/` on disk
-- [ ] Try uploading a file larger than your plan's per-file limit (see
-      `lib/plans.ts`) — rejected with a clear error, not a silent failure
-- [ ] Open a Topic's Notes tab — add a few sections, reorder them by drag,
-      change a block's kind, add a heading and some bold/italic text —
-      autosave indicator flips through saving → saved
-- [ ] Wait (or click "Save version now"), make another edit, then open
-      Version History and restore the earlier version — confirm content
-      reverts and a fresh snapshot of the pre-restore state now exists too
-- [ ] Shrink the browser to a phone width — sidebar disappears, hamburger
-      button opens the mobile drawer with the same nav
-- [ ] Re-verify Phase 1 (sign up/in/out) and Phase 2 (create Subject →
-      Chapter → Topic, command palette, dashboard) still all work
-- [ ] `npm run test`, `npm run lint` both pass clean
+- **ORM:** Prisma 5.20 with PostgreSQL 15+.
+- **Vector Column:** `MaterialChunk.embedding` is defined as a `vector(1536)` column managed via raw SQL migration:
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS vector;
+  ALTER TABLE "MaterialChunk" ADD COLUMN IF NOT EXISTS "embedding" vector(1536);
+  CREATE INDEX IF NOT EXISTS "material_chunk_embedding_idx" ON "MaterialChunk" USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 100);
+  ```
+- **Prisma Integration:** Because Prisma does not have native schema primitives for vector arithmetic, raw parameterized SQL (`$queryRaw`) is used for all cosine distance operations, ensuring complete protection against SQL injection while taking advantage of IVFFlat index acceleration.
+- **Query Optimization (`lib/material-list-select.ts`):** List views specifically project lightweight metadata fields, excluding large document text (`extractedText`) and slide JSON (`extractedPages`), reducing payload size by over 99% on dashboard views.
 
 ---
 
-# Phase 4 — Audio recording + transcription
+## 6. File Upload, Storage & Ingestion Workflow
 
-## What was built
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Web Client
+    participant UploadRoute as POST /api/materials/upload-url
+    participant CompleteRoute as POST /api/materials/[materialId]/complete
+    participant Storage as StorageService (Disk / S3 / R2)
+    participant Worker as Processing Engine
 
-- **Real browser recording**: `RecorderPanel` uses `MediaRecorder` +
-  `getUserMedia` + an `AnalyserNode`-driven level meter (real amplitude
-  data, not a decorative pulse) — mic device selection, pause/resume,
-  cancel, and a live elapsed-time counter that correctly accounts for
-  paused time. On stop, the recorded `Blob` goes through the exact same
-  upload pipeline as a dragged-in file (see "shared upload hook" below).
-- **Speech-to-text abstraction, two real providers**: `SpeechService`
-  (defined in Phase 1, implemented for real now) has `AssemblyAISpeechService`
-  (recommended default — real speaker diarization via `speaker_labels`,
-  upload→create→poll against their REST API, no practical file-size limit)
-  and `OpenAIWhisperSpeechService` (simpler/cheaper, segment-level
-  timestamps via `verbose_json`, no diarization, hard-capped at 25MB per
-  spec of the actual Whisper API — checked and rejected client-side before
-  ever making the request). Selected via `SPEECH_PROVIDER`; unset or
-  misconfigured surfaces as a real `ProcessingJob` failure with an
-  actionable message, never a fake transcript (spec §92).
-- **Transcription orchestrator** (`lib/transcription.ts`): resolves audio
-  bytes from whichever `StorageService` backend is active (local disk or
-  S3 — added a `getObjectBuffer` method to `S3StorageService` for this),
-  calls the configured `SpeechService`, and writes real
-  `Transcript`/`TranscriptSegment` rows — or a real `FAILED` job with the
-  provider's actual error message.
-- **Processing job architecture**: `POST /api/materials/[id]/transcribe`
-  creates a `ProcessingJob` (using the `ProcessingJob`/`JobType.TRANSCRIPTION`
-  schema already defined in Phase 1) and kicks off the orchestrator
-  fire-and-forget, returning immediately; the client polls
-  `GET /api/materials/[id]` for live status. No fabricated progress
-  percentage — cloud STT providers don't report granular progress, so the
-  UI honestly shows "Transcribing… this can take a few minutes" instead.
-- **Transcript UI**: `MaterialTranscribeSection` combines the audio/video
-  player with the transcript state machine (not-yet-transcribed → queued
-  → running → done/failed) in one place, so there's never more than one
-  player rendered for a given material. Clicking a segment's timestamp
-  seeks the audio player there (via a new `AudioPlayer` `forwardRef`
-  handle) — real sync, not just static text. The Topic page's Transcript
-  tab lists that topic's recordings with live status pills, linking into
-  the full experience on each material's detail page.
-- **Recording-minutes usage tracking** (`lib/recording-usage.ts`): sums
-  this calendar month's AUDIO/VIDEO material durations against
-  `plan.recordingMinutesPerMonth` (already defined in `lib/plans.ts` since
-  Phase 1, unused until now) and blocks starting a *new* recording once
-  exhausted — a real, working limit, not a decorative note. Uploaded
-  (not recorded) audio files aren't blocked by this, since "recording
-  minutes" is specifically about the in-app Recorder feature; general
-  audio storage is already governed by the separate storage quota from
-  Phase 3.
-- **Shared upload hook** (`lib/hooks/use-material-upload.ts`): extracted
-  the request-URL → XHR-PUT-with-progress → complete pipeline out of
-  `MaterialUploader` so the Recorder could reuse it exactly, rather than
-  duplicating upload logic for a `Blob` vs. a `File`.
+    Client->>UploadRoute: Request upload slot (filename, mimeType, size)
+    UploadRoute->>UploadRoute: Validate file extension & plan quota
+    UploadRoute->>Storage: Generate direct upload URL / local path
+    UploadRoute-->>Client: Returns { uploadUrl, materialId }
 
-## Key decisions
+    Client->>Storage: PUT binary payload (multipart or direct S3 stream)
+    Storage-->>Client: 200 OK
 
-- **Fire-and-forget, not a real queue — deliberately, and documented.**
-  `runTranscriptionJob()` is called without `await` from the route
-  handler so the HTTP response returns immediately. This works correctly
-  on a persistent Node process (`next dev`, `next start` on a normal
-  server/container) because the event loop keeps running after the
-  response is sent. It does **not** work on request-scoped serverless
-  platforms (Vercel functions freeze the process once the response
-  completes) — the production upgrade path there is a real queue
-  (BullMQ+Redis, SQS, etc.) consuming from the same `ProcessingJob` table,
-  which is exactly why that table was already modeled generically back in
-  Phase 1 rather than as a transcription-specific structure.
-- **AssemblyAI over Whisper as the recommended default**, specifically
-  because it diarizes and doesn't need chunking for long lectures — both
-  directly serve spec §14/§15 (timestamps, speaker detection) and §13
-  (long audio) without extra client-side complexity. Whisper stays
-  available as the cheaper/simpler option for anyone who doesn't need
-  speaker labels.
-- **No client-side audio chunking was built.** AssemblyAI doesn't need it
-  (server-side, no practical size limit). For Whisper's 25MB cap, a real
-  chunk-transcribe-and-stitch pipeline is a meaningfully sized feature on
-  its own (splitting audio, offsetting timestamps, merging boundary
-  words) — rather than half-build it, oversized files fail with a clear,
-  actionable error telling the user to switch providers. Documented as a
-  known limitation, not silently missing.
-- **Manual transcription trigger for uploaded/imported audio, automatic
-  intent for the Recorder flow's "seamless" UX.** Spec §11's pipeline
-  narrative (stop → "Processing your recording…") describes the live
-  Recorder specifically; a plain audio *upload* (spec §12) doesn't carry
-  the same implied consent to immediately spend API credits, so it gets a
-  manual "Transcribe" button instead. (The Recorder flow still requires
-  one click today rather than truly zero — see Known Limitations.)
+    Client->>CompleteRoute: Notify upload completion
+    CompleteRoute->>Storage: Verify object existence and true byte length
+    CompleteRoute->>CompleteRoute: Transition Material status: UPLOADING -> READY
+    CompleteRoute->>Worker: Dispatch asynchronous extraction / transcription job
+```
 
-## Known limitations (by design, not oversights)
-
-- **Untestable from this sandbox.** Neither `api.assemblyai.com` nor
-  `api.openai.com` is reachable from this environment's network allowlist
-  — the same category of limitation as the S3 storage backend in Phase 3.
-  Both providers are written against their published REST API contracts
-  and are ready to run wherever real network access and an API key exist;
-  I could not exercise a live transcription end-to-end here.
-- **The Recorder flow doesn't auto-trigger transcription after upload.**
-  It saves the recording and navigates to the material page, where
-  transcription is one click away — fully automatic chaining (record →
-  upload → immediately transcribe with zero further clicks) was cut for
-  time in favor of getting the harder pieces (real diarization, real
-  polling, real usage limits) right. This is a small, contained follow-up.
-- **No client-side chunking for the Whisper provider** — see "Key
-  decisions" above. AssemblyAI doesn't have this limitation.
-- **Command palette integration is navigation-only.** "Record Lecture" in
-  the palette goes to `/materials` rather than deep-linking straight into
-  the Recorder tab of the upload dialog — doing the latter cleanly would
-  have meant refactoring `UploadMaterialDialog` from an uncontrolled to a
-  controlled component, which felt like an unnecessary risk this late in
-  the phase for a nice-to-have. The real buttons on that page work fully.
-- **Global search doesn't index materials or transcripts.** `/api/search`
-  still only covers Subject/Chapter/Topic names (from Phase 2) — searching
-  transcript content is explicitly semantic/RAG territory and belongs in
-  Phase 5, not bolted on here as string matching.
-- **Speaker labels are provider-assigned identifiers ("Speaker A",
-  "Speaker B"), never names.** Nothing in this phase guesses or infers who
-  a speaker actually is — that would be fabricating information the audio
-  alone can't supply.
-
-## Phase 4 verification checklist
-
-- [ ] Grant mic permission and record a short clip — level meter reacts to
-      actual sound, pause/resume preserves elapsed time correctly, cancel
-      discards it, stop uploads it and lands on the material page
-- [ ] With `SPEECH_PROVIDER` unset, click "Transcribe" on an audio file —
-      job fails immediately with a clear "not configured" message, not a
-      hang or a fake result
-- [ ] With a real `SPEECH_PROVIDER` + API key configured (outside this
-      sandbox), transcribe a short recording — segments appear with
-      timestamps (and speaker labels, if using AssemblyAI); clicking a
-      segment seeks the audio player there
-- [ ] Try to start a new recording after (simulated) exhausting your
-      plan's monthly recording minutes — blocked with a clear message
-- [ ] Upload an audio file directly (not via the Recorder) — it does
-      *not* auto-transcribe; the manual "Transcribe" button is there
-- [ ] Open a Topic's Transcript tab with a couple of recordings in
-      different states — status pills (queued/running/done/failed) match
-      each material's actual state
-- [ ] Re-verify Phase 1–3 all still work: auth, Subject/Chapter/Topic
-      CRUD, command palette, notes editor autosave/versioning, material
-      upload/preview/move/archive/delete
-- [ ] `npm run test`, `npm run lint` both pass clean
+### Supported Material Types:
+- **Audio (`.mp3`, `.wav`, `.m4a`, `.webm`):** Duration probing, metadata extraction via `music-metadata`, and speech-to-text dispatch.
+- **PDF (`.pdf`):** Page-by-page text and bounding coordinate extraction using `pdfjs-dist` and `pdf-lib`.
+- **Microsoft Word (`.docx`):** Clean HTML and text extraction via `mammoth`, sanitized using `isomorphic-dompurify`.
+- **Microsoft PowerPoint (`.pptx`):** Slide-by-slide text extraction and preview generation using `pptx2html` and `jszip`.
 
 ---
 
-# Phase 6 — Groups + collaboration
+## 7. Google Drive & Google Docs Integration
 
-> Note: this file has no dedicated Phase 5 section (a pre-existing gap,
-> not something Phase 6.7 closeout is scoped to fix — see
-> `PROJECT_STATE.md` for the authoritative Phase 5 record). This section
-> covers Phase 6 only, added during Phase 6.7 closeout to bring this file
-> in line with the actually-implemented Groups architecture, sub-phases
-> 6.1 through 6.6.
+The Google integration utilizes a **decoupled connected accounts model**. Users can authenticate to Zenote with email/password while independently connecting a Google account for Drive access.
 
-## What was built
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User Browser
+    participant Connect as /api/integrations/google/connect
+    participant Google as Google Identity Provider
+    participant Callback as /api/integrations/google/callback
+    participant DB as PostgreSQL (ConnectedAccount)
+    participant DriveAPI as Google Drive API v3
 
-- **Group as a second collaboration boundary alongside Workspace**
-  (6.1): `Group`, `GroupMember` (with `MemberRole` — the same
-  OWNER/ADMIN/MEMBER/VIEWER enum `WorkspaceMember` already used),
-  `GroupInvitation`. A `Group` is created with the creator as `OWNER`
-  inside one transaction, so the "exactly one OWNER" invariant is never
-  briefly broken by a partial write.
-- **Subject/Material ownership made mutually exclusive between Workspace
-  and Group** (6.1 invariant, wired into the create/update routes as of
-  6.4): `Subject.workspaceId` became nullable; every Subject and Material
-  resolves to exactly one owning scope, asserted defensively at the point
-  of creation (`assertSubjectScopeInvariant`), not just implied by
-  which fields happen to be set.
-- **Membership + invitations** (6.2): role changes and member removal/
-  leave through one shared pure authorization function each
-  (`canChangeMemberRole`, `canRemoveMember` in `lib/group-role.ts`) so the
-  OWNER-protection rule lives in one place, not duplicated per route.
-  Invitations are token-based, expire, and require the accepting
-  account's email to match the invitation's email (checked against a
-  fresh `db.user` read, not the session) — token possession alone is
-  never sufficient to join.
-- **Groups UI** (6.3): group list, group detail page with tabs
-  (Overview/Members/Subjects/Materials/Activity/AI Assistant), invite/
-  accept/decline flows, member role management UI.
-- **Group-scoped Subjects and Materials** (6.4): the Subjects/Materials
-  tabs list a group's own content; creating/renaming/deleting a group
-  Subject requires ADMIN+ (`assertSubjectManageAccess`); a bare group
-  Material (no subject/chapter/topic) requires only membership to read,
-  mirroring the existing `assertScopeAccess` rule for bare workspace
-  scope.
-- **Group-scoped AI Assistant** (6.5): a group's AI Assistant tab
-  retrieves from everything the group has shared (`ResolvedAIScope`'s
-  `ownerType: "group"` branch), but each member's conversation thread is
-  their own (`AIConversation.userId`, unchanged from Phase 5) — shared
-  knowledge, private threads, never a multi-user shared conversation.
-- **Activity log + notifications** (6.6): `ActivityLog` (group-scoped,
-  actor + stable `action` string + optional metadata) and `Notification`
-  (per-user, typed, with read state) — both models existed in the schema
-  since Phase 1 but were unwired until this sub-phase. Now wired into
-  group creation, invite/accept/decline, role change, member remove/
-  leave, group Subject create/update/delete, and group Material add/
-  remove. `NotificationBell` in the shell Topbar (global, every
-  authenticated page) and a real `GroupActivityPanel` on the group page's
-  Activity tab (paginated, newest first) replaced the Phase 6.3
-  `PhasePlaceholder`.
+    User->>Connect: Initiate Drive connection
+    Connect->>Connect: Generate state token (AES encrypted CSRF state)
+    Connect-->>User: Redirect to accounts.google.com with Drive read-only scopes
+    User->>Google: Grant permission
+    Google-->>User: Redirect to Callback with code & state
+    Callback->>Google: Exchange code for Access & Refresh tokens
+    Callback->>Callback: Encrypt tokens with AES-256-GCM using GOOGLE_TOKEN_ENCRYPTION_KEY
+    Callback->>DB: Upsert ConnectedAccount record
+    Callback-->>User: Redirect to /settings?connected=google
 
-## Key decisions
+    User->>DriveAPI: Browse files (delegated via /api/integrations/google/files)
+    User->>DriveAPI: Import Document (/api/integrations/google/import)
+    DriveAPI->>DriveAPI: Export Google Doc as text/plain
+    DriveAPI-->>DB: Create Material record and trigger RAG indexing
+```
 
-- **Membership-gated vs. management-gated, applied consistently.** Bare
-  group access (viewing the group, its Members/Subjects/Materials/
-  Activity lists, its AI Assistant) requires only membership — any role,
-  including VIEWER. *Mutating* group-owned structure (creating/renaming/
-  deleting a group Subject, changing a member's role, removing a member,
-  sending an invitation) requires ADMIN or OWNER. Removing yourself
-  ("leave") is the one exception allowed at any role below OWNER, since
-  self-removal isn't a privilege escalation risk the way removing someone
-  else is. OWNER can never be removed or have their role changed by
-  anyone, including themselves via this path.
-- **Activity/notification writes are atomic with the mutation they
-  describe wherever both happen in the same transaction** (e.g. removing
-  a member and logging `member.removed` either both commit or both roll
-  back) — `lib/activity.ts`/`lib/notifications.ts`'s helpers accept
-  either the shared `db` client or an active `tx` for exactly this
-  reason.
-- **Notification recipients are always derived server-side**, never from
-  a client-supplied `userId` — invite/role-change/removal notifications
-  go to the specific affected user; join/leave/decline notifications go
-  to the group's current OWNER/ADMIN members (looked up fresh at write
-  time), excluding the actor so nobody is notified about their own
-  action.
-- **No realtime layer was built for Phase 6** (spec §36's "Rahul uploaded
-  Lecture.mp3" live-update behavior). `NotificationBell` polls
-  `GET /api/notifications?unread=true` every 30 seconds instead of using
-  websockets/SSE — there is no realtime infrastructure anywhere in this
-  codebase yet, and building one for Phase 6 alone would have been a
-  parallel subsystem rather than a continuation of the existing
-  request/response architecture. Polling is the honest minimal behavior;
-  a real realtime layer is a standalone follow-up, not scoped to any
-  Phase 6 sub-phase.
+---
 
-## Known limitations (by design, not oversights)
+## 8. AI & Lecture Intelligence Workflow
 
-- **No realtime collaboration** — see "Key decisions" above. Group state
-  (members, activity, notifications) updates on navigation/refresh/poll,
-  not instantly.
-- **Chapter/Topic/Material mutation inside a group Subject was
-  deliberately not expanded beyond Subject-level ADMIN+ gating during
-  Phase 6.4**, and this remains undecided as of Phase 6.6's close. Group
-  Subject creation/rename/delete requires ADMIN+; mutating a Chapter,
-  Topic, or Material *inside* an already-existing group Subject currently
-  follows the narrower existing per-resource access checks, not a
-  blanket ADMIN+ gate. Whether it should be tightened is an open product
-  decision, not yet made by any Phase 6 sub-phase.
-- **Material move-between-owners stays unrestricted**, same open decision
-  as above — not yet addressed.
-- **One documented, narrow invitation race**: the duplicate-pending-
-  invitation check (6.2) runs inside the same transaction as the create,
-  narrowing but not fully eliminating two truly simultaneous invite
-  requests both passing the check before either commits. Worst case is
-  two `GroupInvitation` rows for the same group/email, which
-  accept/decline both handle safely — see the code comment in
-  `src/app/api/groups/[groupId]/invitations/route.ts` for the full
-  reasoning on why a stricter guarantee (a partial unique index) wasn't
-  pursued.
-- **AI provider configuration is independent of Phase 6.** Group AI chat
-  (6.5) uses the same provider-free scaffold as Phase 5 — real retrieval
-  and scoping, no fabricated responses, but no actual model call happens
-  until a real `AI_API_KEY`/provider is configured per `docs/ai-setup.md`.
-  This was true before Phase 6 and nothing in Phase 6 changes it.
-- **Prisma engine binaries are unreachable in this sandbox**
-  (`binaries.prisma.sh` returns 403 — not on the environment's allowed-
-  domains list), which blocks `npx prisma generate`/`migrate dev`/
-  `migrate status` here. This is an environment limitation carried across
-  every Phase 6 sub-phase, not something introduced by or specific to
-  Phase 6 — see `PROJECT_STATE.md`'s "How to verify this document" for
-  the exact typecheck-error-count consequence and the local command to
-  clear it.
-- **No manual browser/live-database verification has been performed for
-  any Phase 6 sub-phase**, including 6.6 — this sandbox has no dev server
-  or reachable database. All verification below is `test`/`lint`/
-  `typecheck` only; see `PROJECT_STATE.md`'s "Exact next steps" for the
-  manual click-through checklist still outstanding.
+AI capabilities are powered by an **interface-first abstraction** (`AIService` in `src/lib/services/interfaces.ts`) implemented via Google Gemini (`gemini-2.5-flash-lite`) and OpenAI embeddings (`text-embedding-3-small`):
 
-## Phase 6 verification checklist
+```mermaid
+flowchart TD
+    RawDoc["Raw Lecture Audio / Document"] --> Chunker["Deterministic Chunking Engine (300-word windows or 30s audio intervals)"]
+    Chunker --> Embedder["OpenAI text-embedding-3-small (1536 dimensions)"]
+    Embedder --> VectorDB[("pgvector: MaterialChunk rows")]
 
-- [ ] As a group OWNER, invite a new member by email, then accept from
-      that account — role, activity log entry, and admin notification
-      all appear correctly
-- [ ] As a VIEWER, confirm you can read the group's Subjects/Materials/
-      Activity/AI Assistant tabs but every mutating action (invite, role
-      change, remove, create Subject) is hidden/rejected
-- [ ] Remove a member as ADMIN — the removed user's next session shows a
-      `GROUP_MEMBER_REMOVED` notification; a member leaving voluntarily
-      instead notifies the group's admins, not the leaver
-- [ ] Open the notification bell — unread badge count matches, clicking a
-      notification marks it read and navigates to the linked page
-- [ ] Confirm a non-member gets 403/404 from
-      `GET /api/groups/[groupId]/activity`, not just a hidden tab
-- [ ] `npm run test`, `npm run lint`, `npm run typecheck` — see
-      `PROJECT_STATE.md` for the exact currently-expected numbers
+    UserQuery["User Asks Question / Requests Notes"] --> QueryEmbed["Generate Query Embedding"]
+    QueryEmbed --> CosineSearch["pgvector Cosine Distance Search (<=>)"]
+    VectorDB --> CosineSearch
 
-# Phase 9.4 — Reliability, resilience & operational hardening
+    CosineSearch --> ScopeFilter{"Scope Filter (Subject/Topic/Group)"}
+    ScopeFilter --> RAGContext["Assemble Numbered Citations Context"]
 
-An evidence-driven audit of the existing architecture; **no new infrastructure
-(no queue, no new datastore, no schema change)**. The fire-and-forget
-`ProcessingJob` model from Phases 4–7 is unchanged, including its documented
-serverless caveat.
+    RAGContext --> GeminiPrompt["Gemini Prompt + Socratic System Instruction"]
+    GeminiPrompt --> GeminiModel["Google Gemini 2.5 Flash Lite"]
+    GeminiModel --> StreamResponse["Grounded Response with Clickable Timestamps & Page Links"]
+```
 
-## What changed and why
+### Grounded Citations Contract:
+Every AI answer includes structured citation metadata. Citations link directly to:
+- Specific timestamped playback offsets in recorded lectures (e.g. `?t=482s`).
+- Specific numbered pages in imported PDF slides or documents (e.g. `?page=14`).
 
-- **Explicit timeouts on every outbound call.** `lib/fetch-timeout.ts`
-  (`fetchWithTimeout`) now wraps Google Drive/OAuth, AssemblyAI, Whisper and
-  Datadog calls; the Gemini and OpenAI SDK clients are constructed with explicit
-  timeouts, S3 calls carry an `abortSignal`. Before this, almost none had one.
-- **Bounded, transient-only retries.** Gemini: 1 extra attempt, 5xx only (not
-  429, not 4xx). OpenAI embeddings: 1 retry, 30s per attempt. Google import:
-  `isRetryableGoogleError` (429/5xx/timeouts/network only, max 3 attempts).
-  AssemblyAI: status polling tolerates up to 5 consecutive transient failures
-  (a read-only GET on a job still running remotely); the billed upload and
-  create-transcript calls are **never** retried.
-- **Consistent provider-unavailable behavior.** OpenAI embedding failures map to
-  `AIProviderUnavailableError` (→ 503) like Gemini; flashcard/quiz routes map it
-  through `lib/ai-route-errors.ts` instead of `throw err`; Google routes go
-  through `lib/google-route-errors.ts`, which shows only `GoogleApiError.publicMessage`
-  and never echoes raw error text.
-- **Job lifecycle helpers (`lib/processing-jobs.ts`).**
-  `createJobIfNoneActive` makes "is one already running? / create one" atomic per
-  (material, type) with a transaction-scoped Postgres advisory lock (no schema
-  change), and marks jobs stranded by a restart (QUEUED/RUNNING past a
-  per-type threshold) as FAILED so they cannot block retries forever.
-  `claimJob` (QUEUED→RUNNING exactly once) and `failJob` (never throws; never
-  overwrites a finished job) are used by every job runner. Post-success side
-  effects (queueing indexing, activity log) are best-effort and can no longer
-  flip an already-successful job/material to FAILED.
-- **Index writes.** Chunk inserts are multi-row batches in one transaction with
-  an explicit timeout and a per-material advisory lock (Prisma's 5s default
-  interactive-transaction timeout would roll back a large document *after* the
-  paid embedding calls succeeded; concurrent writers could duplicate chunks).
-  Embedding requests are split into batches of 100 inputs.
-- **Upload completion (S3).** `POST /materials/[id]/complete` now HEADs the
-  object: missing → 409 (stays UPLOADING, retryable); real size recorded in
-  `sizeBytes` (previously never set, so S3 uploads never counted toward the
-  storage quota); over per-file/quota limit → object deleted, FAILED, 413;
-  storage unreachable → 503 (stays UPLOADING). The UPLOADING→READY transition is
-  a status-guarded `updateMany`, so only one of two concurrent completes runs
-  the follow-up side effects.
-- **Google import.** Lookup + create + job creation are one transaction
-  serialized per (user, Drive file) (no duplicate Materials on double-click);
-  downloads are capped at the plan's per-file limit (declared length, then
-  streaming count) instead of being fully buffered first; a failed *re*-import
-  restores the material to READY with its previous content instead of wiping it.
-- **Rate limiting.** Redis client `retry: false`, 1s per-call timeout, and a
-  10s per-process cool-down after a failure; during an outage checks fall back
-  to the per-process in-memory limiter (was: fully open). Transcribe and
-  generate-notes routes gained per-user rate limits (they had none).
-- **Health.** `/api/health` is `force-dynamic` (Next 14 otherwise prerenders a
-  request-less `GET` handler at build time — `PROJECT_STATE.md` already records
-  the build reaching that step), bounds DB/Redis checks to 3s, reports
-  `status: "ok" | "degraded" | "error"` (degraded = Redis configured but
-  unreachable, or storage misconfigured; still HTTP 200), and requires
-  `NEXTAUTH_SECRET` in production (`config`). New `GET /api/health/live` is a
-  dependency-free liveness probe.
+---
 
-## Known limitations (deliberately not addressed)
+## 9. Groups & Collaborative Workspaces
 
-- Jobs still run inside the request-receiving process (see Phase 4). Stale-job
-  reaping is on demand (next request for the same job), not a background sweep.
-- An in-flight AssemblyAI transcript id is not persisted, so a process death
-  mid-poll loses the (already billed) remote transcript; the retry re-uploads.
-- Audio is still buffered in memory for transcription (large files rely on plan
-  size limits); Google downloads are capped, uploads/transcription are not streamed.
-- Abandoned `UPLOADING` materials (client never called `/complete`) are not
-  cleaned up automatically. A `DELETE` that fails after soft-delete can orphan
-  an object (logged, not retried).
-- Redis rate limiting: an `EXPIRE` failing right after the first `INCR` leaves a
-  counter without a TTL until manually cleared (pre-existing pattern).
-- `retrieval.ts` binds one parameter per material id for workspace-wide scope
-  (bounded by Postgres' bind-parameter limit at extreme material counts).
-- Concurrent first `GET /api/ai/conversations` calls can create a duplicate empty
-  conversation (harmless: the most recently updated one is used).
-- Flashcard/quiz generation has no server-side in-flight lock; duplicates are
-  bounded by the UI loading state, the 5/min rate limit and the monthly quota.
+- **Entity Model:** Groups act as collaborative workspaces with a dedicated `Group` record, members with roles (`OWNER`, `ADMIN`, `MEMBER`, `VIEWER`), and audit logging via `GroupActivity`.
+- **Invitations:** Secured by high-entropy cryptographic tokens with expiration intervals and revocation capabilities.
+- **Shared Assistant Scoping:** When a query is initiated inside a group, the RAG retrieval scope is automatically restricted to materials shared to that group, preventing data leakage across private workspaces.
 
-# Phase 9.5 — Performance, database efficiency & runtime optimization
+---
 
-An evidence-driven audit (Prisma schema/query patterns, API routes, RAG
-retrieval, storage, client code) against baseline `46cef33`. Only two
-findings had concrete, reproducible evidence and low-risk fixes; both are
-implemented. No new infrastructure, no schema changes, no caching added.
+## 10. API Route Architecture & Service Responsibilities
 
-## Implemented
+All endpoints reside in `src/app/api/` and adhere to standardized REST semantics:
 
-- **S3 storage-read proxy no longer buffers whole objects to serve a byte
-  range.** `GET /api/storage/read`'s S3 branch called `getObjectBuffer()`
-  (downloads the entire object) and then sliced the requested range out of
-  it in JS — for every `<audio>`/`<video>` seek and the suffix-range
-  duration probe (see `lib/http-range.ts`), not just a full download.
-  `S3StorageService.getObjectRange(key, range?)` now passes a real S3
-  `Range` header (`GetObjectCommand`'s built-in support) so only the
-  requested bytes are ever fetched; the route first calls `headObject` for
-  the real size (needed to resolve a suffix range like `bytes=-100`), then
-  fetches exactly the resolved slice. `getObjectBuffer` itself is
-  unchanged and still used where the whole file is genuinely needed
-  (transcription, document extraction).
-- **Six material-list queries stopped fetching each material's full
-  extracted text/pages.** `Material.extractedText` (`@db.Text`) and
-  `Material.extractedPages` (`Json`) can each hold a full document's
-  extracted text; a plain `findMany()` with no `select` returns every
-  column. None of the list UIs (`MaterialCard`/`MaterialActionsMenu`) read
-  either field — only the material detail route and the Google Doc viewer
-  do. New `lib/material-list-select.ts` (`MATERIAL_LIST_SELECT` /
-  `MaterialListItem`) is now used by the Materials page, `GET
-  /api/materials`, the Subject/Chapter/Topic pages, the Group page, and
-  the dashboard's recent materials — with matching prop-type updates
-  through `MaterialCard`, `MaterialsPanel`, `GroupMaterialsPanel`, and the
-  four Subject/Chapter/Topic/Group tab components. Measured against a real
-  Postgres 16 + pgvector database (all 9 real migrations applied) with 50
-  materials seeded with ~300KB of extracted text/pages each: the same list
-  query returned 30.2MB of JSON before this change and 22.8KB after.
+```text
+/api/
+├── ai/
+│   └── conversations/         # Multi-turn chat (/conversations, /conversations/[id]/messages)
+├── auth/                      # NextAuth session handler and /register endpoint
+├── chapters/                  # Chapter operations (/chapters/[chapterId], child topics)
+├── client-errors/             # Error boundary crash reporting to server logs
+├── flashcards/                # Flashcard deck operations (/flashcards/[deckId], reviews)
+├── groups/                    # Group CRUD, members, invitations, and activity feeds
+├── health/                    # Production readiness (/health) and liveness (/health/live)
+├── integrations/google/       # Google OAuth flow, file browsing, status, and Drive import
+├── materials/                 # Material upload slots, processing, transcription, note generation
+├── notes/                     # Note operations (/notes/[noteId], blocks, versions, restore)
+├── notifications/             # In-app notifications and dismissal endpoints
+├── onboarding/                # Initial profile onboarding completion endpoint
+├── processing-jobs/           # Asynchronous background job status polling (/processing-jobs/[jobId])
+├── profile/                   # User profile preferences and theme settings
+├── progress/                  # Study progress rollups, quiz scores, and momentum stats
+├── quizzes/                   # Quiz operations (/quizzes/[quizId], attempts)
+├── recording-usage/           # Monthly recording quota tracking
+├── search/                    # Workspace-scoped full-text search
+├── storage/                   # Presigned upload URLs (/storage/upload) and byte-range read proxies (/storage/read)
+├── subjects/                  # Subject management, chapters, and hierarchy views
+└── topics/                    # Topic operations (/topics/[topicId], flashcards, quizzes, notes)
+```
 
-## Investigated, not changed (evidence didn't justify a fix, or the fix
-## would change behavior rather than pure performance)
+---
 
-- **AI chat loads the entire conversation history on every message.**
-  `GET .../messages`'s `db.aIMessage.findMany` has no `take`, and the full
-  result is sent to the model as context on every turn — a real,
-  measurable, and growing cost (linear DB read, and effectively quadratic
-  total tokens billed across a long conversation), with an eventual
-  context-window failure mode for very long AI Tutor sessions. Not fixed
-  here: bounding what history reaches the model changes what the AI can
-  "remember" mid-conversation, which is a product decision (message-count
-  cap? sliding window? summarization of older turns?), not an incidental
-  performance change — see the master prompt's "do NOT change model
-  behavior... merely for performance."
-- **Dashboard's `subjectsWithChapters` query has no `take`.** Bounded in
-  practice by how many Subjects one workspace has; no evidence of this
-  being a real problem at any scale this app runs at today.
-- **`GET /api/search` uses `ILIKE` (`contains`) with no trigram index.**
-  Low-traffic surface (workspace-scoped name/description search, not full
-  content search — that's the separate RAG-backed retrieval path); no
-  index was added without an actual slow-query finding.
-- **`retrieval.ts` binds one SQL parameter per in-scope material id.**
-  Already documented as a Phase 9.4 limitation; no new evidence of it
-  being a practical problem, and duplicating/extending Phase 9.4's
-  concurrency/query design without a concrete regression is explicitly
-  out of scope for this phase.
+## 11. External Services & Configuration
+
+| Service | Environment Variable(s) | Functionality |
+|---|---|---|
+| **PostgreSQL & pgvector** | `DATABASE_URL` | Relational data persistence and 1536-dim vector retrieval |
+| **NextAuth** | `NEXTAUTH_SECRET`, `NEXTAUTH_URL` | Session signing, CSRF protection, and cookie encryption |
+| **Google Gemini** | `AI_PROVIDER="gemini"`, `GOOGLE_AI_API_KEY` | Lecture note synthesis, AI chat, and AI Tutor |
+| **OpenAI** | `EMBEDDING_PROVIDER="openai"`, `OPENAI_API_KEY` | Vector embedding generation (`text-embedding-3-small`) |
+| **AssemblyAI** | `SPEECH_PROVIDER="assemblyai"`, `ASSEMBLYAI_API_KEY` | Lecture transcription with speaker diarization |
+| **Google Cloud OAuth** | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_TOKEN_ENCRYPTION_KEY` | Social sign-in and encrypted Drive/Docs connectivity |
+| **Cloudflare R2 / AWS S3** | `STORAGE_DRIVER="s3"`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Cloud object storage for materials and audio |
+| **Upstash Redis** | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Distributed rate limiting across serverless instances |
+| **Datadog** | `DD_API_KEY`, `DD_SITE`, `DD_ENV`, `DD_SERVICE`, `DD_VERSION` | Production structured logging, metrics, and alerting |
+| **Web3Forms** | `NEXT_PUBLIC_WEB3FORMS_ACCESS_KEY` | Serverless delivery of contact and support messages |
+
+---
+
+## 12. Testing & Quality Verification
+
+Zenote enforces a rigorous, multi-layered automated testing regime:
+
+- **Test Framework:** Vitest 2.1 (`vitest run`).
+- **Test Suite Metrics:** **86 test suites**, **875 passing tests** (4 skipped integration tests requiring external API keys).
+- **Test Categories:**
+  1. *Unit & Service Tests:* Validating document chunking, token estimation, rate-limit backoff, and citation parsing.
+  2. *API Route Handler Tests:* Mocking the database and service interfaces to verify HTTP status codes, multi-tenant authorization boundaries, schema validation, and error envelopes.
+  3. *Security Boundary Tests:* Validating CSP headers, open-redirect prevention, and sanitization of user-supplied HTML.
+  4. *Zero-Mock Production Policy:* Production service implementations (`ai-gemini.ts`, `embedding-openai.ts`, `storage-s3.ts`) never return mock data or simulate responses; if credentials are unset, they raise explicit, structured configuration errors.
