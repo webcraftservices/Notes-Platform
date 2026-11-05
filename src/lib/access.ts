@@ -1,6 +1,6 @@
 import { getServerSession } from "next-auth";
 import { notFound, redirect } from "next/navigation";
-import type { MemberRole } from "@prisma/client";
+import type { MemberRole, Prisma, GroupMember } from "@prisma/client";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { roleMeetsMinimum } from "@/lib/group-role";
@@ -71,11 +71,92 @@ async function userIsWorkspaceMember(workspaceId: string, userId: string) {
   return !!membership;
 }
 
-async function userIsGroupMember(groupId: string, userId: string) {
-  const membership = await db.groupMember.findUnique({
-    where: { groupId_userId: { groupId, userId } },
+export async function userIsGroupMember(groupId: string, userId: string) {
+  const membership = await db.groupMember.findFirst({
+    where: {
+      groupId,
+      userId,
+      group: { deletedAt: null },
+    },
+    select: { id: true },
   });
   return !!membership;
+}
+
+export type LockedGroupRecord = {
+  id: string;
+  deletedAt: Date | null;
+};
+
+/**
+ * Acquires a row-level FOR SHARE lock on the parent Group within a transaction.
+ * Serializes resource creation against concurrent group deletion under PostgreSQL READ COMMITTED.
+ *
+ * Conflict semantics:
+ * - FOR SHARE is compatible with concurrent FOR SHARE locks (multiple resource creations do not block each other).
+ * - FOR SHARE conflicts with FOR UPDATE and FOR NO KEY UPDATE (group deletion update).
+ * - If resource creation acquires FOR SHARE first, deletion waits until resource creation commits.
+ * - If deletion acquires its lock first, resource creation waits until deletion commits, then observes deletedAt !== null and aborts.
+ */
+export async function lockGroupForShare(
+  tx: Prisma.TransactionClient,
+  groupId: string
+): Promise<LockedGroupRecord | null> {
+  if (typeof tx?.$queryRaw !== "function") {
+    throw new Error("Transaction client does not support raw query locking (tx.$queryRaw is missing).");
+  }
+  const rows = await tx.$queryRaw<LockedGroupRecord[]>`
+    SELECT id, "deletedAt" FROM "Group" WHERE id = ${groupId} FOR SHARE
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Acquires an exclusive row-level FOR UPDATE lock on the Group within a transaction.
+ * Used at the start of group deletion to ensure no concurrent resource creations can slip past.
+ */
+export async function lockGroupForUpdate(
+  tx: Prisma.TransactionClient,
+  groupId: string
+): Promise<LockedGroupRecord | null> {
+  if (typeof tx?.$queryRaw !== "function") {
+    throw new Error("Transaction client does not support raw query locking (tx.$queryRaw is missing).");
+  }
+  const rows = await tx.$queryRaw<LockedGroupRecord[]>`
+    SELECT id, "deletedAt" FROM "Group" WHERE id = ${groupId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Validates that a user is an active member of a group and holds a serialization lock (FOR SHARE)
+ * on the parent group until the enclosing transaction commits.
+ */
+export async function assertActiveGroupMemberForCreation(
+  tx: Prisma.TransactionClient,
+  groupId: string,
+  userId: string,
+  allowedRoles?: MemberRole[]
+): Promise<GroupMember> {
+  const group = await lockGroupForShare(tx, groupId);
+  if (!group || group.deletedAt !== null) {
+    throw new NotAuthorizedError();
+  }
+
+  const member = await tx.groupMember.findFirst({
+    where: {
+      groupId,
+      userId,
+      group: { deletedAt: null },
+    },
+  });
+  if (!member) {
+    throw new NotAuthorizedError();
+  }
+  if (allowedRoles && !allowedRoles.includes(member.role)) {
+    throw new NotAuthorizedError();
+  }
+  return member;
 }
 
 /** Throws NotAuthorizedError if the user can't reach this workspace OR (if set) group. */
@@ -139,11 +220,13 @@ export async function getAccessibleMaterial(materialId: string, userId: string) 
     where: { id: materialId, deletedAt: null },
   });
   if (!material) return null;
-  if (material.ownerId === userId) return material;
 
   if (material.groupId) {
     if (await userIsGroupMember(material.groupId, userId)) return material;
+    throw new NotAuthorizedError();
   }
+
+  if (material.ownerId === userId) return material;
   if (material.workspaceId) {
     if (await userIsWorkspaceMember(material.workspaceId, userId)) return material;
   }
@@ -159,11 +242,13 @@ export async function getAccessibleMaterial(materialId: string, userId: string) 
 export async function getAccessibleFlashcardDeck(deckId: string, userId: string) {
   const deck = await db.flashcardDeck.findUnique({ where: { id: deckId } });
   if (!deck) return null;
-  if (deck.ownerId === userId) return deck;
 
   if (deck.groupId) {
     if (await userIsGroupMember(deck.groupId, userId)) return deck;
+    throw new NotAuthorizedError();
   }
+
+  if (deck.ownerId === userId) return deck;
   if (deck.workspaceId) {
     if (await userIsWorkspaceMember(deck.workspaceId, userId)) return deck;
   }
@@ -173,11 +258,13 @@ export async function getAccessibleFlashcardDeck(deckId: string, userId: string)
 export async function getAccessibleQuiz(quizId: string, userId: string) {
   const quiz = await db.quiz.findUnique({ where: { id: quizId } });
   if (!quiz) return null;
-  if (quiz.ownerId === userId) return quiz;
 
   if (quiz.groupId) {
     if (await userIsGroupMember(quiz.groupId, userId)) return quiz;
+    throw new NotAuthorizedError();
   }
+
+  if (quiz.ownerId === userId) return quiz;
   if (quiz.workspaceId) {
     if (await userIsWorkspaceMember(quiz.workspaceId, userId)) return quiz;
   }
@@ -189,9 +276,16 @@ export async function getAccessibleMaterialByStorageKey(storageKey: string, user
     where: { storageKey, deletedAt: null },
   });
   if (!material) return null;
+
+  if (material.groupId) {
+    if (await userIsGroupMember(material.groupId, userId)) return material;
+    throw new NotAuthorizedError();
+  }
+
   if (material.ownerId === userId) return material;
-  if (material.groupId && (await userIsGroupMember(material.groupId, userId))) return material;
-  if (material.workspaceId && (await userIsWorkspaceMember(material.workspaceId, userId))) return material;
+  if (material.workspaceId) {
+    if (await userIsWorkspaceMember(material.workspaceId, userId)) return material;
+  }
   throw new NotAuthorizedError();
 }
 
@@ -469,8 +563,13 @@ export async function getAccessibleAIConversation(conversationId: string, userId
  * to tell OWNER/ADMIN apart from MEMBER/VIEWER.
  */
 export async function getGroupRole(groupId: string, userId: string): Promise<MemberRole | null> {
-  const membership = await db.groupMember.findUnique({
-    where: { groupId_userId: { groupId, userId } },
+  const membership = await db.groupMember.findFirst({
+    where: {
+      groupId,
+      userId,
+      group: { deletedAt: null },
+    },
+    select: { role: true },
   });
   return membership?.role ?? null;
 }
@@ -482,8 +581,12 @@ export async function getGroupRole(groupId: string, userId: string): Promise<Mem
  * also want `role`/`joinedAt` don't need a second query.
  */
 export async function requireGroupRole(groupId: string, userId: string, minimum: MemberRole) {
-  const membership = await db.groupMember.findUnique({
-    where: { groupId_userId: { groupId, userId } },
+  const membership = await db.groupMember.findFirst({
+    where: {
+      groupId,
+      userId,
+      group: { deletedAt: null },
+    },
   });
   if (!membership || !roleMeetsMinimum(membership.role, minimum)) {
     throw new NotAuthorizedError();

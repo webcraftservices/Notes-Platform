@@ -31,8 +31,11 @@ export async function POST(_req: Request, { params }: { params: { token: string 
   const sessionUser = await getSessionUser();
   if (!sessionUser) return UNAUTHORIZED();
 
-  const invitation = await db.groupInvitation.findUnique({ where: { token: params.token } });
-  if (!invitation) return NOT_FOUND();
+  const invitation = await db.groupInvitation.findUnique({
+    where: { token: params.token },
+    include: { group: { select: { id: true, deletedAt: true } } },
+  });
+  if (!invitation || invitation.group.deletedAt !== null) return NOT_FOUND();
 
   if (invitation.status !== "PENDING") {
     return CONFLICT("This invitation is no longer available.");
@@ -61,6 +64,15 @@ export async function POST(_req: Request, { params }: { params: { token: string 
   }
 
   const result = await db.$transaction(async (tx) => {
+    // Re-verify the parent group exists and has not been soft-deleted concurrently.
+    const group = await tx.group.findUnique({
+      where: { id: invitation.groupId, deletedAt: null },
+      select: { id: true, name: true },
+    });
+    if (!group) {
+      return { groupDeleted: true as const };
+    }
+
     const existingMembership = await tx.groupMember.findUnique({
       where: { groupId_userId: { groupId: invitation.groupId, userId: dbUser.id } },
     });
@@ -102,19 +114,19 @@ export async function POST(_req: Request, { params }: { params: { token: string 
 
     // Admins/owners get a personal notification that someone joined;
     // the joining user isn't notified about their own action (spec §7).
-    const group = await tx.group.findUnique({
-      where: { id: invitation.groupId },
-      select: { name: true },
-    });
     const adminIds = await getGroupAdminUserIds(tx, invitation.groupId, dbUser.id);
     await createNotifications(tx, adminIds, {
       type: "GROUP_MEMBER_JOINED",
-      title: `${dbUser.name ?? dbUser.email} joined ${group?.name ?? "your group"}`,
+      title: `${dbUser.name ?? dbUser.email} joined ${group.name}`,
       link: `/groups/${invitation.groupId}?tab=members`,
     });
 
     return { alreadyMember: false as const, member };
   });
+
+  if ("groupDeleted" in result) {
+    return NOT_FOUND();
+  }
 
   if ("raced" in result) {
     return CONFLICT("This invitation has already been used.");

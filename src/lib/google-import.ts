@@ -9,7 +9,7 @@ import { getGoogleDriveService } from "@/lib/services/google-drive";
 import { extractGoogleDocText } from "@/lib/services/google-docs";
 import { getGoogleConnectionStatus, getValidGoogleAccessToken, GoogleNotConnectedError } from "@/lib/google-connection";
 import { isRetryableGoogleError } from "@/lib/services/google-errors";
-import { claimJob, createJobIfNoneActiveWithin, failJob } from "@/lib/processing-jobs";
+import { claimJob, createJobIfNoneActiveWithin, failJob, isJobActive } from "@/lib/processing-jobs";
 import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
@@ -311,6 +311,7 @@ export async function runGoogleImportJob(jobId: string): Promise<void> {
 
     if (material.type === "GOOGLE_DOC") {
       const text = await withGoogleImportRetry(() => extractGoogleDocText({ accessToken, documentId: fileId }));
+      if (!(await isJobActive(jobId, material.id))) return;
       // Material content and job completion commit together.
       const [updated] = await db.$transaction([
         db.material.update({
@@ -358,6 +359,8 @@ export async function runGoogleImportJob(jobId: string): Promise<void> {
 
     const metadata: { durationSeconds?: number; pageCount?: number; width?: number; height?: number; extractionError?: string } =
       await extractMetadata(material.type, buffer).catch(() => ({ extractionError: "unknown" }));
+
+    if (!(await isJobActive(jobId, material.id))) return;
 
     const [updated] = await db.$transaction([
       db.material.update({

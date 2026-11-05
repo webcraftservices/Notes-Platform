@@ -6,6 +6,7 @@ import {
   getPrimaryWorkspace,
   getAccessibleGroup,
   requireGroupRole,
+  assertActiveGroupMemberForCreation,
   NotAuthorizedError,
 } from "@/lib/access";
 import { assertSubjectScopeInvariant } from "@/lib/subject-scope";
@@ -73,26 +74,23 @@ export async function POST(req: Request) {
 
   try {
     if (groupId) {
-      // Phase 6.4 §2: only ADMIN/OWNER may create a Subject inside a
-      // Group. requireGroupRole throws NotAuthorizedError for both "not a
-      // member" and "member but below ADMIN" — the catch below maps
-      // either case to a 403 without distinguishing them to the caller.
-      await requireGroupRole(groupId, user.id, "ADMIN");
-      // Defense in depth: the two branches here already guarantee exactly
-      // one of workspaceId/groupId is set, but assert it anyway rather
-      // than trusting that invariant implicitly (mirrors resolveSubjectOwner's
-      // own defense-in-depth assertion in lib/subject-scope.ts).
-      assertSubjectScopeInvariant({ workspaceId: null, groupId });
-      const subject = await db.subject.create({
-        data: { ...rest, groupId, workspaceId: null },
-      });
-      await createActivityLog(db, {
-        groupId,
-        userId: user.id,
-        action: ActivityAction.SUBJECT_CREATED,
-        targetType: "subject",
-        targetId: subject.id,
-        metadata: { targetName: subject.name },
+      // Phase 6.4 / 10C.1D.2: only ADMIN/OWNER may create a Subject inside a
+      // Group. Group active verification and serialization lock (FOR SHARE) are committed atomically inside the transaction.
+      const subject = await db.$transaction(async (tx) => {
+        await assertActiveGroupMemberForCreation(tx, groupId, user.id, ["ADMIN", "OWNER"]);
+        assertSubjectScopeInvariant({ workspaceId: null, groupId });
+        const created = await tx.subject.create({
+          data: { ...rest, groupId, workspaceId: null },
+        });
+        await createActivityLog(tx, {
+          groupId,
+          userId: user.id,
+          action: ActivityAction.SUBJECT_CREATED,
+          targetType: "subject",
+          targetId: created.id,
+          metadata: { targetName: created.name },
+        });
+        return created;
       });
       return NextResponse.json({ subject }, { status: 201 });
     }

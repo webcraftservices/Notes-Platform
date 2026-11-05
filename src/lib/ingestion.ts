@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { chunkPagedText, chunkTranscriptSegments, chunkText, parseExtractedPages, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
 import { recordAIUsage } from "@/lib/ai-usage";
-import { claimJob, failJob } from "@/lib/processing-jobs";
+import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/processing-jobs";
 
 /**
  * Creates and starts an EMBEDDING job for a material whose text was just
@@ -155,12 +155,16 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
       context: { materialId: material.id, chunkCount: chunks.length },
     });
 
+    if (!(await isJobActive(jobId, material.id))) return;
+
     await db.$transaction(async (tx) => {
       // Serialize concurrent index writes for one material (e.g. a
       // re-import racing a manual re-index). Without this, two jobs could
       // interleave "delete old chunks" with "insert new chunks" and leave
       // duplicated chunks behind. Transaction-scoped: released on commit.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`chunks:${material.id}`}, 0))`;
+
+      if (!(await completeJobWithin(tx, jobId, material.id))) return;
 
       await tx.materialChunk.deleteMany({ where: { materialId: material.id } });
 

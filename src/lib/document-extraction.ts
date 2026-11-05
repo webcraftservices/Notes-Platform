@@ -2,7 +2,7 @@ import { Prisma, type Material, type ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getDocumentProcessingService } from "@/lib/services/document-processing";
 import { queueEmbeddingJob } from "@/lib/ingestion";
-import { claimJob, createJobIfNoneActive, failJob } from "@/lib/processing-jobs";
+import { claimJob, completeJobWithin, createJobIfNoneActive, failJob, isJobActive } from "@/lib/processing-jobs";
 import { DOCUMENT_EXTRACTION_TYPES, resolveExtractedPages, shouldQueueDocumentExtraction } from "@/lib/document-extraction-guard";
 
 /**
@@ -105,12 +105,18 @@ export async function runDocumentExtractionJob(jobId: string): Promise<void> {
     // no extractable text.
     const pages = resolveExtractedPages(result);
 
+    if (!(await isJobActive(jobId, material.id))) return;
+
     // Text and job completion are committed together: previously these
     // were two statements, so a failure between them left extracted text
     // saved but the job reported FAILED.
-    await db.$transaction([
-      db.material.update({
-        where: { id: material.id },
+    let completed = false;
+    await db.$transaction(async (tx) => {
+      if (!(await completeJobWithin(tx, jobId, material.id))) return;
+      completed = true;
+
+      await tx.material.update({
+        where: { id: material.id, deletedAt: null },
         data: {
           extractedText: text.length > 0 ? text : null,
           // Nullable Json fields require the explicit Prisma.DbNull sentinel
@@ -120,14 +126,10 @@ export async function runDocumentExtractionJob(jobId: string): Promise<void> {
           // project).
           extractedPages: pages ? (pages as Prisma.InputJsonValue) : Prisma.DbNull,
         },
-      }),
-      db.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      }),
-    ]);
+      });
+    });
 
-    if (text.length > 0) {
+    if (text.length > 0 && completed) {
       // Real, chunkable text is now available — index it right away,
       // same pattern as runGoogleImportJob's Google Doc branch and
       // runTranscriptionJob's post-success embedding trigger. Best-effort

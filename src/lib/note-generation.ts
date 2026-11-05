@@ -1,6 +1,6 @@
 import type { ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
-import { claimJob, failJob } from "@/lib/processing-jobs";
+import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/processing-jobs";
 import { getOrCreateTopicNote } from "@/lib/notes";
 import { getAIService } from "@/lib/services/ai";
 import { NOTE_BLOCK_KIND_ORDER, EMPTY_TIPTAP_DOC } from "@/lib/note-block-style";
@@ -53,6 +53,8 @@ export async function runNoteGenerationJob(jobId: string): Promise<void> {
     const ai = getAIService();
     const result = await ai.generateNotes({ transcriptText: transcript.fullText, templateKind: "lecture" });
 
+    if (!(await isJobActive(jobId, material.id))) return;
+
     if (result.blocks.length === 0) {
       await db.processingJob.update({
         where: { id: jobId },
@@ -62,6 +64,8 @@ export async function runNoteGenerationJob(jobId: string): Promise<void> {
     }
 
     await db.$transaction(async (tx) => {
+      if (!(await completeJobWithin(tx, jobId, material.id))) return;
+
       const note = await getOrCreateTopicNote(topic, job.userId);
 
       const existingBlocks = await tx.noteBlock.findMany({ where: { noteId: note.id } });
@@ -88,11 +92,6 @@ export async function runNoteGenerationJob(jobId: string): Promise<void> {
       } else {
         await tx.note.update({ where: { id: note.id }, data: { source: "AI_ASSISTED" } });
       }
-
-      await tx.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      });
     });
   } catch (err) {
     await failJob(jobId, "AI_NOTE_GENERATION", err, "AI note generation failed for an unknown reason.");

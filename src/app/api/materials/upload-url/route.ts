@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
-import { getSessionUser, getPrimaryWorkspace, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getPrimaryWorkspace,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { requestUploadSchema } from "@/lib/validation/materials";
 import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
 import { resolveMaterialType, guessExtension } from "@/lib/mime";
@@ -62,24 +67,36 @@ export async function POST(req: Request) {
   const materialId = nanoid(21);
   const storageKey = `materials/${user.id}/${materialId}.${guessExtension(baseMimeType)}`;
 
-  const material = await db.material.create({
-    data: {
-      id: materialId,
-      ownerId: user.id,
-      workspaceId: scope.workspaceId,
-      groupId: scope.groupId,
-      subjectId: scope.subjectId,
-      chapterId: scope.chapterId,
-      topicId: scope.topicId,
-      type: materialType,
-      title: String(filename).replace(/\.[^/.]+$/, "") || String(filename),
-      originalFilename: String(filename),
-      // Persist the normalized base MIME type (without parameters)
-      mimeType: baseMimeType,
-      storageKey,
-      status: "UPLOADING",
-    },
-  });
+  let material;
+  try {
+    material = await db.$transaction(async (tx) => {
+      if (scope.groupId) {
+        await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
+      }
+
+      return tx.material.create({
+        data: {
+          id: materialId,
+          ownerId: user.id,
+          workspaceId: scope.workspaceId,
+          groupId: scope.groupId,
+          subjectId: scope.subjectId,
+          chapterId: scope.chapterId,
+          topicId: scope.topicId,
+          type: materialType,
+          title: String(filename).replace(/\.[^/.]+$/, "") || String(filename),
+          originalFilename: String(filename),
+          // Persist the normalized base MIME type (without parameters)
+          mimeType: baseMimeType,
+          storageKey,
+          status: "UPLOADING",
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    throw err;
+  }
 
   const storage = getStorageService();
   const { uploadUrl } = await storage.createUploadUrl({

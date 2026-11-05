@@ -4,7 +4,7 @@ const db = vi.hoisted(() => ({
   flashcardDeck: { findUnique: vi.fn() },
   quiz: { findUnique: vi.fn() },
   workspaceMember: { findUnique: vi.fn() },
-  groupMember: { findUnique: vi.fn() },
+  groupMember: { findUnique: vi.fn(), findFirst: vi.fn() },
 }));
 
 vi.mock("@/lib/db", () => ({ db }));
@@ -21,17 +21,17 @@ describe("Learning scope authorization (Phase 8.1)", () => {
     await expect(getAccessibleFlashcardDeck("deck-1", "user-1")).resolves.toBeNull();
   });
 
-  it("always allows the owner, regardless of scope membership", async () => {
+  it("always allows the owner for personal decks without checking group membership", async () => {
     db.flashcardDeck.findUnique.mockResolvedValue({
       id: "deck-1",
       ownerId: "user-1",
-      groupId: "group-1",
+      groupId: null,
       workspaceId: null,
     });
-    // Owner shortcut must not even need to check membership.
+    // Owner shortcut applies to personal resources without checking group membership.
     const deck = await getAccessibleFlashcardDeck("deck-1", "user-1");
     expect(deck).toMatchObject({ id: "deck-1" });
-    expect(db.groupMember.findUnique).not.toHaveBeenCalled();
+    expect(db.groupMember.findFirst).not.toHaveBeenCalled();
   });
 
   it("allows a group member to reach a group-scoped deck they don't own", async () => {
@@ -41,7 +41,7 @@ describe("Learning scope authorization (Phase 8.1)", () => {
       groupId: "group-1",
       workspaceId: null,
     });
-    db.groupMember.findUnique.mockResolvedValue({ groupId: "group-1", userId: "user-2", role: "MEMBER" });
+    db.groupMember.findFirst.mockResolvedValue({ id: "gm-1", groupId: "group-1", userId: "user-2", role: "MEMBER" });
 
     const deck = await getAccessibleFlashcardDeck("deck-1", "user-2");
     expect(deck).toMatchObject({ id: "deck-1" });
@@ -54,7 +54,7 @@ describe("Learning scope authorization (Phase 8.1)", () => {
       groupId: "group-1",
       workspaceId: null,
     });
-    db.groupMember.findUnique.mockResolvedValue(null);
+    db.groupMember.findFirst.mockResolvedValue(null);
 
     await expect(getAccessibleFlashcardDeck("deck-1", "user-2")).rejects.toThrow(NotAuthorizedError);
   });
@@ -96,7 +96,7 @@ describe("Learning scope authorization (Phase 8.1)", () => {
       groupId: "group-1",
       workspaceId: null,
     });
-    db.groupMember.findUnique.mockResolvedValue({ groupId: "group-1", userId: "user-2", role: "VIEWER" });
+    db.groupMember.findFirst.mockResolvedValue({ id: "gm-2", groupId: "group-1", userId: "user-2", role: "VIEWER" });
 
     const quiz = await getAccessibleQuiz("quiz-1", "user-2");
     expect(quiz).toMatchObject({ id: "quiz-1" });
@@ -109,7 +109,7 @@ describe("Learning scope authorization (Phase 8.1)", () => {
       groupId: "group-1",
       workspaceId: null,
     });
-    db.groupMember.findUnique.mockResolvedValue(null);
+    db.groupMember.findFirst.mockResolvedValue(null);
 
     await expect(getAccessibleQuiz("quiz-1", "user-2")).rejects.toThrow(NotAuthorizedError);
   });

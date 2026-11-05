@@ -25,15 +25,12 @@ export default async function InvitationPage({ params }: { params: { token: stri
 
   const invitation = await db.groupInvitation.findUnique({
     where: { token: params.token },
-    include: { group: { select: { id: true, name: true, description: true } } },
+    include: { group: { select: { id: true, name: true, description: true, deletedAt: true } } },
   });
 
-  // Genuinely-nonexistent token. Unlike Group access (which deliberately
-  // returns an indistinguishable 404 for "doesn't exist" vs "exists but
-  // you're not a member" to avoid leaking existence), an invitation token
-  // is itself the secret — there's no separate membership check to
-  // conflate this with, so a plain notFound() is the right shape here.
-  if (!invitation) notFound();
+  // Non-existent token or the parent group has been soft-deleted. Do not
+  // reveal group details for a deleted group — treat as unavailable (404).
+  if (!invitation || invitation.group.deletedAt !== null) notFound();
 
   const dbUser = await db.user.findUnique({ where: { id: user.id }, select: { email: true } });
   const sessionEmail = dbUser?.email ?? null;

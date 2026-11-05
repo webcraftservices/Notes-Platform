@@ -5,6 +5,7 @@ import {
   getSessionUser,
   getPrimaryWorkspace,
   getAccessibleGroup,
+  assertActiveGroupMemberForCreation,
   NotAuthorizedError,
 } from "@/lib/access";
 import { createLinkMaterialSchema, listMaterialsQuerySchema } from "@/lib/validation/materials";
@@ -101,30 +102,44 @@ export async function POST(req: Request) {
   // deliberate scope boundary, not a missing feature: real link import
   // (spec §31 — fetch, extract, index) belongs with the RAG pipeline in
   // Phase 5, where indexing already has to exist for every material type.
-  const material = await db.material.create({
-    data: {
-      ownerId: user.id,
-      workspaceId: scope.workspaceId,
-      groupId: scope.groupId,
-      subjectId: scope.subjectId,
-      chapterId: scope.chapterId,
-      topicId: scope.topicId,
-      type: "LINK",
-      title,
-      sourceUrl: url,
-      status: "READY",
-    },
-  });
+  let material;
+  try {
+    material = await db.$transaction(async (tx) => {
+      if (scope.groupId) {
+        await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
+      }
 
-  if (material.groupId) {
-    await createActivityLog(db, {
-      groupId: material.groupId,
-      userId: user.id,
-      action: ActivityAction.MATERIAL_ADDED,
-      targetType: "material",
-      targetId: material.id,
-      metadata: { targetName: material.title },
+      const created = await tx.material.create({
+        data: {
+          ownerId: user.id,
+          workspaceId: scope.workspaceId,
+          groupId: scope.groupId,
+          subjectId: scope.subjectId,
+          chapterId: scope.chapterId,
+          topicId: scope.topicId,
+          type: "LINK",
+          title,
+          sourceUrl: url,
+          status: "READY",
+        },
+      });
+
+      if (created.groupId) {
+        await createActivityLog(tx, {
+          groupId: created.groupId,
+          userId: user.id,
+          action: ActivityAction.MATERIAL_ADDED,
+          targetType: "material",
+          targetId: created.id,
+          metadata: { targetName: created.title },
+        });
+      }
+
+      return created;
     });
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    throw err;
   }
 
   return NextResponse.json({ material }, { status: 201 });

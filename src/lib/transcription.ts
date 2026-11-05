@@ -5,7 +5,7 @@ import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
 import { getSpeechService } from "@/lib/services/speech";
 import { queueEmbeddingJob } from "@/lib/ingestion";
-import { claimJob, failJob } from "@/lib/processing-jobs";
+import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/processing-jobs";
 
 /**
  * Resolves raw audio bytes regardless of which storage backend is active.
@@ -43,6 +43,7 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
   // throws, so `void runTranscriptionJob(id)` at the call sites can never
   // turn a database blip into an unhandled promise rejection.
   let job: ProcessingJob | null = null;
+  let completed = false;
 
   try {
     job = await db.processingJob.findUnique({ where: { id: jobId } });
@@ -63,7 +64,12 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
       mimeType: material.mimeType ?? "audio/mpeg",
     });
 
+    if (!(await isJobActive(jobId, material.id))) return;
+
     await db.$transaction(async (tx) => {
+      if (!(await completeJobWithin(tx, jobId, material.id))) return;
+      completed = true;
+
       const transcript = await tx.transcript.upsert({
         where: { materialId: material.id },
         create: {
@@ -97,11 +103,6 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
           })),
         });
       }
-
-      await tx.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      });
     });
   } catch (err) {
     // ServiceNotConfiguredError messages are already actionable and
@@ -130,5 +131,5 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
   // honestly end up FAILED with a real configuration error rather than
   // silently doing nothing — the Topic's AI Chat tab surfaces that so it
   // isn't a silent gap.
-  if (job?.materialId) await queueEmbeddingJob(job.userId, job.materialId);
+  if (job?.materialId && completed) await queueEmbeddingJob(job.userId, job.materialId);
 }

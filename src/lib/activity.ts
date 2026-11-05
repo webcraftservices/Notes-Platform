@@ -9,6 +9,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
  */
 export const ActivityAction = {
   GROUP_CREATED: "group.created",
+  GROUP_DELETED: "group.deleted",
   MEMBER_INVITED: "member.invited",
   MEMBER_JOINED: "member.joined",
   MEMBER_LEFT: "member.left",
