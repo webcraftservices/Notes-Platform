@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { signUpSchema } from "@/lib/validation/auth";
 import { rateLimit } from "@/lib/rate-limit";
@@ -21,7 +22,15 @@ export async function POST(req: Request) {
 
   const { name, email, password } = parsed.data;
 
-  const existing = await db.user.findUnique({ where: { email } });
+  // Exact match lookup on normalized email, with case-insensitive fallback
+  // for compatibility with legacy accounts created before normalization was enforced.
+  let existing = await db.user.findUnique({ where: { email } });
+  if (!existing) {
+    existing = await db.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+    });
+  }
+
   if (existing) {
     // Deliberately vague — do not reveal whether an email is registered.
     return NextResponse.json(
@@ -30,14 +39,36 @@ export async function POST(req: Request) {
     );
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
+  try {
+    const passwordHash = await bcrypt.hash(password, 12);
 
-  const user = await db.user.create({
-    data: { name, email, passwordHash },
-    select: { id: true, email: true, name: true },
-  });
+    const user = await db.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: { name, email, passwordHash },
+        select: { id: true, email: true, name: true },
+      });
 
-  await provisionNewUser(user.id);
+      await provisionNewUser(newUser.id, tx);
 
-  return NextResponse.json({ user }, { status: 201 });
+      return newUser;
+    });
+
+    return NextResponse.json({ user }, { status: 201 });
+  } catch (err: unknown) {
+    // Handle Prisma unique constraint violation (P2002) in race conditions
+    if (
+      (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") ||
+      (typeof err === "object" && err !== null && "code" in err && (err as { code: unknown }).code === "P2002")
+    ) {
+      return NextResponse.json(
+        { error: "Could not create account with these details." },
+        { status: 409 }
+      );
+    }
+    console.error("[register] failed to create user:", err);
+    return NextResponse.json(
+      { error: "Could not create account with these details." },
+      { status: 500 }
+    );
+  }
 }

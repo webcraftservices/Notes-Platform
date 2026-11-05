@@ -57,14 +57,24 @@ export const authOptions: NextAuthOptions = {
           throw new Error("Too many sign-in attempts. Please try again later.");
         }
 
-        // Exact match lookup, with case-insensitive fallback for legacy casing compatibility
-        let user = await db.user.findUnique({ where: { email } });
-        if (!user) {
-          user = await db.user.findFirst({
-            where: { email: { equals: email, mode: "insensitive" }, deletedAt: null },
-          });
+        // Check for case-insensitive matches among active accounts before authenticating.
+        // We retrieve at most two matches: two are sufficient to establish ambiguity.
+        const matchingUsers = await db.user.findMany({
+          where: {
+            email: { equals: email, mode: "insensitive" },
+            deletedAt: null,
+          },
+          take: 2,
+        });
+
+        // If zero matches exist, or if multiple active accounts match case-insensitively (collision),
+        // fail safely and never authenticate an arbitrary account.
+        if (!Array.isArray(matchingUsers) || matchingUsers.length !== 1 || !matchingUsers[0]) {
+          return null;
         }
-        if (!user?.passwordHash) return null;
+
+        const user = matchingUsers[0];
+        if (!user.passwordHash) return null;
 
         const valid = await bcrypt.compare(password, user.passwordHash);
         if (!valid) return null;

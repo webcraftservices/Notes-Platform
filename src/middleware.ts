@@ -1,4 +1,4 @@
-import { withAuth } from "next-auth/middleware";
+import { withAuth, type NextRequestWithAuth } from "next-auth/middleware";
 import { NextResponse } from "next/server";
 
 /**
@@ -8,12 +8,20 @@ import { NextResponse } from "next/server";
  * — this middleware only enforces "must be signed in at all".
  */
 export default withAuth(
-  function middleware() {
+  function middleware(req: NextRequestWithAuth) {
+    if (req.nextUrl.pathname.startsWith("/api/") && !req.nextauth.token) {
+      return NextResponse.json({ error: "You need to sign in to do that." }, { status: 401 });
+    }
     return NextResponse.next();
   },
   {
     callbacks: {
-      authorized: ({ token }) => !!token,
+      authorized: ({ token, req }) => {
+        if (req.nextUrl.pathname.startsWith("/api/")) {
+          return true;
+        }
+        return !!token;
+      },
     },
     pages: {
       signIn: "/sign-in",
@@ -31,6 +39,8 @@ export const config = {
     "/search/:path*",
     "/settings/:path*",
     "/onboarding",
+    "/flashcards/:path*",
+    "/quizzes/:path*",
     "/api/subjects/:path*",
     "/api/chapters/:path*",
     "/api/topics/:path*",
@@ -38,5 +48,9 @@ export const config = {
     "/api/materials/:path*",
     "/api/groups/:path*",
     "/api/ai/:path*",
+    "/api/flashcards/:path*",
+    "/api/quizzes/:path*",
+    "/api/progress",
+    "/api/recording-usage",
   ],
 };

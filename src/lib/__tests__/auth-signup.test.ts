@@ -76,6 +76,30 @@ describe("signUpSchema validation rules", () => {
       expect(result.error.flatten().fieldErrors.confirmPassword).toContain("Passwords don't match");
     }
   });
+
+  it("normalizes email with leading/trailing whitespace and uppercase characters to trimmed lowercase", () => {
+    const result = signUpSchema.safeParse({
+      ...validPayload,
+      email: "   ADA.LOVELACE@EXAMPLE.COM   ",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.email).toBe("ada.lovelace@example.com");
+    }
+  });
+
+  it("preserves password validation rules when email contains uppercase and whitespace", () => {
+    const result = signUpSchema.safeParse({
+      ...validPayload,
+      email: "  STUDENT@EXAMPLE.COM  ",
+      password: "short",
+      confirmPassword: "short",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.flatten().fieldErrors.password).toContain("At least 8 characters");
+    }
+  });
 });
 
 describe("Sign Up Navigation & callbackUrl safety", () => {

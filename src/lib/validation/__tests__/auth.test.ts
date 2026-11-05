@@ -65,6 +65,22 @@ describe("signUpSchema", () => {
     const result = signUpSchema.safeParse({ ...base, name: "  " });
     expect(result.success).toBe(false);
   });
+
+  it("normalizes email by trimming surrounding whitespace and lowercasing", () => {
+    const result = signUpSchema.safeParse({ ...base, email: "  User@Example.COM  " });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.email).toBe("user@example.com");
+    }
+  });
+
+  it("normalizes email with uppercase letters and preserves valid fields", () => {
+    const result = signUpSchema.safeParse({ ...base, email: "NEW.STUDENT@DOMAIN.EDU" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.email).toBe("new.student@domain.edu");
+    }
+  });
 });
 
 describe("getSafeCallbackUrl", () => {
