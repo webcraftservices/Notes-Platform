@@ -12,9 +12,10 @@ import { ProgressRow } from "@/components/dashboard/progress-row";
 import { StudyActivityWidget } from "@/components/dashboard/study-activity-widget";
 import { CreateSubjectDialog } from "@/components/subjects/create-subject-dialog";
 import { CreateGroupDialog } from "@/components/groups/create-group-dialog";
-import { PhasePlaceholder } from "@/components/shared/phase-placeholder";
 import { MaterialCard } from "@/components/materials/material-card";
 import { UploadMaterialDialog } from "@/components/materials/upload-material-dialog";
+import { AiProcessingWidget } from "@/components/dashboard/ai-processing-widget";
+import { DashboardGroupsSection } from "@/components/dashboard/dashboard-groups-section";
 
 function greeting() {
   const hour = new Date().getHours();
@@ -26,7 +27,7 @@ function greeting() {
 export default async function DashboardPage() {
   const user = await requireUser();
   const workspace = await getPrimaryWorkspace(user.id);
-  const { recentSubjects, recentTopics, progress, subjectCount, recentMaterials } = await getDashboardData(workspace.id);
+  const { recentSubjects, recentTopics, progress, subjectCount, recentMaterials, recentJobs, groups } = await getDashboardData(workspace.id, user.id);
   // Phase 8.5 — real Quiz/AI-Tutor activity, global (no scope) so it
   // covers every quiz attempt and Tutor session this user has, personal
   // or group. Kept separate from `progress` above (ChapterStatus
@@ -163,27 +164,11 @@ export default async function DashboardPage() {
                 <Sparkles className="h-4 w-4 text-ink-faint" />
                 AI Processing
               </h2>
-              <PhasePlaceholder
-                icon={Sparkles}
-                title="No AI activity yet"
-                description="Once you record or upload material, processing status will show up here."
-                phase="Phase 4–5"
-              />
+              <AiProcessingWidget jobs={recentJobs} />
             </section>
           </div>
 
-          <section>
-            <h2 className="mb-3 flex items-center gap-2 font-display text-base font-semibold text-ink dark:text-white">
-              <Users className="h-4 w-4 text-ink-faint" />
-              Groups
-            </h2>
-            <PhasePlaceholder
-              icon={Users}
-              title="No groups yet"
-              description="Collaborative groups for sharing subjects and materials with others."
-              phase="Phase 6"
-            />
-          </section>
+          <DashboardGroupsSection groups={groups} />
         </div>
       </main>
       <CreateSubjectDialog />
