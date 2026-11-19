@@ -148,7 +148,13 @@ export async function startWorkerHealthServer(port: number): Promise<http.Server
   });
 }
 
-async function main(): Promise<void> {
+export interface WorkerRuntime {
+  shutdown: (signal: string, exitCode?: number) => Promise<void>;
+  worker: any;
+  healthServer: http.Server | null;
+}
+
+async function main(): Promise<WorkerRuntime> {
   let kvHydration;
   try {
     kvHydration = await hydrateEnvFromAzureKeyVault();
@@ -256,9 +262,15 @@ async function main(): Promise<void> {
   }
 
   let shuttingDown = false;
+  let sigtermHandler: (() => void) | undefined;
+  let sigintHandler: (() => void) | undefined;
+
   const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+
+    if (sigtermHandler) process.removeListener("SIGTERM", sigtermHandler);
+    if (sigintHandler) process.removeListener("SIGINT", sigintHandler);
 
     const timeoutMs = Math.max(
       1_000,
@@ -283,17 +295,63 @@ async function main(): Promise<void> {
       signal,
     });
 
-    await workerMod.stopProcessingWorker();
+    let effectiveExitCode = exitCode;
 
-    if (healthServer) {
-      await new Promise<void>((resolve) => {
-        const hs = healthServer!;
-        hs.close(() => resolve());
-        hs.closeIdleConnections?.();
-      }).catch(() => undefined);
+    try {
+      await workerMod.stopProcessingWorker();
+    } catch (err) {
+      effectiveExitCode = 1;
+      logRuntimeEvent(
+        "error",
+        {
+          service: "zenote-worker",
+          event: "shutdown_worker_stop_error",
+          workerId,
+          signal,
+        },
+        err
+      );
     }
 
-    await db.$disconnect().catch(() => undefined);
+    if (healthServer) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const hs = healthServer!;
+          hs.close((err) => (err ? reject(err) : resolve()));
+          hs.closeIdleConnections?.();
+        });
+      } catch (err) {
+        logRuntimeEvent(
+          "warn",
+          {
+            service: "zenote-worker",
+            event: "shutdown_health_server_close_error",
+            workerId,
+            signal,
+          },
+          err
+        );
+      }
+    }
+
+    if (typeof db?.$disconnect === "function") {
+      try {
+        await db.$disconnect();
+      } catch (err) {
+        effectiveExitCode = 1;
+        logRuntimeEvent(
+          "error",
+          {
+            service: "zenote-worker",
+            event: "shutdown_db_disconnect_error",
+            workerId,
+            signal,
+          },
+          err
+        );
+      }
+    }
+
     clearTimeout(watchdog);
 
     logRuntimeEvent("info", {
@@ -302,11 +360,13 @@ async function main(): Promise<void> {
       workerId,
       signal,
     });
-    process.exit(exitCode);
+    process.exit(effectiveExitCode);
   };
 
-  process.on("SIGTERM", () => void shutdown("SIGTERM", 0));
-  process.on("SIGINT", () => void shutdown("SIGINT", 0));
+  sigtermHandler = () => void shutdown("SIGTERM", 0);
+  sigintHandler = () => void shutdown("SIGINT", 0);
+  process.on("SIGTERM", sigtermHandler);
+  process.on("SIGINT", sigintHandler);
   process.on("unhandledRejection", (reason) => {
     logRuntimeEvent(
       "error",
@@ -330,6 +390,8 @@ async function main(): Promise<void> {
     );
     void shutdown("uncaughtException", 1);
   });
+
+  return { shutdown, worker, healthServer };
 }
 
 if (require.main === module) {

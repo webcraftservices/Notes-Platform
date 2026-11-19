@@ -68,11 +68,11 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
-      - name: Run hermetic Vitest suite
-        run: npm test
-
       - name: Build and verify CommonJS worker bundle
         run: npm run build:worker
+
+      - name: Run hermetic Vitest suite
+        run: npm test
 
   docker-build-and-runtime:
     name: Docker Multi-Stage Build & Compose Integration Verification

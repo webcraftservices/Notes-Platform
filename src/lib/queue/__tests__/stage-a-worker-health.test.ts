@@ -3,6 +3,7 @@ import path from "node:path";
 import http from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
+import { execSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 async function isLoopbackTcpBlocked(): Promise<boolean> {
@@ -24,6 +25,7 @@ async function isLoopbackTcpBlocked(): Promise<boolean> {
 
 const db = vi.hoisted(() => ({
   $queryRaw: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+  $disconnect: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/db", () => ({ db }));
 
@@ -141,6 +143,9 @@ describe("Stage A — Compiled Worker Runtime & Health Server", () => {
 
   it("produces a self-contained compiled dist/workers/index.cjs without unresolved @/ aliases or tsx requirement", () => {
     const bundlePath = path.resolve(process.cwd(), "dist/workers/index.cjs");
+    if (!fs.existsSync(bundlePath)) {
+      execSync("node scripts/build-worker.mjs", { stdio: "pipe" });
+    }
     expect(fs.existsSync(bundlePath)).toBe(true);
     const code = fs.readFileSync(bundlePath, "utf8");
     expect(code.length).toBeGreaterThan(10_000);

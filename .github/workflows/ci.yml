@@ -40,14 +40,14 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      - name: Compile dedicated BullMQ worker bundle
+        run: npm run build:worker
+
       - name: Run hermetic Vitest suite (live DB/provider suites skipped by design; enforced in stage-a-verification.yml)
         run: npm test
 
       - name: Verify LIM-09 concurrent index manifest & migration idempotency
         run: node scripts/prepare-concurrent-indexes.mjs --verify
-
-      - name: Compile dedicated BullMQ worker bundle
-        run: npm run build:worker
 
       - name: Build Next.js standalone production bundle
         env:
