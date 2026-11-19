@@ -158,6 +158,7 @@ export default function FolderTransfer({ images = [], autoPlay = 0, className = 
             {[0, 1, 2].map((i) => (
               <span key={i} className={`ft-card ft-c${i + 1}`}>
                 {images[i] ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- Accepts arbitrary dynamic caller URLs sized in container-query CSS units (cqw).
                   <img src={images[i]} alt="" draggable={false} />
                 ) : (
                   renderDocCard(i)

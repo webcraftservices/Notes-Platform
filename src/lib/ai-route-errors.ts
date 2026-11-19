@@ -1,6 +1,7 @@
 import { jsonError, logServerError } from "@/lib/api-response";
 import { AIProviderUnavailableError } from "@/lib/services/interfaces";
 import { sendDatadogMetric } from "@/lib/observability/datadog";
+import { sendAzureMonitorMetric } from "@/lib/observability/azure-monitor";
 
 /**
  * Phase 9.4 — shared "unexpected failure" mapping for the AI *generation*
@@ -23,6 +24,19 @@ export function aiGenerationFailureResponse(
   void sendDatadogMetric("ai.generation.requests", 1, {
     type: "count",
     tags: [`kind:${context.kind}`, "outcome:failure", `failure_category:${unavailable ? "unavailable" : "unexpected"}`],
+  });
+  void sendAzureMonitorMetric("ai.generation.requests", 1, {
+    properties: {
+      kind: context.kind,
+      outcome: "failure",
+      failureCategory: unavailable ? "unavailable" : "unexpected",
+    },
+  });
+  void sendAzureMonitorMetric("ai.generation.failures", 1, {
+    properties: {
+      kind: context.kind,
+      failureCategory: unavailable ? "unavailable" : "unexpected",
+    },
   });
 
   logServerError({ route: context.route, op: "generate", userId: context.userId, requestId: context.requestId }, err);

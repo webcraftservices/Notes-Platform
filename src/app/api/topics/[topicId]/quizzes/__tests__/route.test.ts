@@ -33,7 +33,12 @@ const generationModule = vi.hoisted(() => {
 });
 vi.mock("@/lib/services/quiz-generation", () => generationModule);
 
-import { POST } from "@/app/api/topics/[topicId]/quizzes/route";
+const db = vi.hoisted(() => ({
+  quiz: { findMany: vi.fn() },
+}));
+vi.mock("@/lib/db", () => ({ db }));
+
+import { GET, POST } from "@/app/api/topics/[topicId]/quizzes/route";
 import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 function makeRequest(): Request {
@@ -206,5 +211,61 @@ describe("POST /api/topics/[topicId]/quizzes", () => {
     expect(json.requestId).toEqual(expect.any(String));
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
+  });
+});
+
+describe("GET /api/topics/[topicId]/quizzes", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    access.getSessionUser.mockResolvedValue({ id: "user-1" });
+    access.getAccessibleTopic.mockResolvedValue({ id: "topic-1", name: "Zeroth Law" });
+    db.quiz.findMany.mockResolvedValue([
+      {
+        id: "quiz-1",
+        title: "Quiz — Zeroth Law",
+        topicId: "topic-1",
+        createdAt: new Date("2026-11-10T10:00:00.000Z"),
+        _count: { questions: 5 },
+        attempts: [
+          {
+            id: "att-2",
+            score: 90,
+            startedAt: new Date("2026-11-11T10:00:00.000Z"),
+            completedAt: new Date("2026-11-11T10:05:00.000Z"),
+          },
+          {
+            id: "att-1",
+            score: 70,
+            startedAt: new Date("2026-11-10T10:00:00.000Z"),
+            completedAt: new Date("2026-11-10T10:05:00.000Z"),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    access.getSessionUser.mockResolvedValue(null);
+    const res = await GET(new Request("https://example.test/api/topics/topic-1/quizzes"), {
+      params: { topicId: "topic-1" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns topic quiz summaries with questionCount, attemptCount, bestScore, and latestScore", async () => {
+    const res = await GET(new Request("https://example.test/api/topics/topic-1/quizzes"), {
+      params: { topicId: "topic-1" },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.quizzes).toHaveLength(1);
+    expect(json.quizzes[0]).toMatchObject({
+      id: "quiz-1",
+      title: "Quiz — Zeroth Law",
+      questionCount: 5,
+      attemptCount: 2,
+      bestScore: 90,
+      latestScore: 90,
+    });
   });
 });

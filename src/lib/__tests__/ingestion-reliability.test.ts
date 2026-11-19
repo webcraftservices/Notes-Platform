@@ -137,4 +137,11 @@ describe("queueEmbeddingJob", () => {
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
+
+  it("does not create an EMBEDDING job if the material has already been soft-deleted", async () => {
+    db.material.findUnique.mockResolvedValue({ id: "mat-deleted", deletedAt: new Date() });
+
+    await queueEmbeddingJob("u1", "mat-deleted");
+    expect(db.processingJob.create).not.toHaveBeenCalled();
+  });
 });

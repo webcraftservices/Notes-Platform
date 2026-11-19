@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, XCircle, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -18,16 +18,12 @@ interface AttemptResult {
 }
 
 /**
- * Phase 8.3's intentionally minimal quiz-taking experience (task §15) —
- * a clear multi-question layout, not a one-at-a-time flip flow, no
- * timer, no bookmarking, no adaptive anything. The score/correctness
- * shown after submission is exactly the server's response — this
- * component never computes or displays its own client-side score as
- * authoritative (task §16).
+ * Phase 8.3 & Phase 13 — Quiz Assessment Runner & Mastery View.
  *
- * `quiz` never contains `correctAnswer`/`explanation`/`sources` (see
- * `lib/quiz-serialization.ts`) — those only exist here after `result` is
- * set, straight from the submission response.
+ * The score/correctness shown after submission comes strictly from the
+ * server's `POST /api/quizzes/[quizId]/attempts` response. `quiz` never
+ * contains `correctAnswer`/`explanation`/`sources` prior to submission.
+ * Supports immediate quiz retakes (`Retake quiz`) to build mastery.
  */
 export function QuizTakingView({ quiz }: { quiz: PublicQuiz }) {
   const [answers, setAnswers] = useState<Record<string, AnswerValue>>({});
@@ -66,8 +62,14 @@ export function QuizTakingView({ quiz }: { quiz: PublicQuiz }) {
     }
   }
 
+  function handleRetake() {
+    setAnswers({});
+    setErrorMessage(null);
+    setResult(null);
+  }
+
   if (result) {
-    return <QuizResultView quiz={quiz} result={result} />;
+    return <QuizResultView quiz={quiz} result={result} onRetake={handleRetake} />;
   }
 
   return (
@@ -146,16 +148,41 @@ export function QuizTakingView({ quiz }: { quiz: PublicQuiz }) {
   );
 }
 
-function QuizResultView({ quiz, result }: { quiz: PublicQuiz; result: AttemptResult }) {
+function QuizResultView({
+  quiz,
+  result,
+  onRetake,
+}: {
+  quiz: PublicQuiz;
+  result: AttemptResult;
+  onRetake: () => void;
+}) {
   const resultByQuestionId = new Map(result.results.map((r) => [r.questionId, r]));
+  const score = result.attempt.score;
+  const masteryLabel =
+    score >= 85 ? "Mastered" : score >= 70 ? "Proficient" : "Developing";
+  const masteryVariant =
+    score >= 85 ? "success" : score >= 70 ? "accent" : "default";
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="font-display text-xl font-semibold text-ink dark:text-white">{quiz.title} — Results</h1>
-        <p className="mt-1 text-sm text-ink-muted dark:text-white/50">
-          {result.attempt.correctCount} / {result.attempt.totalQuestions} correct — {result.attempt.score}%
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="font-display text-xl font-semibold text-ink dark:text-white">
+              {quiz.title} — Results
+            </h1>
+            <Badge variant={masteryVariant}>{masteryLabel}</Badge>
+          </div>
+          <p className="mt-1 text-sm text-ink-muted dark:text-white/50">
+            {result.attempt.correctCount} / {result.attempt.totalQuestions} correct — {result.attempt.score}%
+          </p>
+        </div>
+
+        <Button variant="secondary" onClick={onRetake}>
+          <RotateCcw className="h-4 w-4" />
+          Retake quiz
+        </Button>
       </div>
 
       <div className="space-y-4">

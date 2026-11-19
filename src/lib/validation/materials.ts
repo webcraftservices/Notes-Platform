@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isSafeHttpUrl } from "@/lib/safe-url";
 
 const scopeFields = {
   subjectId: z.string().cuid().optional(),
@@ -15,7 +16,11 @@ export const requestUploadSchema = z.object({
 
 export const createLinkMaterialSchema = z.object({
   title: z.string().trim().min(1).max(200),
-  url: z.string().trim().url("Enter a valid URL"),
+  url: z
+    .string()
+    .trim()
+    .url("Enter a valid URL")
+    .refine(isSafeHttpUrl, "URL must use http:// or https://"),
   ...scopeFields,
 });
 

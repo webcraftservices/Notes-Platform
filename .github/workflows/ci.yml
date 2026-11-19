@@ -1,0 +1,70 @@
+name: Zenote CI — Static Analysis, Hermetic Tests, Worker & Next Standalone Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zenote-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, Lint, Tests, Builds & Readiness Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run hermetic Vitest suite (live DB/provider suites skipped by design; enforced in stage-a-verification.yml)
+        run: npm test
+
+      - name: Verify LIM-09 concurrent index manifest & migration idempotency
+        run: node scripts/prepare-concurrent-indexes.mjs --verify
+
+      - name: Compile dedicated BullMQ worker bundle
+        run: npm run build:worker
+
+      - name: Build Next.js standalone production bundle
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_SITE_URL: "https://ci.zenote.local"
+          STORAGE_ENDPOINT: "https://ci-storage.example.com"
+        run: npm run build
+
+      - name: Verify standalone assets & zero secret leakage
+        run: |
+          set -euo pipefail
+          test -f .next/standalone/server.js
+          test -f .next/standalone/node_modules/pdfjs-dist/package.json
+          test -d .next/standalone/node_modules/pdfjs-dist/standard_fonts
+          test -f dist/workers/index.cjs
+          test ! -e .next/standalone/.env
+          test ! -e .next/standalone/.env.local
+
+      - name: Run Stage D Deployment Readiness Validator
+        run: npm run verify:readiness

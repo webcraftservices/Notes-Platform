@@ -45,7 +45,9 @@ export async function GET(req: Request) {
             ? getMaterialLabel(classification.materialType)
             : classification.kind === "google_doc"
               ? "Google Doc"
-              : undefined,
+              : classification.kind === "google_slides"
+                ? "Google Slides"
+                : undefined,
       };
     });
 

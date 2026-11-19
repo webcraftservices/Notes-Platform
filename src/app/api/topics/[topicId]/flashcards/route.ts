@@ -11,6 +11,37 @@ import { rateLimit } from "@/lib/rate-limit";
 import { aiGenerationFailureResponse } from "@/lib/ai-route-errors";
 import { getOrCreateRequestId } from "@/lib/observability/request-id";
 import { assertWithinAIQuota, AIQuotaExceededError } from "@/lib/ai-quota";
+import { getDueFlashcardsForUser } from "@/lib/srs/due-service";
+
+/**
+ * Phase 13 — Returns all flashcard decks for the Topic along with per-deck
+ * and aggregate spaced-repetition statistics for the authenticated user.
+ */
+export async function GET(_req: Request, { params }: { params: { topicId: string } }) {
+  const user = await getSessionUser();
+  if (!user) return UNAUTHORIZED();
+
+  try {
+    const topic = await getAccessibleTopic(params.topicId, user.id);
+    if (!topic) return NOT_FOUND();
+
+    const dueResult = await getDueFlashcardsForUser({
+      userId: user.id,
+      scopeInput: { topicId: topic.id },
+      limit: 100,
+    });
+    if (!dueResult) return NOT_FOUND();
+
+    return NextResponse.json({
+      decks: dueResult.decks,
+      stats: dueResult.stats,
+      timezone: dueResult.timezone,
+    });
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    throw err;
+  }
+}
 
 /**
  * Generating a deck is a heavier, slower operation than one chat message

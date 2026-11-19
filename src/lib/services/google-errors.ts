@@ -37,6 +37,26 @@ export class GoogleFileTooLargeError extends Error {
   }
 }
 
+/** The stored Google Drive Changes API pageToken has expired or is invalid (HTTP 410 Gone). */
+export class GoogleInvalidPageTokenError extends Error {
+  readonly status = 410;
+  constructor(message = "The Google Drive changes page token has expired and must be reinitialized.") {
+    super(message);
+    this.name = "GoogleInvalidPageTokenError";
+  }
+}
+
+/** A Google Docs batchUpdate failed due to a writeControl requiredRevisionId mismatch. */
+export class GoogleRevisionConflictError extends Error {
+  readonly status = 409;
+  constructor(
+    message = "The remote Google Doc was modified concurrently; synchronization stopped to prevent overwriting changes."
+  ) {
+    super(message);
+    this.name = "GoogleRevisionConflictError";
+  }
+}
+
 export const GOOGLE_TEMPORARILY_UNAVAILABLE = "Google Drive is temporarily unavailable. Please try again in a moment.";
 export const GOOGLE_RECONNECT_REQUIRED = "Google Drive access has expired or was revoked. Reconnect Google Drive to continue.";
 

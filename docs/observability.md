@@ -1,4 +1,11 @@
-# Observability (Datadog) — Phase 9.2
+# Observability (Datadog & Azure Monitor / Application Insights) — Phase 9.2 / Stage C
+
+Datadog (`DD_API_KEY`) and Azure Monitor Application Insights (`APPLICATIONINSIGHTS_CONNECTION_STRING`) are supported side-by-side via direct, timeout-bounded HTTPS intake without heavy in-container agent daemons. Both are strict no-ops in local development when unconfigured.
+
+## Stage C Additions & Final Remediation (Azure Monitor, Worker Metrics & Alert Rules)
+- **Azure Monitor Breeze Client (`src/lib/observability/azure-monitor.ts`):** Parses `APPLICATIONINSIGHTS_CONNECTION_STRING` and submits `MessageData` and `MetricData` envelopes (`{ name, kind: 0, value, count: 1 }`) to `/v2.1/track` with automatic key/credential/query-token redaction (`sanitizeTelemetryProperties`, `redactSensitiveText`), 3-second timeouts, HTTP `206` partial-rejection inspection, and never-throw guarantees. Cloud role attribution (`ai.cloud.role`) resolves via `resolveAzureCloudRoleName()` (`AZURE_CLOUD_ROLE_NAME` / `ZENOTE_SERVICE_ROLE` -> non-default `DD_SERVICE` -> `ZENOTE_WORKER_BUNDLED === "true"` -> `"zenote-web"`), with Docker and ACA manifests explicitly setting `zenote-web` and `zenote-worker`. In Log Analytics `AppMetrics`, single-sample Breeze `MetricData` populates `Sum` (never `Max` or `Value`), so dashboards and alert rules query `sum(Sum)` / `max(Sum)`.
+- **Unified Telemetry Facade & Critical Operational Event Tokens (`src/lib/observability/telemetry.ts`, `src/instrumentation.ts`, `src/workers/index.ts`):** Fans out operational logs and worker metrics (`worker.job.completed`, `worker.job.duration_ms`, `worker.job.failed`, `worker.reconciliation.recovered`, `processing_job.failures`, `ai.generation.failures`) to all configured sinks. Critical startup/health paths emit explicit KQL-indexed event tokens via `logRuntimeEvent`: `key_vault_hydration_failed`, `runtime_config_validation_failed`, and rate-limited `worker_health_unhealthy` (every 60s per failure signature when worker `/health` returns `503`).
+- **Scheduled Alerting & Workbook Specs:** Defined declaratively in `infra/monitoring/azure-monitor-alerts.bicep` (worker job failure spikes, AI failures, 5xx error spikes, and DB/Key Vault/config/worker-health failures) and `infra/monitoring/dashboard-spec.json`.
 
 Datadog is the observability platform for this app (chosen for the GitHub
 Student Developer Pack's Datadog Pro offer — see the Phase 9.2 task
@@ -79,12 +86,7 @@ short version below.
 
 ## Why direct HTTP intake instead of `dd-trace`/the Agent
 
-This repository has no Dockerfile, `vercel.json`, or CI/deploy workflow —
-the deployment target isn't pinned anywhere in-repo. `dd-trace` (APM) and
-DogStatsD-based metrics libraries both assume a Datadog Agent process (or
-a platform-specific Lambda extension) is reachable alongside the app.
-That can't be assumed here, and getting it wrong would mean logs/metrics
-silently going nowhere with no error.
+Originally in Phase 9.2, the repository had no containerization or pinned deployment target, so `dd-trace` (APM) and DogStatsD-based libraries assuming a co-located Datadog Agent sidecar or Lambda extension could not be relied upon. Although Stages A–D later introduced multi-stage containers (`Dockerfile`), Azure Container Apps IaC (`infra/azure/main.bicep`), and GitHub Actions workflows (`.github/workflows/`), keeping stateless direct HTTPS intake (`fetch` to Datadog Logs/Metrics v2 and Azure Monitor `/v2.1/track`) avoids requiring extra sidecar daemon containers inside Azure Container Apps revisions and preserves portability across local Node dev, Docker Compose, and cloud containers.
 
 Direct HTTP submission (`fetch` to Datadog's intake APIs, gated entirely
 on `DD_API_KEY`) works identically regardless of deployment target, needs

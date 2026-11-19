@@ -88,6 +88,18 @@ export type LockedGroupRecord = {
   deletedAt: Date | null;
 };
 
+export type LockedGroupMemberRecord = GroupMember;
+
+export type LockedGroupInvitationRecord = {
+  id: string;
+  groupId: string;
+  email: string;
+  role: MemberRole;
+  status: string;
+  token: string;
+  expiresAt: Date;
+};
+
 /**
  * Acquires a row-level FOR SHARE lock on the parent Group within a transaction.
  * Serializes resource creation against concurrent group deletion under PostgreSQL READ COMMITTED.
@@ -129,8 +141,86 @@ export async function lockGroupForUpdate(
 }
 
 /**
- * Validates that a user is an active member of a group and holds a serialization lock (FOR SHARE)
- * on the parent group until the enclosing transaction commits.
+ * Acquires a row-level FOR SHARE lock on a single GroupMember row within a transaction
+ * so concurrent role demotion/removal (`FOR UPDATE`) serializes cleanly under READ COMMITTED.
+ */
+export async function lockGroupMemberForShare(
+  tx: Prisma.TransactionClient,
+  groupId: string,
+  userId: string
+): Promise<LockedGroupMemberRecord | null> {
+  if (typeof tx?.$queryRaw !== "function") {
+    throw new Error("Transaction client does not support raw query locking (tx.$queryRaw is missing).");
+  }
+  const rows = await tx.$queryRaw<LockedGroupMemberRecord[]>`
+    SELECT id, "groupId", "userId", role, "joinedAt"
+    FROM "GroupMember"
+    WHERE "groupId" = ${groupId} AND "userId" = ${userId}
+    FOR SHARE
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Acquires exclusive FOR UPDATE locks on GroupMember rows in canonical ascending `userId` order.
+ * Sorting IDs before acquiring row locks guarantees AB-BA deadlock freedom when two concurrent
+ * admins attempt mutually overlapping role/removal mutations.
+ */
+export async function lockGroupMembersForUpdate(
+  tx: Prisma.TransactionClient,
+  groupId: string,
+  userIds: string[]
+): Promise<LockedGroupMemberRecord[]> {
+  if (typeof tx?.$queryRaw !== "function") {
+    throw new Error("Transaction client does not support raw query locking (tx.$queryRaw is missing).");
+  }
+  const sortedUniqueUserIds = [...new Set(userIds.filter((id) => Boolean(id && id.trim())))].sort();
+  const locked: LockedGroupMemberRecord[] = [];
+  for (const uid of sortedUniqueUserIds) {
+    const rows = await tx.$queryRaw<LockedGroupMemberRecord[]>`
+      SELECT id, "groupId", "userId", role, "joinedAt"
+      FROM "GroupMember"
+      WHERE "groupId" = ${groupId} AND "userId" = ${uid}
+      FOR UPDATE
+    `;
+    if (rows[0]) {
+      locked.push(rows[0]);
+    }
+  }
+  return locked;
+}
+
+/**
+ * Acquires an exclusive FOR UPDATE lock on a GroupInvitation row by `id` or `token`.
+ */
+export async function lockGroupInvitationForUpdate(
+  tx: Prisma.TransactionClient,
+  selector: { id: string } | { token: string }
+): Promise<LockedGroupInvitationRecord | null> {
+  if (typeof tx?.$queryRaw !== "function") {
+    throw new Error("Transaction client does not support raw query locking (tx.$queryRaw is missing).");
+  }
+  const rows =
+    "id" in selector
+      ? await tx.$queryRaw<LockedGroupInvitationRecord[]>`
+          SELECT id, "groupId", email, role, status, token, "expiresAt"
+          FROM "GroupInvitation"
+          WHERE id = ${selector.id}
+          FOR UPDATE
+        `
+      : await tx.$queryRaw<LockedGroupInvitationRecord[]>`
+          SELECT id, "groupId", email, role, status, token, "expiresAt"
+          FROM "GroupInvitation"
+          WHERE token = ${selector.token}
+          FOR UPDATE
+        `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Validates that a user is an active member of a group and holds serialization locks (FOR SHARE)
+ * on both the parent Group row and the caller's GroupMember row until the transaction commits.
+ * Lock order is strictly top-down: `"Group" FOR SHARE` -> `"GroupMember" FOR SHARE`.
  */
 export async function assertActiveGroupMemberForCreation(
   tx: Prisma.TransactionClient,
@@ -143,13 +233,7 @@ export async function assertActiveGroupMemberForCreation(
     throw new NotAuthorizedError();
   }
 
-  const member = await tx.groupMember.findFirst({
-    where: {
-      groupId,
-      userId,
-      group: { deletedAt: null },
-    },
-  });
+  const member = await lockGroupMemberForShare(tx, groupId, userId);
   if (!member) {
     throw new NotAuthorizedError();
   }
@@ -187,7 +271,7 @@ export async function getAccessibleChapter(chapterId: string, userId: string) {
     where: { id: chapterId, deletedAt: null },
     include: { subject: true },
   });
-  if (!chapter) return null;
+  if (!chapter || chapter.subject?.deletedAt != null) return null;
   await assertScopeAccess(userId, {
     workspaceId: chapter.subject.workspaceId,
     groupId: chapter.subject.groupId,
@@ -200,7 +284,13 @@ export async function getAccessibleTopic(topicId: string, userId: string) {
     where: { id: topicId, deletedAt: null },
     include: { chapter: { include: { subject: true } } },
   });
-  if (!topic) return null;
+  if (
+    !topic ||
+    topic.chapter?.deletedAt != null ||
+    topic.chapter?.subject?.deletedAt != null
+  ) {
+    return null;
+  }
   await assertScopeAccess(userId, {
     workspaceId: topic.chapter.subject.workspaceId,
     groupId: topic.chapter.subject.groupId,
@@ -233,40 +323,118 @@ export async function getAccessibleMaterial(materialId: string, userId: string) 
   throw new NotAuthorizedError();
 }
 
+function hasSoftDeletedLearningAncestor(resource: {
+  group?: { deletedAt: Date | null } | null;
+  subject?: { deletedAt: Date | null } | null;
+  chapter?: { deletedAt: Date | null; subject?: { deletedAt: Date | null } | null } | null;
+  topic?: {
+    deletedAt: Date | null;
+    chapter?: { deletedAt: Date | null; subject?: { deletedAt: Date | null } | null } | null;
+  } | null;
+}): boolean {
+  return (
+    resource.group?.deletedAt != null ||
+    resource.subject?.deletedAt != null ||
+    resource.chapter?.deletedAt != null ||
+    resource.chapter?.subject?.deletedAt != null ||
+    resource.topic?.deletedAt != null ||
+    resource.topic?.chapter?.deletedAt != null ||
+    resource.topic?.chapter?.subject?.deletedAt != null
+  );
+}
+
 /**
  * FlashcardDeck/Quiz (Phase 8.1) reuse Material's exact scope shape — see
  * the schema block comment above FlashcardDeck — so access resolves the
  * same way: the owner can always reach their own deck/quiz, otherwise
  * access follows whichever workspace/group it's attached to.
+ *
+ * Also fails closed (returns null) if any attached hierarchy ancestor
+ * (Group, Subject, Chapter, or Topic) has been soft-deleted (`deletedAt != null`),
+ * matching `buildActiveDeckAncestorFilter` in `src/lib/srs/due-service.ts`.
  */
 export async function getAccessibleFlashcardDeck(deckId: string, userId: string) {
-  const deck = await db.flashcardDeck.findUnique({ where: { id: deckId } });
+  const deck = await db.flashcardDeck.findUnique({
+    where: { id: deckId },
+    include: {
+      group: { select: { deletedAt: true } },
+      subject: { select: { deletedAt: true } },
+      chapter: { select: { deletedAt: true, subject: { select: { deletedAt: true } } } },
+      topic: {
+        select: {
+          deletedAt: true,
+          chapter: { select: { deletedAt: true, subject: { select: { deletedAt: true } } } },
+        },
+      },
+    },
+  });
   if (!deck) return null;
+  if (hasSoftDeletedLearningAncestor(deck)) return null;
 
-  if (deck.groupId) {
-    if (await userIsGroupMember(deck.groupId, userId)) return deck;
+  const {
+    group: _group,
+    subject: _subject,
+    chapter: _chapter,
+    topic: _topic,
+    ...cleanDeck
+  } = deck as typeof deck & {
+    group?: unknown;
+    subject?: unknown;
+    chapter?: unknown;
+    topic?: unknown;
+  };
+
+  if (cleanDeck.groupId) {
+    if (await userIsGroupMember(cleanDeck.groupId, userId)) return cleanDeck;
     throw new NotAuthorizedError();
   }
 
-  if (deck.ownerId === userId) return deck;
-  if (deck.workspaceId) {
-    if (await userIsWorkspaceMember(deck.workspaceId, userId)) return deck;
+  if (cleanDeck.ownerId === userId) return cleanDeck;
+  if (cleanDeck.workspaceId) {
+    if (await userIsWorkspaceMember(cleanDeck.workspaceId, userId)) return cleanDeck;
   }
   throw new NotAuthorizedError();
 }
 
 export async function getAccessibleQuiz(quizId: string, userId: string) {
-  const quiz = await db.quiz.findUnique({ where: { id: quizId } });
+  const quiz = await db.quiz.findUnique({
+    where: { id: quizId },
+    include: {
+      group: { select: { deletedAt: true } },
+      subject: { select: { deletedAt: true } },
+      chapter: { select: { deletedAt: true, subject: { select: { deletedAt: true } } } },
+      topic: {
+        select: {
+          deletedAt: true,
+          chapter: { select: { deletedAt: true, subject: { select: { deletedAt: true } } } },
+        },
+      },
+    },
+  });
   if (!quiz) return null;
+  if (hasSoftDeletedLearningAncestor(quiz)) return null;
 
-  if (quiz.groupId) {
-    if (await userIsGroupMember(quiz.groupId, userId)) return quiz;
+  const {
+    group: _group,
+    subject: _subject,
+    chapter: _chapter,
+    topic: _topic,
+    ...cleanQuiz
+  } = quiz as typeof quiz & {
+    group?: unknown;
+    subject?: unknown;
+    chapter?: unknown;
+    topic?: unknown;
+  };
+
+  if (cleanQuiz.groupId) {
+    if (await userIsGroupMember(cleanQuiz.groupId, userId)) return cleanQuiz;
     throw new NotAuthorizedError();
   }
 
-  if (quiz.ownerId === userId) return quiz;
-  if (quiz.workspaceId) {
-    if (await userIsWorkspaceMember(quiz.workspaceId, userId)) return quiz;
+  if (cleanQuiz.ownerId === userId) return cleanQuiz;
+  if (cleanQuiz.workspaceId) {
+    if (await userIsWorkspaceMember(cleanQuiz.workspaceId, userId)) return cleanQuiz;
   }
   throw new NotAuthorizedError();
 }
@@ -301,13 +469,22 @@ export async function getAccessibleNote(noteId: string, userId: string) {
     include: { topic: { include: { chapter: { include: { subject: true } } } } },
   });
   if (!note) return null;
+  if (note.topic) {
+    if (
+      note.topic.deletedAt != null ||
+      note.topic.chapter?.deletedAt != null ||
+      note.topic.chapter?.subject?.deletedAt != null
+    ) {
+      return null;
+    }
+    await assertScopeAccess(userId, {
+      workspaceId: note.topic.chapter.subject.workspaceId,
+      groupId: note.topic.chapter.subject.groupId,
+    });
+    return note;
+  }
   if (note.authorId === userId) return note;
-  if (!note.topic) throw new NotAuthorizedError();
-  await assertScopeAccess(userId, {
-    workspaceId: note.topic.chapter.subject.workspaceId,
-    groupId: note.topic.chapter.subject.groupId,
-  });
-  return note;
+  throw new NotAuthorizedError();
 }
 
 /**

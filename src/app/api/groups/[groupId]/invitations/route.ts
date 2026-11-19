@@ -5,6 +5,7 @@ import {
   getAccessibleGroup,
   requireGroupRole,
   findUserByNormalizedEmail,
+  assertActiveGroupMemberForCreation,
   NotAuthorizedError,
 } from "@/lib/access";
 import { createInvitationSchema } from "@/lib/validation/groups";
@@ -100,10 +101,25 @@ export async function POST(req: Request, { params }: { params: { groupId: string
     }
 
     const result = await db.$transaction(async (tx) => {
+      await assertActiveGroupMemberForCreation(tx, group.id, user.id, ["ADMIN", "OWNER"]);
+
+      if (
+        invitedUser &&
+        typeof (tx as unknown as { groupMember?: { findUnique?: unknown } }).groupMember?.findUnique ===
+        "function"
+      ) {
+        const existingInTx = await tx.groupMember.findUnique({
+          where: { groupId_userId: { groupId: group.id, userId: invitedUser.id } },
+        });
+        if (existingInTx) {
+          return { alreadyMember: true as const, conflict: false as const };
+        }
+      }
+
       const existingInvitation = await tx.groupInvitation.findFirst({
         where: { groupId: group.id, email, status: "PENDING", expiresAt: { gt: new Date() } },
       });
-      if (existingInvitation) return { conflict: true as const };
+      if (existingInvitation) return { alreadyMember: false as const, conflict: true as const };
 
       const invitation = await tx.groupInvitation.create({
         data: {
@@ -135,8 +151,12 @@ export async function POST(req: Request, { params }: { params: { groupId: string
         metadata: { email, role },
       });
 
-      return { conflict: false as const, invitation };
+      return { alreadyMember: false as const, conflict: false as const, invitation };
     });
+
+    if ("alreadyMember" in result && result.alreadyMember) {
+      return CONFLICT("This person is already a member of the group.");
+    }
 
     if (result.conflict) {
       return CONFLICT("There's already a pending invitation for this email.");

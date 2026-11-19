@@ -5,7 +5,12 @@ import {
   updateMaterialSchema,
   listMaterialsQuerySchema,
 } from "@/lib/validation/materials";
-import { noteBlockSchema, saveBlocksSchema, updateNoteSchema } from "@/lib/validation/notes";
+import {
+  noteBlockSchema,
+  noteBlockMetadataSchema,
+  saveBlocksSchema,
+  updateNoteSchema,
+} from "@/lib/validation/notes";
 import { resolveMaterialType, guessExtension } from "@/lib/mime";
 
 describe("requestUploadSchema", () => {
@@ -158,6 +163,44 @@ describe("noteBlockSchema / saveBlocksSchema", () => {
 
   it("accepts a full blocks array", () => {
     expect(saveBlocksSchema.safeParse({ blocks: [validBlock] }).success).toBe(true);
+  });
+
+  it("accepts a block with valid page-attribution metadata", () => {
+    const blockWithMeta = {
+      ...validBlock,
+      metadata: {
+        materialId: "clv1234567890abcdefghijkl",
+        materialTitle: "Physics Textbook.pdf",
+        materialType: "PDF",
+        sourceUnitType: "page",
+        pageNumber: 3,
+        sourcePages: [3, 4],
+      },
+    };
+    expect(noteBlockSchema.safeParse(blockWithMeta).success).toBe(true);
+    expect(noteBlockMetadataSchema.safeParse(blockWithMeta.metadata).success).toBe(true);
+  });
+
+  it("rejects metadata with negative pageNumber or invalid numbers in sourcePages", () => {
+    expect(
+      noteBlockMetadataSchema.safeParse({ pageNumber: -1 }).success
+    ).toBe(false);
+    expect(
+      noteBlockMetadataSchema.safeParse({ sourcePages: [1, -2] }).success
+    ).toBe(false);
+    expect(
+      noteBlockMetadataSchema.safeParse({ sourcePages: [1.5] }).success
+    ).toBe(false);
+  });
+
+  it("rejects prototype pollution in note block metadata", () => {
+    const nestedProto = JSON.parse('{"materialId":"mat-1","custom":{"__proto__":{"polluted":true}}}');
+    expect(noteBlockMetadataSchema.safeParse(nestedProto).success).toBe(false);
+    expect(noteBlockSchema.safeParse({ ...validBlock, metadata: nestedProto }).success).toBe(false);
+
+    const constructorProto = { materialId: "mat-1", constructor: { prototype: { polluted: true } } };
+    expect(noteBlockMetadataSchema.safeParse(constructorProto).success).toBe(false);
+    expect(noteBlockSchema.safeParse({ ...validBlock, metadata: constructorProto }).success).toBe(false);
   });
 
   it("rejects more than 200 blocks", () => {

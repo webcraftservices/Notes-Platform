@@ -9,7 +9,10 @@ import {
   NotAuthorizedError,
 } from "@/lib/access";
 import { createLinkMaterialSchema, listMaterialsQuerySchema } from "@/lib/validation/materials";
-import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
+import {
+  resolveMaterialScope,
+  ScopeNotFoundError,
+} from "@/lib/materials-scope";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import type { Prisma } from "@prisma/client";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
@@ -109,6 +112,28 @@ export async function POST(req: Request) {
         await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
       }
 
+      if (scope.topicId && typeof tx.topic?.findFirst === "function") {
+        const activeTopic = await tx.topic.findFirst({
+          where: { id: scope.topicId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!activeTopic) throw new ScopeNotFoundError("topic");
+      }
+      if (scope.chapterId && typeof tx.chapter?.findFirst === "function") {
+        const activeChapter = await tx.chapter.findFirst({
+          where: { id: scope.chapterId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!activeChapter) throw new ScopeNotFoundError("chapter");
+      }
+      if (scope.subjectId && typeof tx.subject?.findFirst === "function") {
+        const activeSubject = await tx.subject.findFirst({
+          where: { id: scope.subjectId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!activeSubject) throw new ScopeNotFoundError("subject");
+      }
+
       const created = await tx.material.create({
         data: {
           ownerId: user.id,
@@ -138,6 +163,7 @@ export async function POST(req: Request) {
       return created;
     });
   } catch (err) {
+    if (err instanceof ScopeNotFoundError) return NOT_FOUND();
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
     throw err;
   }

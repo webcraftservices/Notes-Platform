@@ -18,7 +18,7 @@ import type { Prisma, UsageKind } from "@prisma/client";
  * still the same `UsageRecord` ledger, still no schema change, since
  * category lives in UsageRecord.metadata rather than a new enum value.
  */
-export type AIUsageCategory = "chat" | "embedding" | "flashcard_generation" | "quiz_generation" | "tutor_chat";
+export type AIUsageCategory = "chat" | "embedding" | "flashcard_generation" | "quiz_generation" | "tutor_chat" | "note_generation";
 
 export interface RecordAIUsageInput {
   userId: string;

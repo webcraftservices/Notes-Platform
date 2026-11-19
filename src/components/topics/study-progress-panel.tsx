@@ -19,9 +19,21 @@ interface TutorActivityData {
   lastActiveAt: string | null;
 }
 
+interface FlashcardProgressData {
+  totalDecks: number;
+  totalCards: number;
+  cardsStudied: number;
+  reviewsCompleted: number;
+  dueCount: number;
+  accuracyPercent: number | null;
+  averageStabilityDays: number | null;
+  lastReviewedAt: string | null;
+}
+
 interface ProgressResponse {
   quizzes: QuizProgressData;
   tutor: TutorActivityData;
+  flashcards?: FlashcardProgressData;
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -34,14 +46,9 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * Phase 8.5 — a small, real progress summary for a single Topic. Fetches
- * `GET /api/progress?topicId=...` (see lib/study-progress.ts): every
- * number here is a real QuizAttempt/Tutor AIMessage count for the
- * signed-in user, scoped to this Topic — never a placeholder. Renders
- * only the metrics the API actually returns; there is deliberately no
- * flashcard section (FlashcardReview has no write path yet — see
- * PROJECT_STATE.md's Phase 8.5 note) and no streak/weak-topic section
- * (out of scope for this phase).
+ * Phase 8.5 & Phase 13 — Real progress summary for a single Topic.
+ * Fetches `GET /api/progress?topicId=...` and renders persisted Quiz,
+ * AI Tutor, and FSRS-4.5 Flashcard review metrics for the signed-in user.
  */
 export function StudyProgressPanel({ topicId }: { topicId: string }) {
   const [data, setData] = useState<ProgressResponse | null>(null);
@@ -93,21 +100,45 @@ export function StudyProgressPanel({ topicId }: { topicId: string }) {
 
   if (!data) return null;
 
-  const { quizzes, tutor } = data;
-  const hasActivity = quizzes.attempts > 0 || tutor.sessions > 0;
+  const { quizzes, tutor, flashcards } = data;
+  const hasFlashcardActivity =
+    (flashcards?.reviewsCompleted ?? 0) > 0 || (flashcards?.totalCards ?? 0) > 0;
+  const hasActivity =
+    quizzes.attempts > 0 || tutor.sessions > 0 || hasFlashcardActivity;
 
   if (!hasActivity) {
     return (
       <EmptyState
         icon={LineChart}
         title="No study activity yet"
-        description="Take a quiz or start an AI Tutor session on this topic — your progress will show up here."
+        description="Review flashcards, take a quiz, or start an AI Tutor session on this topic — your progress will show up here."
       />
     );
   }
 
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      {hasFlashcardActivity && flashcards && (
+        <>
+          <Stat
+            label="Cards studied"
+            value={`${flashcards.cardsStudied} / ${flashcards.totalCards}`}
+          />
+          <Stat label="Cards due now" value={String(flashcards.dueCount)} />
+          <Stat
+            label="Recall accuracy"
+            value={flashcards.accuracyPercent !== null ? `${flashcards.accuracyPercent}%` : "—"}
+          />
+          <Stat
+            label="Avg stability"
+            value={
+              flashcards.averageStabilityDays !== null
+                ? `${flashcards.averageStabilityDays}d`
+                : "—"
+            }
+          />
+        </>
+      )}
       {quizzes.attempts > 0 && (
         <>
           <Stat label="Quiz attempts" value={String(quizzes.attempts)} />

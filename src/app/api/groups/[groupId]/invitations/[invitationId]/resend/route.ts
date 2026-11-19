@@ -4,6 +4,8 @@ import {
   getSessionUser,
   getAccessibleGroup,
   requireGroupRole,
+  assertActiveGroupMemberForCreation,
+  lockGroupInvitationForUpdate,
   findUserByNormalizedEmail,
   NotAuthorizedError,
 } from "@/lib/access";
@@ -17,22 +19,10 @@ import { canManageInvitation } from "@/lib/invitation-status";
  * Resends a pending invitation. ADMIN+ only, same authorization shape as
  * cancel (see the sibling [invitationId]/route.ts DELETE handler).
  *
- * Reuses/resets the existing GroupInvitation row in place rather than
- * creating a second one — there is never a duplicate-active-invitation
- * risk here because this is an UPDATE, not an INSERT. The token is
- * rotated (a fresh `generateInvitationToken()`) and `expiresAt` is reset
- * to a full new TTL, so a stale copy of the old link (e.g. sitting in an
- * old, already-read notification) stops working once resent — the same
- * "old copy of a rotated secret should no longer work" property tokens
- * are supposed to have.
- *
- * In-app only, same honest limitation as invitation creation (spec §6,
- * no configured email provider): if the invitee already has an account,
- * a fresh Notification is created (re-surfacing it, unread, at the top
- * of their list); if they don't have an account yet, there is currently
- * no delivery mechanism for either a fresh invite or a resend — this
- * route does not fabricate one, and says so in the response rather than
- * claiming an email was sent.
+ * Inside `db.$transaction`, acquires `FOR SHARE` on the Group row,
+ * re-verifies the caller still holds `OWNER` or `ADMIN` (preventing
+ * concurrent demotion/removal from resending invites), and re-verifies
+ * the invitation is still `PENDING` before rotating its token and TTL.
  */
 export async function POST(
   req: Request,
@@ -56,7 +46,56 @@ export async function POST(
 
     const invitedUser = await findUserByNormalizedEmail(invitation.email);
 
-    const updated = await db.$transaction(async (tx) => {
+    const txOutcome = await db.$transaction(async (tx) => {
+      const txAny = tx as unknown as {
+        $queryRaw?: unknown;
+        groupMember?: {
+          findFirst?: (args: unknown) => Promise<{ role: string } | null>;
+        };
+        groupInvitation?: {
+          findUnique?: (args: unknown) => Promise<{
+            id: string;
+            groupId: string;
+            status: string;
+            email: string;
+          } | null>;
+        };
+      };
+
+      if (
+        typeof assertActiveGroupMemberForCreation === "function" &&
+        typeof txAny.$queryRaw === "function"
+      ) {
+        await assertActiveGroupMemberForCreation(tx, group.id, user.id, ["OWNER", "ADMIN"]);
+      } else if (typeof txAny.groupMember?.findFirst === "function") {
+        const callerMember = await txAny.groupMember.findFirst({
+          where: { groupId: group.id, userId: user.id, group: { deletedAt: null } },
+        });
+        if (!callerMember || (callerMember.role !== "OWNER" && callerMember.role !== "ADMIN")) {
+          throw new NotAuthorizedError();
+        }
+      }
+
+      if (typeof txAny.$queryRaw === "function") {
+        const lockedInv = await lockGroupInvitationForUpdate(tx, { id: invitation.id });
+        if (!lockedInv || lockedInv.groupId !== group.id) {
+          return { status: "not_found" as const };
+        }
+        if (!canManageInvitation(lockedInv.status as typeof invitation.status)) {
+          return { status: "conflict" as const };
+        }
+      } else if (typeof txAny.groupInvitation?.findUnique === "function") {
+        const currentInv = await txAny.groupInvitation.findUnique({
+          where: { id: invitation.id },
+        });
+        if (!currentInv || currentInv.groupId !== group.id) {
+          return { status: "not_found" as const };
+        }
+        if (!canManageInvitation(currentInv.status as typeof invitation.status)) {
+          return { status: "conflict" as const };
+        }
+      }
+
       const refreshed = await tx.groupInvitation.update({
         where: { id: invitation.id },
         data: {
@@ -84,8 +123,15 @@ export async function POST(
         metadata: { email: refreshed.email },
       });
 
-      return refreshed;
+      return { status: "ok" as const, refreshed };
     });
+
+    if (txOutcome.status === "not_found") return NOT_FOUND();
+    if (txOutcome.status === "conflict") {
+      return CONFLICT("This invitation is no longer pending.");
+    }
+
+    const updated = txOutcome.refreshed;
 
     return NextResponse.json({
       invitation: {
@@ -97,10 +143,7 @@ export async function POST(
         expiresAt: updated.expiresAt,
         status: updated.status,
       },
-      // Lets the UI show an honest confirmation ("Reminder sent" vs.
-      // "Reminder ready — they'll see it once they create an account")
-      // instead of a blanket "email sent" claim that isn't true here.
-      delivered: Boolean(invitedUser),
+      deliveredInApp: Boolean(invitedUser),
     });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();

@@ -21,6 +21,7 @@ const activity = vi.hoisted(() => ({ createActivityLog: vi.fn(), ActivityAction:
 vi.mock("@/lib/activity", () => activity);
 
 import { POST } from "@/app/api/materials/[materialId]/complete/route";
+import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
 import { getSessionUser } from "@/lib/access";
 
@@ -139,5 +140,68 @@ describe("POST /api/materials/[id]/complete — S3 backend", () => {
     db.material.findUnique.mockResolvedValue({ ...uploading, ownerId: "someone-else" });
     expect((await call()).status).toBe(403);
     expect(s3.headObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty/oversize/over-quota LocalStorage uploads and cleans up file", async () => {
+    const local = Object.create(LocalStorageService.prototype) as LocalStorageService;
+    local.readFileStats = vi.fn().mockResolvedValue({ size: 5 * MB } as never);
+    local.readFile = vi.fn();
+    local.deleteObject = vi.fn().mockResolvedValue(undefined);
+    storageModule.getStorageService.mockReturnValue(local);
+    usage.getStorageUsage.mockResolvedValue({
+      plan: { maxFileSizeBytes: 25 * MB },
+      remainingBytes: 1 * MB,
+    });
+
+    const overQuotaRes = await call();
+    expect(overQuotaRes.status).toBe(413);
+    expect(db.material.updateMany).toHaveBeenCalledWith({
+      where: { id: "mat-1", status: "UPLOADING" },
+      data: { status: "FAILED" },
+    });
+    expect(local.deleteObject).toHaveBeenCalledWith("materials/user-1/mat-1.pdf");
+    expect(local.readFile).not.toHaveBeenCalled();
+
+    vi.mocked(local.readFileStats).mockResolvedValueOnce({ size: 0 } as never);
+    const emptyRes = await call();
+    expect(emptyRes.status).toBe(400);
+    expect(local.readFile).not.toHaveBeenCalled();
+  });
+
+  it("enforces quota atomically inside interactive $transaction when available (closing concurrent /complete race)", async () => {
+    vi.mocked(s3.headObject).mockResolvedValue({ sizeBytes: 5 * MB });
+    // Pre-tx read looks fine, but inside tx aggregate already consumed most quota
+    usage.getStorageUsage.mockResolvedValue({
+      plan: { maxFileSizeBytes: 25 * MB },
+      remainingBytes: 10 * MB,
+    });
+
+    const txUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const txExecuteRaw = vi.fn().mockResolvedValue(1);
+    (db as unknown as { $transaction?: ReturnType<typeof vi.fn> }).$transaction = vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({
+          $executeRaw: txExecuteRaw,
+          subscription: { findUnique: vi.fn().mockResolvedValue({ plan: "FREE", status: "ACTIVE" }) },
+          material: {
+            // FREE plan is 1 GB; pretend 1020 MB already committed concurrently
+            aggregate: vi.fn().mockResolvedValue({ _sum: { sizeBytes: 1020 * MB } }),
+            updateMany: txUpdateMany,
+            findUniqueOrThrow: vi.fn(),
+          },
+        })
+    );
+
+    const res = await call();
+    expect(res.status).toBe(413);
+    expect(txExecuteRaw).toHaveBeenCalled();
+    expect(txUpdateMany).toHaveBeenCalledWith({
+      where: { id: "mat-1", status: "UPLOADING" },
+      data: { status: "FAILED" },
+    });
+    expect(s3.deleteObject).toHaveBeenCalledWith("materials/user-1/mat-1.pdf");
+    expect(extraction.queueDocumentExtractionIfNeeded).not.toHaveBeenCalled();
+
+    delete (db as unknown as { $transaction?: unknown }).$transaction;
   });
 });

@@ -7,7 +7,7 @@ const tx = vi.hoisted(() => ({
   chapter: { updateMany: vi.fn() },
   topic: { updateMany: vi.fn() },
   note: { updateMany: vi.fn() },
-  material: { updateMany: vi.fn() },
+  material: { updateMany: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
   aIConversation: { updateMany: vi.fn() },
   groupInvitation: { updateMany: vi.fn() },
   processingJob: { updateMany: vi.fn() },
@@ -50,6 +50,11 @@ const notifications = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/notifications", () => notifications);
 
+const docExtraction = vi.hoisted(() => ({
+  cancelActiveDocumentExtractionForMaterial: vi.fn(),
+}));
+vi.mock("@/lib/document-extraction", () => docExtraction);
+
 import { DELETE } from "@/app/api/groups/[groupId]/route";
 
 const ownerUser = { id: "user-owner", name: "Alice", email: "alice@example.com" };
@@ -91,6 +96,7 @@ describe("DELETE /api/groups/[groupId] — Atomic Group Deletion & Resource Isol
     tx.chapter.updateMany.mockResolvedValue({ count: 4 });
     tx.topic.updateMany.mockResolvedValue({ count: 8 });
     tx.note.updateMany.mockResolvedValue({ count: 8 });
+    tx.material.findMany.mockResolvedValue([{ id: "mat-1" }, { id: "mat-2" }]);
     tx.material.updateMany.mockResolvedValue({ count: 5 });
     tx.aIConversation.updateMany.mockResolvedValue({ count: 3 });
     tx.groupInvitation.updateMany.mockResolvedValue({ count: 2 });
@@ -216,9 +222,17 @@ describe("DELETE /api/groups/[groupId] — Atomic Group Deletion & Resource Isol
       data: { deletedAt: sharedTimestamp },
     });
 
-    // 10. AIConversations soft-deleted
+    // 10. AIConversations soft-deleted (bare group scope AND nested group subject/chapter/topic scopes)
     expect(tx.aIConversation.updateMany).toHaveBeenCalledWith({
-      where: { groupId: "group-1", deletedAt: null },
+      where: {
+        deletedAt: null,
+        OR: [
+          { groupId: "group-1" },
+          { subject: { groupId: "group-1" } },
+          { chapter: { subject: { groupId: "group-1" } } },
+          { topic: { chapter: { subject: { groupId: "group-1" } } } },
+        ],
+      },
       data: { deletedAt: sharedTimestamp },
     });
 
@@ -260,6 +274,16 @@ describe("DELETE /api/groups/[groupId] — Atomic Group Deletion & Resource Isol
         title: 'Alice deleted the group "Study Group".',
       }
     );
+
+    // 15. Active document extractions cancelled for all materials in the group
+    expect(docExtraction.cancelActiveDocumentExtractionForMaterial).toHaveBeenCalledWith(
+      "mat-1",
+      "Parent group was deleted."
+    );
+    expect(docExtraction.cancelActiveDocumentExtractionForMaterial).toHaveBeenCalledWith(
+      "mat-2",
+      "Parent group was deleted."
+    );
   });
 
   // 7. Notification targeting: owner excluded & sole owner
@@ -295,7 +319,15 @@ describe("DELETE /api/groups/[groupId] — Atomic Group Deletion & Resource Isol
       expect(call[0].where).toMatchObject({ groupId: "group-1" });
     }
     for (const call of tx.aIConversation.updateMany.mock.calls) {
-      expect(call[0].where).toMatchObject({ groupId: "group-1" });
+      expect(call[0].where).toMatchObject({
+        deletedAt: null,
+        OR: [
+          { groupId: "group-1" },
+          { subject: { groupId: "group-1" } },
+          { chapter: { subject: { groupId: "group-1" } } },
+          { topic: { chapter: { subject: { groupId: "group-1" } } } },
+        ],
+      });
     }
     for (const call of tx.groupInvitation.updateMany.mock.calls) {
       expect(call[0].where).toMatchObject({ groupId: "group-1" });

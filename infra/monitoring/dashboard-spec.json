@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0",
+  "service": "zenote",
+  "dashboards": [
+    {
+      "id": "zenote-ops-overview",
+      "title": "Zenote Operations Overview (Web, Worker, Queue, AI & Billing)",
+      "panels": [
+        {
+          "title": "Worker Job Throughput & Failures",
+          "metrics": [
+            "worker.job.completed",
+            "worker.job.failed",
+            "processing_job.failures",
+            "worker.reconciliation.recovered"
+          ],
+          "kql": "AppMetrics | where Name in ('worker.job.completed', 'worker.job.failed', 'processing_job.failures', 'worker.reconciliation.recovered') | summarize Total=sum(Sum) by Name, bin(TimeGenerated, 5m)"
+        },
+        {
+          "title": "Worker Job Execution Latency (ms)",
+          "metrics": ["worker.job.duration_ms"],
+          "kql": "AppMetrics | where Name == 'worker.job.duration_ms' | summarize AvgMs=avg(Sum), MaxMs=max(Sum) by tostring(Properties.type), bin(TimeGenerated, 5m)"
+        },
+        {
+          "title": "AI Request Latency & Failure Rate",
+          "metrics": [
+            "ai.chat.requests",
+            "ai.chat.latency_ms",
+            "ai.generation.requests",
+            "ai.generation.failures"
+          ],
+          "kql": "AppMetrics | where Name startswith 'ai.' | summarize Count=sum(Sum) by Name, bin(TimeGenerated, 5m)"
+        },
+        {
+          "title": "Server Errors by Route (Redacted)",
+          "kql": "AppTraces | where SeverityLevel >= 3 | summarize Count=count() by tostring(Properties.route), bin(TimeGenerated, 5m) | order by Count desc"
+        },
+        {
+          "title": "Health & Fatal Startup Failures",
+          "kql": "ContainerAppConsoleLogs_CL | where Log_s has '[api:health]' or Log_s has 'worker_health_unhealthy' or Log_s has 'fatal_startup_error' or Log_s has 'runtime_config_validation_failed' or Log_s has 'key_vault_hydration_failed' | project TimeGenerated, ContainerAppName_s, Log_s | order by TimeGenerated desc"
+        },
+        {
+          "title": "Worker Lifecycle & Stranded Recovery Logs",
+          "kql": "ContainerAppConsoleLogs_CL | where Log_s has '\"service\":\"zenote-worker\"' or ContainerAppName_s endswith '-worker' | project TimeGenerated, ContainerAppName_s, Log_s | order by TimeGenerated desc"
+        }
+      ]
+    }
+  ]
+}

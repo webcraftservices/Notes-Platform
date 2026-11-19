@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => {
+  const $queryRaw = vi.fn();
   const groupInvitation = {
     findUnique: vi.fn(),
     updateMany: vi.fn(),
@@ -25,6 +26,7 @@ const db = vi.hoisted(() => {
   };
 
   return {
+    $queryRaw,
     groupInvitation,
     user,
     group,
@@ -40,7 +42,13 @@ vi.mock("@/lib/db", () => ({ db }));
 const access = vi.hoisted(() => ({
   getSessionUser: vi.fn(),
 }));
-vi.mock("@/lib/access", () => access);
+vi.mock("@/lib/access", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/access")>();
+  return {
+    ...actual,
+    getSessionUser: access.getSessionUser,
+  };
+});
 
 import { POST } from "@/app/api/invitations/[token]/accept/route";
 
@@ -50,12 +58,40 @@ function makeAcceptRequest(token = "test-token"): Request {
   });
 }
 
+function mockActiveLockQueries(invitationOverrides: Partial<{
+  id: string;
+  groupId: string;
+  email: string;
+  role: string;
+  status: string;
+  token: string;
+  expiresAt: Date;
+}> = {}) {
+  db.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+    const sql = Array.isArray(strings) ? strings.join("?") : String(strings);
+    if (sql.includes('FROM "GroupInvitation"')) {
+      return [{
+        id: "inv-1",
+        groupId: "grp-active",
+        email: "student@example.com",
+        role: "MEMBER",
+        status: "PENDING",
+        token: "test-token",
+        expiresAt: new Date(Date.now() + 100000),
+        ...invitationOverrides,
+      }];
+    }
+    return [{ id: invitationOverrides.groupId ?? "grp-active", deletedAt: null }];
+  });
+}
+
 describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
   beforeEach(() => {
     vi.resetAllMocks();
 
     // Default transaction executes callback immediately with mocked db
     db.$transaction.mockImplementation(async (callback: (tx: any) => Promise<unknown>) => callback(db));
+    mockActiveLockQueries();
 
     // Default authenticated user
     access.getSessionUser.mockResolvedValue({ id: "user-1", email: "student@example.com" });
@@ -122,6 +158,33 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  // Race safety test (FOR SHARE lock observes deletedAt !== null)
+  it("rejects invitation acceptance if FOR SHARE lock sees the parent group was concurrently soft-deleted", async () => {
+    db.groupInvitation.findUnique.mockResolvedValue({
+      id: "inv-1",
+      token: "race-lock-token",
+      email: "student@example.com",
+      groupId: "grp-raced",
+      role: "MEMBER",
+      status: "PENDING",
+      expiresAt: new Date(Date.now() + 100000),
+      group: {
+        id: "grp-raced",
+        deletedAt: null,
+      },
+    });
+    db.$queryRaw.mockResolvedValue([{ id: "grp-raced", deletedAt: new Date() }]);
+
+    const res = await POST(makeAcceptRequest("race-lock-token"), {
+      params: { token: "race-lock-token" },
+    });
+
+    expect(res.status).toBe(404);
+    expect(db.group.findUnique).not.toHaveBeenCalled();
+    expect(db.groupMember.create).not.toHaveBeenCalled();
+    expect(db.groupInvitation.updateMany).not.toHaveBeenCalled();
+  });
+
   // Race safety test
   it("rejects invitation acceptance if group is soft-deleted concurrently during the transaction", async () => {
     // Initial lookup succeeds
@@ -140,6 +203,7 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
     });
 
     // But inside tx, group is concurrently soft-deleted (deletedAt !== null) so findUnique returns null
+    mockActiveLockQueries({ groupId: "grp-raced", token: "race-token" });
     db.group.findUnique.mockResolvedValue(null);
 
     const res = await POST(makeAcceptRequest("race-token"), {
@@ -157,6 +221,7 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
 
   // 6. Expired invitation behavior remains unchanged
   it("rejects an expired invitation with 409 Conflict and marks it EXPIRED for active groups", async () => {
+    const expiredAt = new Date(Date.now() - 10000);
     db.groupInvitation.findUnique.mockResolvedValue({
       id: "inv-expired",
       token: "expired-token",
@@ -164,12 +229,13 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
       groupId: "grp-active",
       role: "MEMBER",
       status: "PENDING",
-      expiresAt: new Date(Date.now() - 10000), // in the past
+      expiresAt: expiredAt, // in the past
       group: {
         id: "grp-active",
         deletedAt: null,
       },
     });
+    mockActiveLockQueries({ id: "inv-expired", token: "expired-token", expiresAt: expiredAt });
     db.groupInvitation.updateMany.mockResolvedValue({ count: 1 });
 
     const res = await POST(makeAcceptRequest("expired-token"), {
@@ -203,6 +269,7 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
         deletedAt: null,
       },
     });
+    mockActiveLockQueries({ id: "inv-used", token: "used-token", status: "ACCEPTED" });
 
     const res = await POST(makeAcceptRequest("used-token"), {
       params: { token: "used-token" },
@@ -229,6 +296,7 @@ describe("POST /api/invitations/[token]/accept (Phase 10C.1B)", () => {
         deletedAt: null,
       },
     });
+    mockActiveLockQueries({ id: "inv-diff", token: "diff-token", email: "other@example.com" });
 
     const res = await POST(makeAcceptRequest("diff-token"), {
       params: { token: "diff-token" },

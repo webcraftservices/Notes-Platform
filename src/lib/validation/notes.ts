@@ -22,6 +22,19 @@ export const NOTE_BLOCK_KINDS = [
   "CUSTOM",
 ] as const;
 
+const baseMetadataSchema = z
+  .object({
+    materialId: z.string().trim().min(1).max(100).optional(),
+    materialTitle: z.string().trim().max(500).optional(),
+    materialType: z.string().trim().max(50).optional(),
+    sourceUnitType: z.enum(["page", "slide"]).optional(),
+    pageNumber: z.number().int().positive().optional(),
+    sourcePages: z.array(z.number().int().positive()).max(200).optional(),
+  })
+  .passthrough();
+
+export const noteBlockMetadataSchema = rejectPrototypePollution(z.record(z.any())).pipe(baseMetadataSchema);
+
 export const noteBlockSchema = z.object({
   // A client-generated id (nanoid) — present for both existing and
   // brand-new blocks so the bulk-save endpoint can diff against what's
@@ -35,6 +48,7 @@ export const noteBlockSchema = z.object({
   // anywhere in the structure — see lib/validation/safe-json.ts for why.
   content: rejectPrototypePollution(z.record(z.any())),
   order: z.number().int().min(0),
+  metadata: noteBlockMetadataSchema.nullable().optional(),
 });
 
 export const saveBlocksSchema = z.object({

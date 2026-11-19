@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/access";
+import { getSessionUser, lockGroupForShare, lockGroupInvitationForUpdate } from "@/lib/access";
 import { normalizeEmail } from "@/lib/email";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, CONFLICT } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
@@ -13,19 +13,14 @@ import { createNotifications, getGroupAdminUserIds } from "@/lib/notifications";
  * must not let an arbitrary account join the group, so possession of the
  * token alone is never sufficient — the authenticated caller's own
  * `User.email` must match `GroupInvitation.email` once both are run
- * through `normalizeEmail`. This is checked against a fresh `db.user`
- * read, not `session.user.email`, so it reflects the actual current
- * database value.
+ * through `normalizeEmail`. This is checked inside `db.$transaction`
+ * against a fresh `tx.user` read under row locks, not `session.user.email`.
  *
- * Concurrency (spec §7's "handle concurrent acceptance safely"): the
- * transition out of PENDING uses a conditional `updateMany({ where: {
- * token, status: "PENDING" } })` rather than an unconditional update.
- * Postgres re-evaluates that WHERE clause against the committed row once
- * any lock is released, so if two requests race, only the first can ever
- * match `status: "PENDING"` — the second's `count` comes back `0` and is
- * treated as "already consumed," never as a second membership. This is
- * the same "conditional update, check the affected count" idiom as
- * optimistic locking, without needing a separate version column.
+ * Concurrency & Lock Ordering: inside a single `db.$transaction`, the handler
+ * acquires `FOR SHARE` on the parent `Group` before `FOR UPDATE` on the
+ * `GroupInvitation` row, then validates `status`, `expiresAt` (atomically
+ * transitioning expired `PENDING` rows to `EXPIRED`), caller email match, and
+ * active group state before creating the `GroupMember` row.
  */
 export async function POST(_req: Request, { params }: { params: { token: string } }) {
   const sessionUser = await getSessionUser();
@@ -37,40 +32,51 @@ export async function POST(_req: Request, { params }: { params: { token: string 
   });
   if (!invitation || invitation.group.deletedAt !== null) return NOT_FOUND();
 
-  if (invitation.status !== "PENDING") {
-    return CONFLICT("This invitation is no longer available.");
-  }
-
-  if (invitation.expiresAt < new Date()) {
-    // Lazily flip PENDING -> EXPIRED on first encounter past expiry, so it
-    // stops showing up as "pending" in the group's invitation list. Guarded
-    // the same conditional way as the accept path below, though a race here
-    // is harmless either way (both outcomes are "not accepted").
-    await db.groupInvitation.updateMany({
-      where: { token: params.token, status: "PENDING" },
-      data: { status: "EXPIRED" },
-    });
-    return CONFLICT("This invitation has expired.");
-  }
-
-  const dbUser = await db.user.findUnique({
-    where: { id: sessionUser.id },
-    select: { id: true, email: true, name: true },
-  });
-  if (!dbUser) return UNAUTHORIZED();
-
-  if (normalizeEmail(dbUser.email) !== normalizeEmail(invitation.email)) {
-    return FORBIDDEN();
-  }
-
   const result = await db.$transaction(async (tx) => {
+    // 1. Lock parent group FOR SHARE so concurrent group deletion serializes top-down.
+    const lockedGroup = await lockGroupForShare(tx, invitation.groupId);
+    if (!lockedGroup || lockedGroup.deletedAt !== null) {
+      return { outcome: "group_deleted" as const };
+    }
+
+    // 2. Lock the GroupInvitation row FOR UPDATE so cancel/resend/accept/decline
+    //    and expiry transitions serialize cleanly without stale READ COMMITTED snapshots.
+    const lockedInv = await lockGroupInvitationForUpdate(tx, { token: params.token });
+    if (!lockedInv || lockedInv.groupId !== invitation.groupId) {
+      return { outcome: "not_found" as const };
+    }
+
+    if (lockedInv.status !== "PENDING") {
+      return { outcome: "conflict" as const, message: "This invitation is no longer available." };
+    }
+
+    if (lockedInv.expiresAt < new Date()) {
+      await tx.groupInvitation.updateMany({
+        where: { token: params.token, status: "PENDING" },
+        data: { status: "EXPIRED" },
+      });
+      return { outcome: "conflict" as const, message: "This invitation has expired." };
+    }
+
+    const dbUser = await tx.user.findUnique({
+      where: { id: sessionUser.id },
+      select: { id: true, email: true, name: true },
+    });
+    if (!dbUser) {
+      return { outcome: "unauthorized" as const };
+    }
+
+    if (normalizeEmail(dbUser.email) !== normalizeEmail(lockedInv.email)) {
+      return { outcome: "forbidden" as const };
+    }
+
     // Re-verify the parent group exists and has not been soft-deleted concurrently.
     const group = await tx.group.findUnique({
       where: { id: invitation.groupId, deletedAt: null },
       select: { id: true, name: true },
     });
     if (!group) {
-      return { groupDeleted: true as const };
+      return { outcome: "group_deleted" as const };
     }
 
     const existingMembership = await tx.groupMember.findUnique({
@@ -85,7 +91,7 @@ export async function POST(_req: Request, { params }: { params: { token: string 
         where: { token: params.token, status: "PENDING" },
         data: { status: "ACCEPTED" },
       });
-      return { alreadyMember: true as const, member: existingMembership };
+      return { outcome: "ok" as const, alreadyMember: true as const, member: existingMembership };
     }
 
     const consumed = await tx.groupInvitation.updateMany({
@@ -93,15 +99,13 @@ export async function POST(_req: Request, { params }: { params: { token: string 
       data: { status: "ACCEPTED" },
     });
     if (consumed.count === 0) {
-      // Someone else accepted/declined this invitation in the moment
-      // between our checks above and this transaction.
-      return { raced: true as const };
+      return { outcome: "conflict" as const, message: "This invitation has already been used." };
     }
 
-    // invitation.role is guaranteed non-OWNER by createInvitationSchema
+    // lockedInv.role is guaranteed non-OWNER by createInvitationSchema
     // at creation time — never re-derived or trusted from client input here.
     const member = await tx.groupMember.create({
-      data: { groupId: invitation.groupId, userId: dbUser.id, role: invitation.role },
+      data: { groupId: invitation.groupId, userId: dbUser.id, role: lockedInv.role },
     });
 
     await createActivityLog(tx, {
@@ -121,15 +125,20 @@ export async function POST(_req: Request, { params }: { params: { token: string 
       link: `/groups/${invitation.groupId}?tab=members`,
     });
 
-    return { alreadyMember: false as const, member };
+    return { outcome: "ok" as const, alreadyMember: false as const, member };
   });
 
-  if ("groupDeleted" in result) {
+  if (result.outcome === "group_deleted" || result.outcome === "not_found") {
     return NOT_FOUND();
   }
-
-  if ("raced" in result) {
-    return CONFLICT("This invitation has already been used.");
+  if (result.outcome === "unauthorized") {
+    return UNAUTHORIZED();
+  }
+  if (result.outcome === "forbidden") {
+    return FORBIDDEN();
+  }
+  if (result.outcome === "conflict") {
+    return CONFLICT(result.message);
   }
 
   return NextResponse.json({

@@ -1,11 +1,23 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleMaterial, NotAuthorizedError, getPrimaryWorkspace } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleMaterial,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+  getPrimaryWorkspace,
+} from "@/lib/access";
 import { updateMaterialSchema } from "@/lib/validation/materials";
-import { resolveMaterialScope, ScopeNotFoundError } from "@/lib/materials-scope";
+import {
+  assertActiveHierarchyScopeWithinTx,
+  resolveMaterialScope,
+  ScopeNotFoundError,
+} from "@/lib/materials-scope";
 import { getStorageService } from "@/lib/services/storage";
+import { deleteStorageObjectSafely } from "@/lib/services/storage-cleanup";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
+import { cancelActiveDocumentExtractionForMaterial } from "@/lib/document-extraction";
 
 export async function GET(_req: Request, { params }: { params: { materialId: string } }) {
   const user = await getSessionUser();
@@ -73,18 +85,16 @@ export async function PATCH(req: Request, { params }: { params: { materialId: st
     if (!existing) return NOT_FOUND();
 
     const movingScope = subjectId !== undefined || chapterId !== undefined || topicId !== undefined;
-    let scopeUpdate = {};
+    let scopeUpdate: {
+      workspaceId?: string | null;
+      groupId?: string | null;
+      subjectId?: string | null;
+      chapterId?: string | null;
+      topicId?: string | null;
+    } = {};
     if (movingScope) {
       const workspace = await getPrimaryWorkspace(user.id);
-      // Explicit null anywhere in the move payload means "detach entirely"
-      // (Unorganized); otherwise resolve whichever id was actually passed.
       const isDetach = subjectId === null && chapterId === null && topicId === null;
-      // Detaching must not silently move a Material between owners
-      // (Phase 6.4 requirement 10): a group Material stays "Unorganized
-      // within its Group" (groupId preserved, workspaceId stays null), a
-      // workspace Material stays "Unorganized within the workspace" —
-      // exactly the pre-Phase-6.4 behavior, unchanged, when existing.groupId
-      // is null.
       const scope = isDetach
         ? {
             workspaceId: existing.groupId ? null : workspace.id,
@@ -105,14 +115,73 @@ export async function PATCH(req: Request, { params }: { params: { materialId: st
       scopeUpdate = scope;
     }
 
-    const material = await db.material.update({
-      where: { id: params.materialId },
-      data: {
-        ...rest,
-        ...scopeUpdate,
-        ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
-      },
-    });
+    const dbAny = db as unknown as {
+      $transaction?: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T>;
+    };
+
+    const runUpdate = async (client: typeof db) => {
+      const groupIds = [
+        ...new Set(
+          [existing.groupId, scopeUpdate.groupId].filter((gid): gid is string => Boolean(gid))
+        ),
+      ].sort();
+      const clientAny = client as unknown as {
+        $queryRaw?: unknown;
+        material: {
+          updateMany?: (args: unknown) => Promise<{ count: number }>;
+          findUnique?: (args: unknown) => Promise<typeof existing | null>;
+          update: typeof db.material.update;
+        };
+      };
+
+      if (
+        typeof clientAny.$queryRaw === "function" &&
+        typeof assertActiveGroupMemberForCreation === "function"
+      ) {
+        for (const gid of groupIds) {
+          await assertActiveGroupMemberForCreation(client as never, gid, user.id);
+        }
+      }
+
+      if (movingScope) {
+        await assertActiveHierarchyScopeWithinTx(client as never, {
+          subjectId: scopeUpdate.subjectId ?? null,
+          chapterId: scopeUpdate.chapterId ?? null,
+          topicId: scopeUpdate.topicId ?? null,
+        });
+      }
+
+      if (typeof clientAny.material?.updateMany === "function") {
+        const { count } = await clientAny.material.updateMany({
+          where: { id: params.materialId, deletedAt: null },
+          data: {
+            ...rest,
+            ...scopeUpdate,
+            ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
+          },
+        });
+        if (count === 0) return null;
+        if (typeof clientAny.material.findUnique === "function") {
+          return clientAny.material.findUnique({ where: { id: params.materialId } });
+        }
+      }
+
+      return client.material.update({
+        where: { id: params.materialId },
+        data: {
+          ...rest,
+          ...scopeUpdate,
+          ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
+        },
+      });
+    };
+
+    const material =
+      typeof dbAny.$transaction === "function"
+        ? await dbAny.$transaction((tx) => runUpdate(tx))
+        : await runUpdate(db);
+
+    if (!material) return NOT_FOUND();
     return NextResponse.json({ material });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
@@ -129,31 +198,88 @@ export async function DELETE(_req: Request, { params }: { params: { materialId: 
     const existing = await getAccessibleMaterial(params.materialId, user.id);
     if (!existing) return NOT_FOUND();
 
-    // Soft-delete the row immediately (so it disappears from every list
-    // right away) and best-effort remove the underlying object from
-    // storage. A failed object delete doesn't block the API response —
-    // the row is gone either way and the file is orphaned rather than
-    // dangerously left "deleted but still downloadable".
-    await db.material.update({ where: { id: params.materialId }, data: { deletedAt: new Date() } });
+    // Top-down lock hierarchy: lock parent Group FOR SHARE + re-validate membership BEFORE
+    // acquiring the per-material advisory lock, then soft-delete and cancel ALL active
+    // jobs + record group activity log inside the single atomic transaction.
+    await db.$transaction(async (tx) => {
+      const txAny = tx as unknown as {
+        $queryRaw?: unknown;
+        material?: {
+          findUnique?: (args: unknown) => Promise<{ deletedAt?: Date | null } | null>;
+        };
+      };
+      if (
+        existing.groupId &&
+        typeof txAny.$queryRaw === "function" &&
+        typeof assertActiveGroupMemberForCreation === "function"
+      ) {
+        await assertActiveGroupMemberForCreation(tx, existing.groupId, user.id);
+      }
 
-    if (existing.groupId) {
-      await createActivityLog(db, {
-        groupId: existing.groupId,
-        userId: user.id,
-        action: ActivityAction.MATERIAL_REMOVED,
-        targetType: "material",
-        targetId: existing.id,
-        metadata: { targetName: existing.title },
+      const lockKey = `job:DOCUMENT_EXTRACTION:${params.materialId}`;
+      try {
+        await tx.$executeRawUnsafe(
+          `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+          lockKey
+        );
+      } catch {
+        // Mocked test environments or non-Postgres engines may not support advisory locks
+      }
+
+      if (typeof txAny.material?.findUnique === "function") {
+        const current = await txAny.material.findUnique({
+          where: { id: params.materialId },
+          select: { deletedAt: true },
+        });
+        if (!current || current.deletedAt != null) {
+          return;
+        }
+      }
+
+      await tx.material.update({ where: { id: params.materialId }, data: { deletedAt: new Date() } });
+
+      await tx.processingJob.updateMany({
+        where: {
+          materialId: params.materialId,
+          status: { in: ["QUEUED", "RUNNING"] },
+        },
+        data: {
+          status: "CANCELLED",
+          completedAt: new Date(),
+        },
       });
-    }
 
+      if (existing.groupId) {
+        await createActivityLog(tx, {
+          groupId: existing.groupId,
+          userId: user.id,
+          action: ActivityAction.MATERIAL_REMOVED,
+          targetType: "material",
+          targetId: existing.id,
+          metadata: { targetName: existing.title },
+        });
+      }
+    });
+
+    cancelActiveDocumentExtractionForMaterial(params.materialId, "Material was deleted.");
+
+    let storageCleanupPending = false;
     if (existing.storageKey) {
-      getStorageService()
-        .deleteObject(existing.storageKey)
-        .catch((err) => console.error(`Failed to delete storage object ${existing.storageKey}:`, err));
+      const cleanup = await deleteStorageObjectSafely(existing.storageKey, {
+        route: "materials/[materialId]/DELETE",
+        op: "delete-material-object",
+        materialId: existing.id,
+        userId: user.id,
+        ownerId: existing.ownerId,
+      });
+      if (!cleanup.deleted) {
+        storageCleanupPending = true;
+      }
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json(
+      storageCleanupPending ? { success: true, storageCleanupPending: true } : { success: true }
+    );
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
     throw err;

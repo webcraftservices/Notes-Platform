@@ -1,17 +1,17 @@
 import type { MaterialType } from "@prisma/client";
 import { resolveMaterialType } from "@/lib/mime";
-import { GOOGLE_DOC_MIME } from "@/lib/services/google-drive";
+import { GOOGLE_DOC_MIME, GOOGLE_SLIDES_MIME } from "@/lib/services/google-drive";
 
 export type GoogleFileClassification =
   | { kind: "google_doc" }
+  | { kind: "google_slides" }
   | { kind: "concrete"; materialType: MaterialType }
   | { kind: "unsupported"; reason: string };
 
 const GOOGLE_NATIVE_UNSUPPORTED: Record<string, string> = {
   "application/vnd.google-apps.spreadsheet": "Google Sheets isn't supported for import yet.",
-  "application/vnd.google-apps.presentation": "Google Slides isn't supported for import yet.",
   "application/vnd.google-apps.form": "Google Forms isn't supported for import yet.",
-  "application/vnd.google-apps.drawing": "Google Drawings aren't supported for import yet.",
+  "application/vnd.google-apps.drawing": "Google Drawings isn't supported for import yet.",
   "application/vnd.google-apps.folder": "Folders can't be imported as a material.",
   "application/vnd.google-apps.shortcut": "Shortcuts can't be imported directly — open the original file instead.",
 };
@@ -23,18 +23,23 @@ const GOOGLE_NATIVE_UNSUPPORTED: Record<string, string> = {
  * generated Prisma client (see __tests__/google-file-classifier.test.ts).
  *
  * - Native Google Docs go through the Docs export path (extractedText).
+ * - Native Google Slides go through the Google Slides v1 REST API parser
+ *   (extractedText + 1-based extractedPages with speaker notes, mapped to
+ *   MaterialType.PPTX for downstream slide citations, AI note generation,
+ *   and hybrid search).
  * - Files whose MIME type is in mime.ts's ACCEPTED_MIME_TYPES import as
  *   that concrete MaterialType, getting the exact same preview/metadata/
  *   (for audio/video) transcription treatment as a normal upload.
- * - Other Google-native formats (Sheets, Slides, ...) are explicitly out of
- *   scope for this phase (spec §4) and are rejected with a clear message,
- *   never silently imported as an empty/broken material.
+ * - Other Google-native formats (Sheets, Forms, ...) are explicitly out of
+ *   scope for this phase and are rejected with a clear message, never
+ *   silently imported as an empty/broken material.
  * - Any other binary MIME type still imports, generically, as
  *   GOOGLE_DRIVE_FILE — real bytes, safely stored, download-only preview
  *   (UnsupportedPreview) — the same honest fallback DOCX already gets.
  */
 export function classifyGoogleFile(mimeType: string): GoogleFileClassification {
   if (mimeType === GOOGLE_DOC_MIME) return { kind: "google_doc" };
+  if (mimeType === GOOGLE_SLIDES_MIME) return { kind: "google_slides" };
   if (mimeType in GOOGLE_NATIVE_UNSUPPORTED) {
     return { kind: "unsupported", reason: GOOGLE_NATIVE_UNSUPPORTED[mimeType]! };
   }

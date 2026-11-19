@@ -1,19 +1,19 @@
 import { requireUser } from "@/lib/access";
 import { db } from "@/lib/db";
-import { getPlanLimits } from "@/lib/plans";
+import { getUserBillingSummary } from "@/lib/billing/stripe";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { SettingsForm } from "@/components/settings/settings-form";
 import { ConnectedAccountsPanel } from "@/components/settings/connected-accounts-panel";
+import { BillingPanel } from "@/components/settings/billing-panel";
 import { SignOutButton } from "@/components/auth/sign-out-button";
 
 export default async function SettingsPage() {
   const user = await requireUser();
-  const [profile, subscription] = await Promise.all([
+  const [profile, billingSummary] = await Promise.all([
     db.profile.findUniqueOrThrow({ where: { userId: user.id } }),
-    db.subscription.findUniqueOrThrow({ where: { userId: user.id } }),
+    getUserBillingSummary(user.id),
   ]);
-  const plan = getPlanLimits(subscription.plan);
 
   return (
     <>
@@ -37,24 +37,7 @@ export default async function SettingsPage() {
 
           <ConnectedAccountsPanel />
 
-          <section className="card p-5">
-            <h2 className="font-display text-sm font-semibold text-ink dark:text-white">Plan</h2>
-            <div className="mt-3 flex items-center justify-between text-sm">
-              <span className="text-ink-muted dark:text-white/50">Current plan</span>
-              <span className="font-medium text-ink dark:text-white">{plan.label}</span>
-            </div>
-            <div className="mt-2 flex items-center justify-between text-sm">
-              <span className="text-ink-muted dark:text-white/50">AI credits / month</span>
-              <span className="font-medium text-ink dark:text-white">{plan.aiCreditsPerMonth.toLocaleString()}</span>
-            </div>
-            <div className="mt-2 flex items-center justify-between text-sm">
-              <span className="text-ink-muted dark:text-white/50">Recording minutes / month</span>
-              <span className="font-medium text-ink dark:text-white">{plan.recordingMinutesPerMonth.toLocaleString()}</span>
-            </div>
-            <p className="mt-4 text-xs text-ink-faint dark:text-white/30">
-              Upgrades and billing arrive in Phase 9 alongside usage tracking.
-            </p>
-          </section>
+          <BillingPanel initialSummary={billingSummary} />
 
           <section className="card p-5">
             <h2 className="font-display text-sm font-semibold text-ink dark:text-white">Session</h2>

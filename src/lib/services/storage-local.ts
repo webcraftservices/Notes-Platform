@@ -68,11 +68,17 @@ export class LocalStorageService implements StorageService {
     return fs.stat(this.resolvePath(key));
   }
 
-  async readFile(key: string, range?: { start: number; end: number }): Promise<Buffer> {
+  async readFile(
+    key: string,
+    range?: { start: number; end: number },
+    signal?: AbortSignal
+  ): Promise<Buffer> {
+    signal?.throwIfAborted();
     const filePath = this.resolvePath(key);
     if (range) {
       const handle = await fs.open(filePath, "r");
       try {
+        signal?.throwIfAborted();
         const length = range.end - range.start + 1;
         const buffer = Buffer.alloc(length);
         await handle.read(buffer, 0, length, range.start);
@@ -81,7 +87,7 @@ export class LocalStorageService implements StorageService {
         await handle.close();
       }
     }
-    return fs.readFile(filePath);
+    return fs.readFile(filePath, signal ? { signal } : undefined);
   }
 }
 

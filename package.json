@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev -H 127.0.0.1",
     "postinstall": "patch-package",
-    "build": "next build",
+    "build": "next build && node scripts/scrub-standalone-env.mjs",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -15,6 +15,12 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "build:worker": "node scripts/build-worker.mjs",
+    "worker": "node dist/workers/index.cjs",
+    "worker:start": "node dist/workers/index.cjs",
+    "worker:dev": "tsx src/workers/index.ts",
+    "verify:readiness": "node scripts/verify-deployment-readiness.mjs",
+    "smoke:check": "node scripts/smoke-check.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -38,11 +44,14 @@
     "@tiptap/react": "^2.8.0",
     "@tiptap/starter-kit": "^2.8.0",
     "@upstash/redis": "^1.38.4",
+    "@xmldom/xmldom": "^0.8.15",
     "bcryptjs": "^2.4.3",
+    "bullmq": "^6.7.6",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",
     "date-fns": "^3.6.0",
     "image-size": "^2.0.4",
+    "ioredis": "^6.0.0",
     "isomorphic-dompurify": "^4.2.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.446.0",
@@ -60,6 +69,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.53.0",
+    "sharp": "^0.35.5",
     "sonner": "^1.5.0",
     "tailwind-merge": "^2.5.2",
     "webm-duration-fix": "^1.0.4",
@@ -72,6 +82,7 @@
     "@types/react": "^18.3.10",
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.4.20",
+    "esbuild": "^0.28.2",
     "eslint": "^8.57.1",
     "eslint-config-next": "^14.2.15",
     "patch-package": "^8.0.1",
@@ -84,6 +95,6 @@
     "vitest": "^2.1.1"
   },
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=22.22.2"
   }
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Image from "next/image";
 import { motion, type Variants } from "motion/react";
 import { cn } from "@/lib/utils";
 
@@ -112,7 +113,7 @@ export const FeyCards = ({
           initial="hidden"
           animate="visible"
         >
-          <img
+          <Image
             src="https://assets.aceternity.com/labs/main.webp"
             alt="Hero"
             width={1000}
@@ -159,7 +160,7 @@ export const FeyCards = ({
                 >
                   {card.showIdleSwap !== false ? (
                     <>
-                      <img
+                      <Image
                         src={card.activeSrc}
                         alt="Hero"
                         width={1000}
@@ -170,7 +171,7 @@ export const FeyCards = ({
                           isActive ? "opacity-100" : "opacity-0"
                         )}
                       />
-                      <img
+                      <Image
                         src="https://assets.aceternity.com/labs/idle.webp"
                         alt="Hero idle"
                         width={1000}
@@ -184,7 +185,7 @@ export const FeyCards = ({
                       <div className="pointer-events-none absolute top-8 left-2 z-50 h-[calc(100%-2rem)] w-4 bg-black/60 blur-md" />
                     </>
                   ) : (
-                    <img
+                    <Image
                       src={card.activeSrc}
                       alt="Hero"
                       width={1000}

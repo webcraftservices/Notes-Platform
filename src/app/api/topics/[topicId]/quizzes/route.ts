@@ -12,6 +12,67 @@ import { aiGenerationFailureResponse } from "@/lib/ai-route-errors";
 import { getOrCreateRequestId } from "@/lib/observability/request-id";
 import { assertWithinAIQuota, AIQuotaExceededError } from "@/lib/ai-quota";
 import { toPublicQuiz } from "@/lib/quiz-serialization";
+import { db } from "@/lib/db";
+
+/**
+ * Phase 13 — Lists existing quizzes for a Topic along with question counts
+ * and the authenticated user's own attempt history summary (attempt count,
+ * best score, and latest score).
+ */
+export async function GET(_req: Request, { params }: { params: { topicId: string } }) {
+  const user = await getSessionUser();
+  if (!user) return UNAUTHORIZED();
+
+  try {
+    const topic = await getAccessibleTopic(params.topicId, user.id);
+    if (!topic) return NOT_FOUND();
+
+    const quizzes = await db.quiz.findMany({
+      where: { topicId: topic.id },
+      orderBy: { createdAt: "desc" },
+      include: {
+        _count: {
+          select: { questions: true },
+        },
+        attempts: {
+          where: { userId: user.id },
+          orderBy: { startedAt: "desc" },
+          select: {
+            id: true,
+            score: true,
+            startedAt: true,
+            completedAt: true,
+          },
+        },
+      },
+    });
+
+    const summaries = quizzes.map((quiz) => {
+      const scores = quiz.attempts
+        .map((a) => a.score)
+        .filter((s): s is number => typeof s === "number");
+      const bestScore = scores.length > 0 ? Math.max(...scores) : null;
+      const latestAttempt = quiz.attempts[0] ?? null;
+
+      return {
+        id: quiz.id,
+        title: quiz.title,
+        topicId: quiz.topicId,
+        createdAt: quiz.createdAt,
+        questionCount: quiz._count.questions,
+        attemptCount: quiz.attempts.length,
+        bestScore,
+        latestScore: latestAttempt?.score ?? null,
+        lastAttemptedAt: latestAttempt?.completedAt ?? latestAttempt?.startedAt ?? null,
+      };
+    });
+
+    return NextResponse.json({ quizzes: summaries });
+  } catch (err) {
+    if (err instanceof NotAuthorizedError) return FORBIDDEN();
+    throw err;
+  }
+}
 
 /**
  * Same rationale as flashcard generation's rate limit

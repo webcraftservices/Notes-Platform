@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { getAccessibleSubject, getAccessibleChapter, getAccessibleTopic } from "@/lib/access";
 import { resolveSubjectOwner } from "@/lib/subject-scope";
 
@@ -7,6 +8,80 @@ export interface MaterialScope {
   subjectId: string | null;
   chapterId: string | null;
   topicId: string | null;
+}
+
+/**
+ * Re-verifies inside an active transaction that any hierarchy attachment
+ * (`topicId`, `chapterId`, or `subjectId`) and its parent chain are still
+ * non-deleted (`deletedAt === null`). Prevents attaching a new Material
+ * to a Topic, Chapter, or Subject that was soft-deleted concurrently
+ * between `resolveMaterialScope()` and the `db.$transaction` commit.
+ */
+export async function assertActiveHierarchyScopeWithinTx(
+  tx: Prisma.TransactionClient,
+  scope: Pick<MaterialScope, "subjectId" | "chapterId" | "topicId">
+): Promise<void> {
+  const txHierarchy = tx as unknown as {
+    topic?: {
+      findUnique?: (args: unknown) => Promise<{
+        id: string;
+        deletedAt?: Date | null;
+        chapter?: {
+          deletedAt?: Date | null;
+          subject?: { deletedAt?: Date | null } | null;
+        } | null;
+      } | null>;
+    };
+    chapter?: {
+      findUnique?: (args: unknown) => Promise<{
+        id: string;
+        deletedAt?: Date | null;
+        subject?: { deletedAt?: Date | null } | null;
+      } | null>;
+    };
+    subject?: {
+      findUnique?: (args: unknown) => Promise<{
+        id: string;
+        deletedAt?: Date | null;
+      } | null>;
+    };
+  };
+
+  if (scope.topicId && typeof txHierarchy.topic?.findUnique === "function") {
+    const topic = await txHierarchy.topic.findUnique({
+      where: { id: scope.topicId, deletedAt: null },
+      include: { chapter: { include: { subject: true } } },
+    });
+    if (
+      !topic ||
+      topic.deletedAt != null ||
+      topic.chapter?.deletedAt != null ||
+      topic.chapter?.subject?.deletedAt != null
+    ) {
+      throw new ScopeNotFoundError("topic");
+    }
+    return;
+  }
+
+  if (scope.chapterId && typeof txHierarchy.chapter?.findUnique === "function") {
+    const chapter = await txHierarchy.chapter.findUnique({
+      where: { id: scope.chapterId, deletedAt: null },
+      include: { subject: true },
+    });
+    if (!chapter || chapter.deletedAt != null || chapter.subject?.deletedAt != null) {
+      throw new ScopeNotFoundError("chapter");
+    }
+    return;
+  }
+
+  if (scope.subjectId && typeof txHierarchy.subject?.findUnique === "function") {
+    const subject = await txHierarchy.subject.findUnique({
+      where: { id: scope.subjectId, deletedAt: null },
+    });
+    if (!subject || subject.deletedAt != null) {
+      throw new ScopeNotFoundError("subject");
+    }
+  }
 }
 
 /**

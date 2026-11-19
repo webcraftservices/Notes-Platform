@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { NoteEditor } from "@/components/notes/note-editor";
 import { GenerateAINotesButton } from "@/components/notes/generate-ai-notes-button";
-import type { TranscribableMaterial } from "@/components/topics/topic-transcripts-panel";
+import type { NoteEligibleMaterial } from "@/lib/note-eligible-material";
 
 /**
  * NoteEditor (Phase 3) fetches its note on mount and manages its own save
@@ -12,23 +12,27 @@ import type { TranscribableMaterial } from "@/components/topics/topic-transcript
  * 1-4 systems), this wrapper just remounts it via a changing `key` once
  * AI note generation finishes, which is the standard React way to force a
  * clean refetch of an uncontrolled child.
+ *
+ * Phase 11.2: Accepts generalized NoteEligibleMaterial (audio, video, PDF,
+ * DOCX, PPTX, Google Docs). Passes both ready and processing materials to
+ * GenerateAINotesButton so users have visibility into documents being extracted.
  */
 export function NotesTabPanel({
   topicId,
-  transcribableMaterials,
+  materials,
 }: {
   topicId: string;
-  transcribableMaterials: TranscribableMaterial[];
+  materials: NoteEligibleMaterial[];
 }) {
   const [refreshKey, setRefreshKey] = useState(0);
-  const readyMaterials = transcribableMaterials.filter((m) => m.transcriptReady);
+  const eligibleMaterials = materials.filter((m) => m.isReady || m.isProcessing);
 
   return (
     <div>
-      {readyMaterials.length > 0 && (
+      {eligibleMaterials.length > 0 && (
         <div className="mb-4 flex justify-end">
           <GenerateAINotesButton
-            materials={readyMaterials}
+            materials={eligibleMaterials}
             onComplete={() => setRefreshKey((k) => k + 1)}
           />
         </div>

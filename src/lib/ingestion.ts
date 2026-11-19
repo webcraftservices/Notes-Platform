@@ -1,9 +1,19 @@
 import { Prisma, type ProcessingJob } from "@prisma/client";
 import { db } from "@/lib/db";
+import { lockGroupForShare } from "@/lib/access";
 import { chunkPagedText, chunkTranscriptSegments, chunkText, parseExtractedPages, type TextChunk } from "@/lib/chunking";
 import { getEmbeddingService, EMBEDDING_DIMENSIONS } from "@/lib/services/embedding";
 import { recordAIUsage } from "@/lib/ai-usage";
-import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/processing-jobs";
+import {
+  claimJob,
+  completeJobWithin,
+  createJobIfNoneActive,
+  failJob,
+  isJobActive,
+  notifyJobStatusChange,
+  registerJobContext,
+} from "@/lib/processing-jobs";
+import { dispatchProcessingJob } from "@/lib/queue/dispatcher";
 
 /**
  * Creates and starts an EMBEDDING job for a material whose text was just
@@ -15,8 +25,58 @@ import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/process
  */
 export async function queueEmbeddingJob(userId: string, materialId: string): Promise<void> {
   try {
+    const dbAny = db as unknown as {
+      $transaction?: unknown;
+      material?: { findUnique?: (args: unknown) => Promise<{ deletedAt?: Date | null } | null> };
+      processingJob: {
+        findFirst?: (args: unknown) => Promise<{ id: string } | null>;
+        create: typeof db.processingJob.create;
+      };
+    };
+
+    if (typeof dbAny.$transaction === "function") {
+      const outcome = await createJobIfNoneActive({ userId, materialId, type: "EMBEDDING" });
+      if (outcome !== undefined) {
+        if (!outcome.created || !outcome.job) return;
+        void dispatchProcessingJob(outcome.job.id, "EMBEDDING", {
+          inProcessRunner: runEmbeddingJob,
+        });
+        return;
+      }
+    }
+
+    if (typeof dbAny.material?.findUnique === "function") {
+      const mat = await dbAny.material.findUnique({
+        where: { id: materialId },
+        select: { deletedAt: true },
+      });
+      if (mat && mat.deletedAt != null) {
+        return;
+      }
+    }
+    if (typeof dbAny.processingJob?.findFirst === "function") {
+      const existing = await dbAny.processingJob.findFirst({
+        where: { materialId, type: "EMBEDDING", status: { in: ["QUEUED", "RUNNING"] } },
+        select: { id: true },
+      });
+      if (existing) {
+        return;
+      }
+    }
     const job = await db.processingJob.create({ data: { userId, materialId, type: "EMBEDDING", status: "QUEUED" } });
-    void runEmbeddingJob(job.id);
+    if (job?.id) {
+      notifyJobStatusChange({
+        jobId: job.id,
+        userId,
+        materialId,
+        type: "EMBEDDING",
+        status: "QUEUED",
+        progress: 0,
+      });
+    }
+    void dispatchProcessingJob(job.id, "EMBEDDING", {
+      inProcessRunner: runEmbeddingJob,
+    });
   } catch (err) {
     console.error("[ingestion] could not queue indexing job", {
       materialId,
@@ -78,6 +138,7 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
   try {
     const job: ProcessingJob | null = await db.processingJob.findUnique({ where: { id: jobId } });
     if (!job || job.type !== "EMBEDDING" || !job.materialId) return;
+    registerJobContext?.(job);
     if (!(await claimJob(jobId))) return;
 
     const material = await db.material.findUnique({ where: { id: job.materialId } });
@@ -86,9 +147,9 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
     const transcript =
       material.type === "AUDIO" || material.type === "VIDEO"
         ? await db.transcript.findUnique({
-            where: { materialId: material.id },
-            include: { segments: { orderBy: { order: "asc" } } },
-          })
+          where: { materialId: material.id },
+          include: { segments: { orderBy: { order: "asc" } } },
+        })
         : null;
 
     let chunks: (TextChunk & { pageNumber: number | null; startSeconds: number | null; endSeconds: number | null })[];
@@ -106,18 +167,30 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
     } else {
       // Nothing to chunk yet for this material type/state — a real,
       // successful no-op, not an error (see doc comment above).
-      await db.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      });
+      if (await isJobActive(jobId, material.id)) {
+        const dbAny = db as unknown as {
+          $transaction?: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T>;
+        };
+        if (typeof dbAny.$transaction === "function") {
+          await dbAny.$transaction((tx) => completeJobWithin(tx, jobId, material.id));
+        } else {
+          await completeJobWithin(db, jobId, material.id);
+        }
+      }
       return;
     }
 
     if (chunks.length === 0) {
-      await db.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      });
+      if (await isJobActive(jobId, material.id)) {
+        const dbAny = db as unknown as {
+          $transaction?: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T>;
+        };
+        if (typeof dbAny.$transaction === "function") {
+          await dbAny.$transaction((tx) => completeJobWithin(tx, jobId, material.id));
+        } else {
+          await completeJobWithin(db, jobId, material.id);
+        }
+      }
       return;
     }
 
@@ -129,8 +202,8 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
     if (embeddingService.dimensions !== EMBEDDING_DIMENSIONS) {
       throw new Error(
         `EmbeddingService reports ${embeddingService.dimensions} dimensions, but MaterialChunk.embedding ` +
-          `is a fixed vector(${EMBEDDING_DIMENSIONS}) column. This provider cannot be used without a ` +
-          "deliberate schema migration — see docs/ai-setup.md."
+        `is a fixed vector(${EMBEDDING_DIMENSIONS}) column. This provider cannot be used without a ` +
+        "deliberate schema migration — see docs/ai-setup.md."
       );
     }
 
@@ -158,6 +231,12 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
     if (!(await isJobActive(jobId, material.id))) return;
 
     await db.$transaction(async (tx) => {
+      // Top-down lock order: acquire Group FOR SHARE before per-material advisory lock.
+      if (material.groupId && typeof (tx as { $queryRaw?: unknown }).$queryRaw === "function") {
+        const lockedGroup = await lockGroupForShare(tx, material.groupId);
+        if (!lockedGroup || lockedGroup.deletedAt !== null) return;
+      }
+
       // Serialize concurrent index writes for one material (e.g. a
       // re-import racing a manual re-index). Without this, two jobs could
       // interleave "delete old chunks" with "insert new chunks" and leave
@@ -187,11 +266,6 @@ export async function runEmbeddingJob(jobId: string): Promise<void> {
           VALUES ${Prisma.join(rows)}
         `;
       }
-
-      await tx.processingJob.update({
-        where: { id: jobId },
-        data: { status: "SUCCEEDED", progress: 100, completedAt: new Date() },
-      });
     }, CHUNK_WRITE_TX_OPTIONS);
   } catch (err) {
     await failJob(jobId, "EMBEDDING", err, "Indexing failed for an unknown reason.");

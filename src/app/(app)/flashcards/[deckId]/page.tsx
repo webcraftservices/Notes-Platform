@@ -1,19 +1,16 @@
 import { requireUser, requireFlashcardDeck } from "@/lib/access";
 import { db } from "@/lib/db";
+import { deriveCardStateFromReview, type PersistedReviewRecord } from "@/lib/srs/fsrs";
+import { computeDeckStudyStats, serializeCardSchedule } from "@/lib/srs/study-queue";
 import { Topbar } from "@/components/shell/topbar";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { FlashcardDeckPage as FlashcardDeckPageView } from "@/components/flashcards/flashcard-deck-page";
 
 /**
- * Phase 8.6: extends the Phase 8.2 minimal deck page (task §10) with the
- * same current-user-only latest-review scoping the API route's GET now
- * does (see `src/app/api/flashcards/[deckId]/route.ts`'s doc comment) —
- * `reviews: { where: { userId: user.id }, orderBy: { reviewedAt: "desc" },
- * take: 1 }` can never fetch another user's review rows. `requireFlashcardDeck`
- * remains the same owner-or-scope-membership check `getAccessibleFlashcardDeck`
- * performs for the API route, so a deck attached to a Group only renders
- * for someone with access to that Group, exactly like every other
- * shared-content page in this app.
+ * Phase 8.6 & Phase 13: Loads a flashcard deck with the authenticated user's
+ * own latest `FlashcardReview` and derived FSRS-4.5 `schedule` per card, plus
+ * deck-level study statistics (`dueCount`, `newCount`, `learningCount`,
+ * `reviewCount`, `suspendedCount`).
  */
 export default async function FlashcardDeckPage({ params }: { params: { deckId: string } }) {
   const user = await requireUser();
@@ -25,11 +22,40 @@ export default async function FlashcardDeckPage({ params }: { params: { deckId: 
     include: {
       reviews: {
         where: { userId: user.id },
-        orderBy: { reviewedAt: "desc" },
+        orderBy: [{ reviewedAt: "desc" }, { id: "desc" }],
         take: 1,
       },
     },
   });
+
+  const now = new Date();
+  const mappedCards = cards.map(({ reviews, ...card }: (typeof cards)[number]) => {
+    const latestReview = reviews[0] ?? null;
+    const stateObj = deriveCardStateFromReview(
+      latestReview as unknown as PersistedReviewRecord | null
+    );
+    const schedule = serializeCardSchedule(stateObj, now);
+
+    return {
+      id: card.id,
+      front: card.front,
+      back: card.back,
+      sources: card.sources as DeckCardSources,
+      review: latestReview
+        ? {
+            id: latestReview.id,
+            wasCorrect: latestReview.wasCorrect,
+            rating: latestReview.rating ?? null,
+            state: stateObj.state,
+            reviewedAt: latestReview.reviewedAt.toISOString(),
+          }
+        : null,
+      schedule,
+    };
+  });
+
+  const stats = computeDeckStudyStats(mappedCards, now);
+  const canManage = deck.ownerId === user.id;
 
   return (
     <>
@@ -41,15 +67,9 @@ export default async function FlashcardDeckPage({ params }: { params: { deckId: 
           <FlashcardDeckPageView
             deckId={deck.id}
             title={deck.title}
-            cards={cards.map(({ reviews, ...card }: (typeof cards)[number]) => ({
-              id: card.id,
-              front: card.front,
-              back: card.back,
-              sources: card.sources as DeckCardSources,
-              review: reviews[0]
-                ? { id: reviews[0].id, wasCorrect: reviews[0].wasCorrect, reviewedAt: reviews[0].reviewedAt.toISOString() }
-                : null,
-            }))}
+            cards={mappedCards}
+            stats={stats}
+            canManage={canManage}
           />
         </div>
       </main>

@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import type { ZodError } from "zod";
 import { sendDatadogLog } from "@/lib/observability/datadog";
+import {
+  sanitizeTelemetryProperties,
+  sendAzureMonitorLog,
+} from "@/lib/observability/azure-monitor";
+import { redactSensitiveText } from "@/lib/queue/logger";
 
 /**
  * `extra` merges additional stable, machine-readable fields into the body
@@ -56,11 +61,12 @@ export const INTERNAL_ERROR = () => jsonError("Something went wrong. Please try 
  */
 export function logServerError(context: { route: string; op?: string; [key: string]: unknown }, err: unknown) {
   const { route, ...rest } = context;
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`[api:${route}]`, { ...rest, error: message });
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const safeMessage = redactSensitiveText(rawMessage);
+  const safeRest = sanitizeTelemetryProperties(rest);
+  console.error(`[api:${route}]`, { ...safeRest, error: safeMessage });
   // Fire-and-forget: never delays or fails the response this is called
-  // from. sendDatadogLog itself never throws/rejects (see its doc
-  // comment); .catch is defensive belt-and-braces in case that contract
-  // is ever violated by a future edit.
-  void sendDatadogLog({ level: "error", message: `${route}: ${message}`, route, ...rest }).catch(() => {});
+  // from. Sink helpers never throw/reject; .catch is defensive belt-and-braces.
+  void sendDatadogLog({ level: "error", message: `${route}: ${safeMessage}`, route, ...safeRest }).catch(() => {});
+  void sendAzureMonitorLog({ level: "error", message: `${route}: ${safeMessage}`, route, ...safeRest }).catch(() => {});
 }

@@ -40,7 +40,11 @@ export async function getAIUsage(userId: string): Promise<AIUsageSummary> {
     }),
   ]);
 
-  const plan = getPlanLimits(subscription?.plan ?? "FREE");
+  const effectiveTier =
+    !subscription || subscription.status === "CANCELLED"
+      ? "FREE"
+      : (subscription.plan ?? "FREE");
+  const plan = getPlanLimits(effectiveTier);
   const usedCredits = aggregate._sum.quantity ?? 0;
   const limitCredits = plan.aiCreditsPerMonth;
 
@@ -65,21 +69,40 @@ export class AIQuotaExceededError extends Error {
  * MUST be called after authorization (task §9) and before the expensive
  * AI provider call (task §6/§13) — never rely on the frontend for this.
  *
- * Concurrency note (task §7): this is a read-then-decide check against an
- * aggregate, not an atomic reservation. Two requests issued at nearly the
- * same instant can both read a `usedCredits` value below the limit and
- * both proceed, so worst-case overage is bounded by how many concurrent
- * requests a single user has in flight at once — not unbounded, since
- * every subsequent request re-aggregates the ledger (including whatever
- * the in-flight requests already wrote) and will correctly reject once
- * the limit is actually crossed. This matches the same trade-off already
- * accepted by getStorageUsage/getRecordingUsage elsewhere in this
- * codebase; a stronger guarantee would need a Postgres advisory lock
- * (`pg_advisory_xact_lock`, keyed by userId) held across check+record,
- * which isn't used anywhere else in this project yet and would add
- * latency to every AI request to close a narrow, low-impact race — not
- * introduced here without a broader decision to adopt that pattern
- * project-wide.
+ * Concurrency limitation and architecture note:
+ * This is a read-then-decide check against an aggregate sum of UsageRecord
+ * rows, not an atomic credit reservation.
+ *
+ * Behavior under concurrent load:
+ * - Single-material deduplication: For the same material, `createJobIfNoneActive`
+ *   acquires a transaction advisory lock (`job:${type}:${materialId}`), preventing
+ *   overlapping jobs from executing simultaneously.
+ * - Multi-material race window: If a user near their monthly credit cap fires
+ *   simultaneous requests across different materials (e.g. Material A and
+ *   Material B) at the same millisecond, both requests will read the same
+ *   pre-generation `usedCredits` sum and both may pass `assertWithinAIQuota`.
+ * - Bounded overage: Maximum overage is strictly bounded by the user's maximum
+ *   concurrent in-flight requests, which is enforced by the per-user rate limiter
+ *   (`NOTE_GENERATION_RATE_LIMIT = { limit: 5, windowSeconds: 60 }`). Subsequent
+ *   requests immediately re-aggregate the ledger and will be rejected once
+ *   the limit is exceeded.
+ *
+ * Future strict atomic reservation design (if required):
+ * If a future phase requires zero-overage hard enforcement without global table locks:
+ * 1. Introduce an `AIUsageReservation` model or atomic lease ledger:
+ *    - Ingress claims an estimated token reservation (e.g., 5,000 credits) inside
+ *      a short transaction checking `(usedCredits + pendingReservations < limitCredits)`.
+ *    - Ingress writes a `PENDING` reservation row with an expiration TTL (e.g., 10 minutes).
+ * 2. Background worker reconciliation:
+ *    - When the worker completes, it records the exact actual tokens from `response.usageMetadata`
+ *      and marks the reservation `RESOLVED`.
+ *    - If the worker fails or times out, the reservation is marked `RELEASED`.
+ * 3. Stale reservation reaper:
+ *    - A periodic or on-demand sweep releases any expired `PENDING` reservations older than the TTL.
+ *
+ * Currently, Zenote follows the lighter-weight append-only ledger pattern across all
+ * meters (`getStorageUsage`, `getRecordingUsage`, `getAIUsage`) to avoid lock contention
+ * on user rows during read-heavy operations.
  */
 export async function assertWithinAIQuota(userId: string): Promise<AIUsageSummary> {
   const usage = await getAIUsage(userId);
@@ -117,7 +140,11 @@ export class AITutorNotEnabledError extends Error {
  */
 export async function assertAiTutorEntitlement(userId: string): Promise<void> {
   const subscription = await db.subscription.findUnique({ where: { userId } });
-  const plan = getPlanLimits(subscription?.plan ?? "FREE");
+  const effectiveTier =
+    !subscription || subscription.status === "CANCELLED"
+      ? "FREE"
+      : (subscription.plan ?? "FREE");
+  const plan = getPlanLimits(effectiveTier);
   if (!plan.advancedFeatures.aiTutor) {
     throw new AITutorNotEnabledError(plan);
   }

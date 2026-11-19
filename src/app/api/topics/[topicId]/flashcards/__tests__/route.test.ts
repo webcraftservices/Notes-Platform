@@ -33,7 +33,12 @@ const generationModule = vi.hoisted(() => {
 });
 vi.mock("@/lib/services/flashcard-generation", () => generationModule);
 
-import { POST } from "@/app/api/topics/[topicId]/flashcards/route";
+const dueService = vi.hoisted(() => ({
+  getDueFlashcardsForUser: vi.fn(),
+}));
+vi.mock("@/lib/srs/due-service", () => dueService);
+
+import { GET, POST } from "@/app/api/topics/[topicId]/flashcards/route";
 import { ServiceNotConfiguredError, AIProviderUnavailableError } from "@/lib/services/interfaces";
 
 function makeRequest(): Request {
@@ -206,5 +211,41 @@ describe("POST /api/topics/[topicId]/flashcards", () => {
     expect(json.requestId).toEqual(expect.any(String));
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
+  });
+});
+
+describe("GET /api/topics/[topicId]/flashcards", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    access.getSessionUser.mockResolvedValue({ id: "user-1" });
+    access.getAccessibleTopic.mockResolvedValue({ id: "topic-1", name: "Zeroth Law" });
+    dueService.getDueFlashcardsForUser.mockResolvedValue({
+      decks: [{ id: "deck-1", title: "Flashcards — Zeroth Law", stats: { totalCards: 5, dueCount: 2, newCount: 3 } }],
+      stats: { totalCards: 5, dueCount: 2, newCount: 3 },
+      timezone: "UTC",
+    });
+  });
+
+  it("returns 401 when unauthenticated", async () => {
+    access.getSessionUser.mockResolvedValue(null);
+    const res = await GET(new Request("https://example.test/api/topics/topic-1/flashcards"), {
+      params: { topicId: "topic-1" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns topic decks and stats for an authorized user", async () => {
+    const res = await GET(new Request("https://example.test/api/topics/topic-1/flashcards"), {
+      params: { topicId: "topic-1" },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.decks).toHaveLength(1);
+    expect(json.stats.dueCount).toBe(2);
+    expect(dueService.getDueFlashcardsForUser).toHaveBeenCalledWith({
+      userId: "user-1",
+      scopeInput: { topicId: "topic-1" },
+      limit: 100,
+    });
   });
 });

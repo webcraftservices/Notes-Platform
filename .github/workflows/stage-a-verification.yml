@@ -1,0 +1,422 @@
+name: Stage A — Docker, Web/Worker Separation & Runtime Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - "next.config.js"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/build-worker.mjs"
+      - "scripts/scrub-standalone-env.mjs"
+      - "scripts/prepare-concurrent-indexes.mjs"
+      - "scripts/verify-deployment-readiness.mjs"
+      - "prisma/**"
+      - "src/**"
+      - ".github/workflows/stage-a-verification.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - "next.config.js"
+      - "package-lock.json"
+      - "package.json"
+      - "scripts/build-worker.mjs"
+      - "scripts/scrub-standalone-env.mjs"
+      - "scripts/prepare-concurrent-indexes.mjs"
+      - "scripts/verify-deployment-readiness.mjs"
+      - "prisma/**"
+      - "src/**"
+      - ".github/workflows/stage-a-verification.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-a-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-and-unit:
+    name: Typecheck, Lint, Hermetic Tests & Worker Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run hermetic Vitest suite
+        run: npm test
+
+      - name: Build and verify CommonJS worker bundle
+        run: npm run build:worker
+
+  docker-build-and-runtime:
+    name: Docker Multi-Stage Build & Compose Integration Verification
+    needs: static-and-unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.22.2 for live PostgreSQL/Redis integration suites
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Install dependencies & generate Prisma Client
+        run: |
+          npm ci
+          npx prisma generate
+
+      - name: Set up Docker Buildx (local docker driver for daemon image access)
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Build migrator, web, and worker images
+        run: |
+          docker build --target migrator -t zenote-migrator:ci .
+          docker build --target web \
+            --build-arg NEXT_PUBLIC_SITE_URL="https://ci.zenote.local" \
+            --build-arg STORAGE_ENDPOINT="https://ci-storage.example.com" \
+            -t zenote-web:ci .
+          docker build --target worker -t zenote-worker:ci .
+
+      - name: Verify non-root users, Node version, runtime assets, and zero dev/secret leakage
+        run: |
+          set -euo pipefail
+
+          echo "=== Verifying migrator image ==="
+          host_migs=$(find prisma/migrations -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d " ")
+          docker run --rm -e EXPECTED_MIGRATIONS="$host_migs" zenote-migrator:ci sh -c '
+            test "$(id -u)" = "1001"
+            test -f prisma/migrations/migration_lock.toml
+            mig_dirs=$(find prisma/migrations -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d " ")
+            echo "Migration directories: $mig_dirs (expected: $EXPECTED_MIGRATIONS)"
+            test "$mig_dirs" -ge 13
+            test "$mig_dirs" = "$EXPECTED_MIGRATIONS"
+          '
+
+          echo "=== Verifying web image ==="
+          docker run --rm --entrypoint sh zenote-web:ci -c '
+            test "$(id -u)" = "1001"
+            node -v | grep -q "^v22\."
+            test -f server.js
+            test -d .next/static
+            test -d .next/cache/images
+            test -w .next/cache/images
+            test -d /tmp/zenote-local-storage
+            test -w /tmp/zenote-local-storage
+            test ! -e .env
+            test ! -e .env.local
+            test ! -e .storage
+            test ! -d node_modules/tsx
+            test ! -d node_modules/vitest
+            node -e "require(\"sharp\")"
+            test -f node_modules/pdfjs-dist/package.json
+            test -d node_modules/pdfjs-dist/standard_fonts
+          '
+
+          echo "=== Verifying worker image ==="
+          docker run --rm --entrypoint sh zenote-worker:ci -c '
+            test "$(id -u)" = "1001"
+            node -v | grep -q "^v22\."
+            test -f dist/workers/index.cjs
+            test -d /tmp/zenote-local-storage
+            test -w /tmp/zenote-local-storage
+            test ! -e .env
+            test ! -e .env.local
+            test ! -e .storage
+            test ! -d node_modules/tsx
+            test ! -d node_modules/vitest
+            test -d node_modules/pptx2html
+            test -f node_modules/pdfjs-dist/package.json
+            test -d node_modules/pdfjs-dist/standard_fonts
+          '
+
+      - name: Start isolated Docker Compose stack (2 worker replicas) and verify integration
+        run: |
+          set -euo pipefail
+          docker compose up -d --build --scale worker=2
+
+          echo "=== Waiting for one-shot migrator, web, and both worker replicas ==="
+          ready=0
+          for i in $(seq 1 60); do
+            web_live=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/health/live || true)
+            web_ready=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/health || true)
+            w1_ready=$(docker compose exec -T --index=1 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            w2_ready=$(docker compose exec -T --index=2 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            if [ "$web_live" = "200" ] && [ "$web_ready" = "200" ] && [ "$w1_ready" = "200" ] && [ "$w2_ready" = "200" ]; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            docker compose ps -a
+            docker compose logs --tail=100
+            exit 1
+          fi
+
+          echo "=== Verify all Prisma migrations & pgvector applied cleanly in isolated zenote_local DB ==="
+          expected_migs=$(find prisma/migrations -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')
+          applied_count=$(docker compose exec -T postgres psql -U zenote -d zenote_local -tAc "SELECT COUNT(*) FROM \"_prisma_migrations\" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;" | tr -d '[:space:]')
+          echo "Applied migrations: $applied_count (expected: $expected_migs)"
+          test "$applied_count" -ge 13
+          test "$applied_count" = "$expected_migs"
+          pgvector_ext=$(docker compose exec -T postgres psql -U zenote -d zenote_local -tAc "SELECT extname FROM pg_extension WHERE extname = 'vector';" | tr -d '[:space:]')
+          test "$pgvector_ext" = "vector"
+
+          echo "=== Verify repeatable migrate deploy idempotency ==="
+          docker compose run --rm migrate
+          reapplied_count=$(docker compose exec -T postgres psql -U zenote -d zenote_local -tAc "SELECT COUNT(*) FROM \"_prisma_migrations\" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;" | tr -d '[:space:]')
+          test "$reapplied_count" = "$expected_migs"
+
+          echo "=== Verify LIM-09 concurrent index manifest & pg_index.indisvalid ==="
+          node scripts/prepare-concurrent-indexes.mjs --verify
+          invalid_idx_rows=$(node scripts/prepare-concurrent-indexes.mjs --check-invalid-sql | docker compose exec -T postgres psql -U zenote -d zenote_local -tA | tr -d '[:space:]')
+          test -z "$invalid_idx_rows"
+
+          echo "=== Execute live PostgreSQL & Redis integration suites on host against Compose published ports (5433 / 6380) ==="
+          ISOLATED_TEST_DATABASE_URL="postgresql://zenote:zenote_local_pw@127.0.0.1:5433/zenote_local?schema=public" \
+          ISOLATED_TEST_REDIS_URL="redis://127.0.0.1:6380" \
+          DATABASE_URL="postgresql://zenote:zenote_local_pw@127.0.0.1:5433/zenote_local?schema=public" \
+          REDIS_URL="redis://127.0.0.1:6380" \
+          BULLMQ_REDIS_URL="redis://127.0.0.1:6380" \
+          ENABLE_LIVE_BULLMQ_TESTS="true" \
+          npx vitest run \
+            src/app/api/groups/\[groupId\]/__tests__/group-deletion-postgres-integration.test.ts \
+            src/lib/search/__tests__/search-postgres-integration.test.ts \
+            src/lib/srs/__tests__/study-postgres-integration.test.ts \
+            src/lib/__tests__/phase15-live-integration.test.ts \
+            src/lib/__tests__/lim09-concurrent-indexes.test.ts
+
+          echo "=== Verify web /api/health dedicated worker telemetry ==="
+          curl -sf http://127.0.0.1:3000/api/health | node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync(0, "utf8"));
+            if (data.database !== "connected") { console.error(data); process.exit(1); }
+            if (data.queue?.mode !== "bullmq") { console.error(data); process.exit(1); }
+            if (data.queue?.workerMode !== "dedicated") { console.error(data); process.exit(1); }
+          '
+
+          echo "=== Verify worker /live & /health JSON endpoints across both replicas ==="
+          for idx in 1 2; do
+            docker compose exec -T --index="$idx" worker node -e '
+              (async () => {
+                const live = await fetch("http://127.0.0.1:3001/live");
+                const health = await fetch("http://127.0.0.1:3001/health");
+                const hj = await health.json();
+                if (!live.ok || !health.ok) process.exit(1);
+                if (hj.database !== "connected" || hj.queue?.mode !== "bullmq" || hj.queue?.workerActive !== true) {
+                  console.error(hj);
+                  process.exit(1);
+                }
+              })().catch((err) => { console.error(err); process.exit(1); });
+            '
+          done
+
+          echo "=== Verify multi-replica Redis scheduler lock across worker-1 and worker-2 ==="
+          docker compose exec -T --index=1 worker node -e '
+            (async () => {
+              const IORedis = require("ioredis");
+              const c1 = new IORedis("redis://redis:6379", { maxRetriesPerRequest: null });
+              const res = await c1.set("zenote-processing-jobs:scheduler-lock:ci-verify", "worker-1-token", "PX", 30000, "NX");
+              if (res !== "OK") process.exit(1);
+              await c1.quit();
+            })().catch((err) => { console.error(err); process.exit(1); });
+          '
+          docker compose exec -T --index=2 worker node -e '
+            (async () => {
+              const IORedis = require("ioredis");
+              const c2 = new IORedis("redis://redis:6379", { maxRetriesPerRequest: null });
+              const contested = await c2.set("zenote-processing-jobs:scheduler-lock:ci-verify", "worker-2-token", "PX", 30000, "NX");
+              if (contested !== null) process.exit(1);
+              await c2.del("zenote-processing-jobs:scheduler-lock:ci-verify");
+              await c2.quit();
+            })().catch((err) => { console.error(err); process.exit(1); });
+          '
+
+          echo "=== Verify real end-to-end BullMQ job processing by zenote-worker ==="
+          docker compose exec -T --index=1 worker node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { PrismaClient } = require("@prisma/client");
+            const { Queue } = require("bullmq");
+            const IORedis = require("ioredis");
+            const { PDFDocument } = require("pdf-lib");
+
+            (async () => {
+              const db = new PrismaClient();
+              const conn = new IORedis("redis://redis:6379", { maxRetriesPerRequest: null });
+              const q = new Queue("zenote-processing-jobs", { connection: conn });
+
+              // Create valid 1-page PDF in shared local storage
+              const pdfDoc = await PDFDocument.create();
+              const page = pdfDoc.addPage([400, 400]);
+              page.drawText("Zenote CI Stage A PDF Extraction");
+              const pdfBytes = await pdfDoc.save();
+              const relKey = "ci-smoke/stage-a-test.pdf";
+              const baseDir = process.env.STORAGE_LOCAL_DIR || "/tmp/zenote-local-storage";
+              fs.mkdirSync(path.join(baseDir, "ci-smoke"), { recursive: true });
+              fs.writeFileSync(path.join(baseDir, relKey), Buffer.from(pdfBytes));
+
+              const user = await db.user.create({ data: { email: "ci-stage-a@zenote.local", name: "CI User" } });
+              const ws = await db.workspace.create({ data: { ownerId: user.id, name: "CI Workspace", slug: "ci-ws-" + Date.now() } });
+              const subj = await db.subject.create({ data: { workspaceId: ws.id, name: "CI Subject" } });
+              const chap = await db.chapter.create({ data: { subjectId: subj.id, name: "CI Chapter" } });
+              const topic = await db.topic.create({ data: { chapterId: chap.id, name: "CI Topic" } });
+              const mat = await db.material.create({
+                data: {
+                  ownerId: user.id,
+                  workspaceId: ws.id,
+                  subjectId: subj.id,
+                  chapterId: chap.id,
+                  topicId: topic.id,
+                  title: "CI Stage A PDF",
+                  type: "PDF",
+                  mimeType: "application/pdf",
+                  sizeBytes: pdfBytes.length,
+                  storageKey: relKey,
+                  status: "PROCESSING",
+                },
+              });
+              const job = await db.processingJob.create({
+                data: {
+                  userId: user.id,
+                  materialId: mat.id,
+                  type: "DOCUMENT_EXTRACTION",
+                  status: "QUEUED",
+                  maxAttempts: 3,
+                },
+              });
+
+              await q.add("DOCUMENT_EXTRACTION", {
+                jobId: job.id,
+                type: "DOCUMENT_EXTRACTION",
+                enqueuedAt: new Date().toISOString(),
+              }, { jobId: "DOCUMENT_EXTRACTION:" + job.id });
+
+              let finishedJob = null;
+              let updatedMat = null;
+              for (let i = 0; i < 60; i++) {
+                finishedJob = await db.processingJob.findUnique({ where: { id: job.id } });
+                if (finishedJob && finishedJob.status === "SUCCEEDED") {
+                  updatedMat = await db.material.findUnique({ where: { id: mat.id } });
+                  break;
+                }
+                if (finishedJob && finishedJob.status === "FAILED") {
+                  throw new Error("Extraction job failed: " + finishedJob.error);
+                }
+                await new Promise((r) => setTimeout(r, 250));
+              }
+
+              if (!finishedJob || finishedJob.status !== "SUCCEEDED") {
+                throw new Error("Timed out waiting for worker job SUCCEEDED");
+              }
+              if (!updatedMat || !String(updatedMat.extractedText || "").includes("Zenote CI Stage A PDF Extraction")) {
+                throw new Error("Extracted text mismatch: " + updatedMat?.extractedText);
+              }
+              console.log("Verified real BullMQ DOCUMENT_EXTRACTION SUCCEEDED:", job.id);
+
+              await q.close();
+              await conn.quit();
+              await db.$disconnect();
+            })().catch((err) => { console.error(err); process.exit(1); });
+          '
+
+          echo "=== Verify Redis restart reconnect resilience ==="
+          docker compose restart redis
+          recovered=0
+          for i in $(seq 1 30); do
+            web_ok=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/health || true)
+            w1_ok=$(docker compose exec -T --index=1 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            w2_ok=$(docker compose exec -T --index=2 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            if [ "$web_ok" = "200" ] && [ "$w1_ok" = "200" ] && [ "$w2_ok" = "200" ]; then
+              recovered=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$recovered" != "1" ]; then
+            docker compose logs --tail=100 worker web redis
+            exit 1
+          fi
+
+          echo "=== Verify worker and web container restart recovery ==="
+          docker compose restart worker web
+          restart_ok=0
+          for i in $(seq 1 30); do
+            web_ok=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/health || true)
+            w1_ok=$(docker compose exec -T --index=1 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            w2_ok=$(docker compose exec -T --index=2 worker node -e "fetch('http://127.0.0.1:3001/health').then(r=>console.log(r.status)).catch(()=>console.log(0))" 2>/dev/null || echo 0)
+            if [ "$web_ok" = "200" ] && [ "$w1_ok" = "200" ] && [ "$w2_ok" = "200" ]; then
+              restart_ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$restart_ok" != "1" ]; then
+            docker compose logs --tail=100 worker web
+            exit 1
+          fi
+
+          echo "=== Verify Linux SIGTERM graceful worker shutdown ==="
+          w1_cid=$(docker compose ps -q worker | head -n 1)
+          docker update --restart=no "$w1_cid" >/dev/null
+          docker kill --signal=SIGTERM "$w1_cid"
+          exit_code=$(docker wait "$w1_cid")
+          echo "Worker container SIGTERM exit code: $exit_code"
+          test "$exit_code" = "0"
+          docker logs "$w1_cid" | grep -q '"event":"shutdown_started"'
+          docker logs "$w1_cid" | grep -q '"event":"shutdown_complete"'
+
+          echo "=== Verify Linux SIGTERM graceful web shutdown ==="
+          web_cid=$(docker compose ps -q web | head -n 1)
+          docker update --restart=no "$web_cid" >/dev/null
+          docker kill --signal=SIGTERM "$web_cid"
+          web_exit_code=$(docker wait "$web_cid")
+          echo "Web container SIGTERM exit code: $web_exit_code"
+          test "$web_exit_code" = "0"
+
+          echo "=== Verify container logs leak zero credentials or secrets ==="
+          logs_out=$(docker compose logs --no-color web worker)
+          if printf '%s' "$logs_out" | grep -Eq 'zenote_local_pw|local-compose-dev-secret|DATABASE_URL=|Bearer [A-Za-z0-9._-]+'; then
+            echo "ERROR: Detected unredacted secret material in container logs!"
+            exit 1
+          fi
+
+      - name: Collect Compose logs on failure
+        if: failure()
+        run: |
+          docker compose ps -a || true
+          docker compose logs --tail=100 || true
+
+      - name: Tear down isolated Compose stack
+        if: always()
+        run: docker compose down -v --remove-orphans

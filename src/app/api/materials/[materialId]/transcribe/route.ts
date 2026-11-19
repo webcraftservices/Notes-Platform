@@ -3,7 +3,9 @@ import { getSessionUser, getAccessibleMaterial, NotAuthorizedError } from "@/lib
 import { runTranscriptionJob } from "@/lib/transcription";
 import { jsonError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import { createJobIfNoneActive } from "@/lib/processing-jobs";
+import { dispatchProcessingJob } from "@/lib/queue/dispatcher";
 import { rateLimit } from "@/lib/rate-limit";
+import { getRecordingUsage } from "@/lib/recording-usage";
 
 /**
  * Phase 9.4 — every successful call here is a separate, billed
@@ -37,6 +39,19 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
       return jsonError("This file isn't finished uploading yet.", 409);
     }
 
+    const usage = await getRecordingUsage(user.id);
+    if (
+      usage.remainingSeconds <= 0 ||
+      (typeof material.durationSeconds === "number" &&
+        material.durationSeconds > usage.remainingSeconds)
+    ) {
+      return jsonError(
+        "You've used all of your monthly transcription/recording minutes for this billing period. Upgrade your plan or wait for it to reset.",
+        429,
+        { code: "RECORDING_QUOTA_EXCEEDED" }
+      );
+    }
+
     // Atomic check-and-create (Phase 9.4): a double click or a client retry
     // after a network timeout gets back the SAME job instead of starting a
     // second, separately billed transcription. A job stranded by a server
@@ -45,14 +60,17 @@ export async function POST(_req: Request, { params }: { params: { materialId: st
       userId: user.id,
       materialId: material.id,
       type: "TRANSCRIPTION",
+      ...(material.groupId ? { verifyActorMembership: true } : {}),
     });
-    if (!created) return NextResponse.json({ job });
+    if (!created || !job) return NextResponse.json({ job });
 
     // Fire-and-forget: the HTTP response returns immediately with the job
     // id, and the client polls GET /api/materials/[id] for status. See
     // runTranscriptionJob's doc comment for the serverless caveat this
     // pattern carries.
-    void runTranscriptionJob(job.id);
+    void dispatchProcessingJob(job.id, "TRANSCRIPTION", {
+      inProcessRunner: runTranscriptionJob,
+    });
 
     return NextResponse.json({ job }, { status: 202 });
   } catch (err) {

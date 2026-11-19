@@ -4,6 +4,43 @@ import { useEffect, useRef, useState } from "react";
 import { AlertCircle, ChevronLeft, ChevronRight, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { sanitizePptxDomChunk } from "@/lib/sanitize-pptx";
+import { toSafeAppOrHttpUrl } from "@/lib/safe-url";
+
+function sanitizeJQueryCollection(collection: unknown): unknown {
+  if (!collection || (typeof collection !== "object" && typeof collection !== "function")) {
+    return collection;
+  }
+  const col = collection as Record<string, unknown>;
+  for (const methodName of ["append", "prepend", "html"] as const) {
+    const original = col[methodName];
+    if (typeof original === "function") {
+      col[methodName] = function (...args: unknown[]) {
+        if (methodName === "html" && args.length === 0) {
+          return (original as (...a: unknown[]) => unknown).apply(this, args);
+        }
+        const sanitizedArgs = args.map((arg) => sanitizePptxDomChunk(arg));
+        return (original as (...a: unknown[]) => unknown).apply(this, sanitizedArgs);
+      };
+    }
+  }
+  return collection;
+}
+
+function createSanitizedPptxJQuery(baseJQuery: unknown): unknown {
+  const jq = baseJQuery as ((...args: unknown[]) => unknown) & Record<string, unknown>;
+  const wrapped = function (...args: unknown[]) {
+    // Reject HTML-string construction like $("<div><img onerror=...></div>") by sanitizing raw HTML strings
+    const nextArgs =
+      typeof args[0] === "string" && args[0].includes("<")
+        ? [sanitizePptxDomChunk(args[0]), ...args.slice(1)]
+        : args;
+    return sanitizeJQueryCollection(jq(...nextArgs));
+  } as unknown as ((...args: unknown[]) => unknown) & Record<string, unknown>;
+
+  Object.assign(wrapped, jq);
+  return wrapped;
+}
 
 export function PresentationViewer({
   materialId,
@@ -39,13 +76,38 @@ export function PresentationViewer({
           import("dimple"),
           import("jszip"),
         ]);
-        const $ = jquery;
-        Object.assign(globalThis, { $, jQuery: jquery, d3, dimple, JSZip });
+        const safe$ = createSanitizedPptxJQuery(jquery);
+        const globals = globalThis as Record<string, unknown>;
+        const prev$ = globals.$;
+        const prevJQuery = globals.jQuery;
+        const prevD3 = globals.d3;
+        const prevDimple = globals.dimple;
+        const prevJSZip = globals.JSZip;
+        Object.assign(globalThis, { $: safe$, jQuery: safe$, d3, dimple, JSZip });
         const { default: renderPptx } = await import("pptx2html");
-        if (disposed || !containerRef.current) return;
+        if (disposed || !containerRef.current) {
+          Object.assign(globalThis, {
+            $: prev$,
+            jQuery: prevJQuery,
+            d3: prevD3,
+            dimple: prevDimple,
+            JSZip: prevJSZip,
+          });
+          return;
+        }
 
         containerRef.current.replaceChildren();
-        await renderPptx(buffer, containerRef.current);
+        try {
+          await renderPptx(buffer, containerRef.current);
+        } finally {
+          Object.assign(globalThis, {
+            $: prev$,
+            jQuery: prevJQuery,
+            d3: prevD3,
+            dimple: prevDimple,
+            JSZip: prevJSZip,
+          });
+        }
         if (disposed || !containerRef.current) return;
 
         const slides = containerRef.current.querySelectorAll("section");
@@ -81,11 +143,16 @@ export function PresentationViewer({
       return;
     }
     const data = await response.json();
-    if (!data.readUrl) {
+    const safeReadUrl = toSafeAppOrHttpUrl(data?.readUrl);
+    if (!safeReadUrl) {
       toast.error("This file isn't ready yet.");
       return;
     }
-    window.open(`${data.readUrl}${data.readUrl.includes("?") ? "&" : "?"}download=1`, "_blank");
+    window.open(
+      `${safeReadUrl}${safeReadUrl.includes("?") ? "&" : "?"}download=1`,
+      "_blank",
+      "noopener,noreferrer"
+    );
   }
 
   return (

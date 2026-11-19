@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const tx = vi.hoisted(() => ({
   $executeRaw: vi.fn(),
+  $executeRawUnsafe: vi.fn(),
+  material: { findUnique: vi.fn() },
   processingJob: { updateMany: vi.fn(), findFirst: vi.fn(), create: vi.fn() },
 }));
 const db = vi.hoisted(() => ({
@@ -26,7 +28,19 @@ describe("createJobIfNoneActive", () => {
     vi.resetAllMocks();
     db.$transaction.mockImplementation(async (fn: (t: typeof tx) => unknown) => fn(tx));
     tx.$executeRaw.mockResolvedValue(1);
+    tx.$executeRawUnsafe.mockResolvedValue(1);
+    tx.material.findUnique.mockResolvedValue({ id: "mat-1", deletedAt: null });
     tx.processingJob.updateMany.mockResolvedValue({ count: 0 });
+  });
+
+  it("refuses to create a job if the referenced material is soft-deleted or missing", async () => {
+    tx.material.findUnique.mockResolvedValue({ id: "mat-1", deletedAt: new Date() });
+
+    const result = await createJobIfNoneActive(input);
+
+    expect(result).toEqual({ job: null, created: false });
+    expect(tx.processingJob.findFirst).not.toHaveBeenCalled();
+    expect(tx.processingJob.create).not.toHaveBeenCalled();
   });
 
   it("creates a QUEUED job when none is active", async () => {
@@ -95,7 +109,11 @@ describe("claimJob", () => {
   it("moves QUEUED → RUNNING with a status-guarded update and reports whether this caller won", async () => {
     db.processingJob.updateMany.mockResolvedValue({ count: 1 });
     expect(await claimJob("job-1")).toBe(true);
-    expect(db.processingJob.updateMany.mock.calls[0]![0].where).toEqual({ id: "job-1", status: "QUEUED" });
+    expect(db.processingJob.updateMany.mock.calls[0]![0].where).toEqual({
+      id: "job-1",
+      status: "QUEUED",
+      OR: [{ materialId: null }, { material: { deletedAt: null } }],
+    });
 
     db.processingJob.updateMany.mockResolvedValue({ count: 0 });
     expect(await claimJob("job-1")).toBe(false);

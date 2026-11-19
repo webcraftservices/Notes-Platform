@@ -2,17 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   flashcard: { findMany: vi.fn() },
+  flashcardDeck: { update: vi.fn(), delete: vi.fn() },
 }));
 vi.mock("@/lib/db", () => ({ db }));
 
 const access = vi.hoisted(() => ({
   getSessionUser: vi.fn(),
   getAccessibleFlashcardDeck: vi.fn(),
+  requireGroupRole: vi.fn(),
   NotAuthorizedError: class NotAuthorizedError extends Error {},
 }));
 vi.mock("@/lib/access", () => access);
 
-import { GET } from "@/app/api/flashcards/[deckId]/route";
+import { GET, PATCH, DELETE } from "@/app/api/flashcards/[deckId]/route";
 
 function makeRequest(): Request {
   return new Request("https://example.test/api/flashcards/deck-1");
@@ -122,5 +124,62 @@ describe("GET /api/flashcards/[deckId]", () => {
     const json = await res.json();
 
     expect(json.deck.cards[0].review).toBeNull();
+  });
+
+  it("includes derived FSRS-4.5 schedule per card and deck-level study stats", async () => {
+    const res = await GET(makeRequest(), { params: { deckId: "deck-1" } });
+    const json = await res.json();
+
+    expect(json.deck.stats).toMatchObject({
+      totalCards: 2,
+      newCount: 1,
+    });
+    const newCard = json.deck.cards.find((c: { id: string }) => c.id === "card-2");
+    expect(newCard.schedule.state).toBe("NEW");
+    expect(newCard.schedule.intervals).toMatchObject({
+      AGAIN: { label: "<10m", state: "LEARNING" },
+      HARD: { label: "1d", state: "LEARNING" },
+      GOOD: { label: "2d", state: "REVIEW" },
+      EASY: { label: "6d", state: "REVIEW" },
+    });
+  });
+
+  it("supports PATCH to rename deck for the owner and rejects non-owner without group ADMIN", async () => {
+    db.flashcardDeck.update.mockResolvedValue({ id: "deck-1", title: "Renamed Deck" });
+    const patchReq = new Request("https://example.test/api/flashcards/deck-1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Renamed Deck" }),
+    });
+    const res = await PATCH(patchReq, { params: { deckId: "deck-1" } });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.deck.title).toBe("Renamed Deck");
+
+    // Non-owner without groupId -> 403
+    access.getAccessibleFlashcardDeck.mockResolvedValue({
+      id: "deck-1",
+      title: "Deck",
+      ownerId: "other-owner",
+      groupId: null,
+    });
+    const forbiddenRes = await PATCH(
+      new Request("https://example.test/api/flashcards/deck-1", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Attempt" }),
+      }),
+      { params: { deckId: "deck-1" } }
+    );
+    expect(forbiddenRes.status).toBe(403);
+  });
+
+  it("supports DELETE for the deck owner", async () => {
+    db.flashcardDeck.delete.mockResolvedValue({ id: "deck-1" });
+    const delReq = new Request("https://example.test/api/flashcards/deck-1", { method: "DELETE" });
+    const res = await DELETE(delReq, { params: { deckId: "deck-1" } });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ deleted: true, id: "deck-1" });
   });
 });

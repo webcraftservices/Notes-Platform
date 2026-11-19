@@ -25,7 +25,11 @@ export async function getRecordingUsage(userId: string) {
     _sum: { durationSeconds: true },
   });
 
-  const plan = getPlanLimits(subscription?.plan ?? "FREE");
+  const effectiveTier =
+    !subscription || subscription.status === "CANCELLED"
+      ? "FREE"
+      : (subscription.plan ?? "FREE");
+  const plan = getPlanLimits(effectiveTier);
   const usedSeconds = aggregate._sum.durationSeconds ?? 0;
   const limitSeconds = plan.recordingMinutesPerMonth * 60;
 

@@ -52,7 +52,7 @@ vi.mock("@/lib/notifications", () => notifications);
 
 const scope = vi.hoisted(() => ({
   resolveMaterialScope: vi.fn(),
-  ScopeNotFoundError: class ScopeNotFoundError extends Error {},
+  ScopeNotFoundError: class ScopeNotFoundError extends Error { },
 }));
 vi.mock("@/lib/materials-scope", () => scope);
 
@@ -95,10 +95,13 @@ describe("Group Resource Creation Serialization (Phase 10C.1D.2)", () => {
       remainingBytes: 500 * 1024 * 1024,
     });
 
-    // Default: active group returns row from lock query
+    // Default: active group and membership return rows from lock queries
     tx.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
       const sql = Array.isArray(strings) ? strings.join("?") : String(strings);
-      if (sql.includes("FOR SHARE") || sql.includes("FOR UPDATE")) {
+      if (sql.includes('FROM "GroupMember"') && (sql.includes("FOR SHARE") || sql.includes("FOR UPDATE"))) {
+        return [{ id: "gm-1", groupId: groupActiveId, userId: currentUser.id, role: "ADMIN", joinedAt: new Date() }];
+      }
+      if (sql.includes('FROM "Group"') && (sql.includes("FOR SHARE") || sql.includes("FOR UPDATE"))) {
         return [{ id: groupActiveId, deletedAt: null }];
       }
       return [];
@@ -432,7 +435,10 @@ describe("Group Resource Creation Serialization (Phase 10C.1D.2)", () => {
 
       tx.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
         const sql = Array.isArray(strings) ? strings.join("?") : String(strings);
-        if (sql.includes("FOR SHARE")) {
+        if (sql.includes('FROM "GroupMember"') && sql.includes("FOR SHARE")) {
+          return [{ id: "gm-1", groupId: groupActiveId, userId: currentUser.id, role: "ADMIN", joinedAt: new Date() }];
+        }
+        if (sql.includes('FROM "Group"') && sql.includes("FOR SHARE")) {
           executionOrder.push("creation:lock_acquired");
           return [{ id: groupActiveId, deletedAt: null }];
         }
@@ -530,7 +536,10 @@ describe("Group Resource Creation Serialization (Phase 10C.1D.2)", () => {
           executionOrder.push("deletion:lock_acquired");
           return [{ id: groupActiveId, deletedAt: null }];
         }
-        if (sql.includes("FOR SHARE")) {
+        if (sql.includes('FROM "GroupMember"') && sql.includes("FOR SHARE")) {
+          return [{ id: "gm-1", groupId: groupActiveId, userId: currentUser.id, role: "ADMIN", joinedAt: new Date() }];
+        }
+        if (sql.includes('FROM "Group"') && sql.includes("FOR SHARE")) {
           executionOrder.push("creation:lock_requested");
           await deletionCommitSignal;
           executionOrder.push("creation:lock_acquired_sees_deleted");

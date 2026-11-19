@@ -1,0 +1,155 @@
+# ============================================================================
+# Zenote — Isolated Local Multi-Container Stack (Stage A)
+#
+# STRICT DATA-SAFETY ISOLATION:
+#   - Uses local PostgreSQL + pgvector (`zenote_local`) and local Redis ONLY.
+#   - NEVER connects to shared `/neondb`, live Upstash Redis, or live Cloudflare R2.
+#   - Do NOT share local `.storage` volumes between web and worker in production;
+#     Azure / cloud deployments MUST use `STORAGE_PROVIDER=s3` (Cloudflare R2/S3).
+# ============================================================================
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zenote
+      POSTGRES_PASSWORD: zenote_local_pw
+      POSTGRES_DB: zenote_local
+    ports:
+      - "5433:5432"
+    volumes:
+      - zenote_local_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zenote -d zenote_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - zenote_local_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrator
+    environment:
+      DATABASE_URL: postgresql://zenote:zenote_local_pw@postgres:5432/zenote_local?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      DATABASE_URL: postgresql://zenote:zenote_local_pw@postgres:5432/zenote_local?schema=public
+      REDIS_URL: redis://redis:6379
+      BULLMQ_ENABLED: "true"
+      BULLMQ_DEDICATED_WORKER: "true"
+      BULLMQ_EMBEDDED_WORKER: "false"
+      BULLMQ_EMBEDDED_MAINTENANCE: "false"
+      NEXTAUTH_URL: http://127.0.0.1:3000
+      NEXTAUTH_SECRET: local-compose-dev-secret-change-in-production-32bytes
+      STORAGE_PROVIDER: local
+      STORAGE_LOCAL_DIR: /tmp/zenote-local-storage
+      AZURE_CLOUD_ROLE_NAME: zenote-web
+      DD_SERVICE: zenote-web
+      ZENOTE_SERVICE_ROLE: zenote-web
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Named volume only for local compose development when STORAGE_PROVIDER=local;
+    # cloud / Azure Container Apps must set STORAGE_PROVIDER=s3 without shared disks.
+    volumes:
+      - zenote_local_storage:/tmp/zenote-local-storage
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    expose:
+      - "3001"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://zenote:zenote_local_pw@postgres:5432/zenote_local?schema=public
+      REDIS_URL: redis://redis:6379
+      BULLMQ_ENABLED: "true"
+      BULLMQ_DEDICATED_WORKER: "true"
+      BULLMQ_WORKER_CONCURRENCY: "3"
+      WORKER_HEALTH_PORT: "3001"
+      WORKER_SHUTDOWN_TIMEOUT_MS: "25000"
+      NEXTAUTH_SECRET: local-compose-dev-secret-change-in-production-32bytes
+      STORAGE_PROVIDER: local
+      STORAGE_LOCAL_DIR: /tmp/zenote-local-storage
+      AZURE_CLOUD_ROLE_NAME: zenote-worker
+      DD_SERVICE: zenote-worker
+      ZENOTE_SERVICE_ROLE: zenote-worker
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - zenote_local_storage:/tmp/zenote-local-storage
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  zenote_local_pg:
+  zenote_local_redis:
+  zenote_local_storage:
+

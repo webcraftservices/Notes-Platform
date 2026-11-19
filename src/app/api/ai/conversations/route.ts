@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleAIScope, NotAuthorizedError, type ResolvedAIScope } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleAIScope,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+  type ResolvedAIScope,
+} from "@/lib/access";
 import { aiConversationScopeSchema } from "@/lib/validation/ai";
 import { assertAiTutorEntitlement, AITutorNotEnabledError } from "@/lib/ai-quota";
 import { zodError, jsonError, UNAUTHORIZED, FORBIDDEN } from "@/lib/api-response";
@@ -27,6 +33,38 @@ function scopeFkFields(scope: ResolvedAIScope) {
     workspaceId: !narrowed && scope.ownerType === "workspace" ? scope.workspaceId : null,
     groupId: !narrowed && scope.ownerType === "group" ? scope.groupId : null,
   };
+}
+
+async function assertActiveAIScopeAncestorsInTx(
+  tx: unknown,
+  scope: ResolvedAIScope
+): Promise<void> {
+  const txAny = tx as {
+    topic?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+    chapter?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+    subject?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+  };
+  if (scope.topicId && typeof txAny.topic?.findFirst === "function") {
+    const activeTopic = await txAny.topic.findFirst({
+      where: { id: scope.topicId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!activeTopic) throw new NotAuthorizedError();
+  }
+  if (scope.chapterId && typeof txAny.chapter?.findFirst === "function") {
+    const activeChapter = await txAny.chapter.findFirst({
+      where: { id: scope.chapterId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!activeChapter) throw new NotAuthorizedError();
+  }
+  if (scope.subjectId && typeof txAny.subject?.findFirst === "function") {
+    const activeSubject = await txAny.subject.findFirst({
+      where: { id: scope.subjectId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!activeSubject) throw new NotAuthorizedError();
+  }
 }
 
 /**
@@ -73,10 +111,21 @@ export async function GET(req: Request) {
     });
 
     if (!conversation) {
-      conversation = await db.aIConversation.create({
-        data: { userId: user.id, kind, ...fk },
-        include: { messages: { orderBy: { createdAt: "asc" } } },
-      });
+      if (scope.ownerType === "group") {
+        conversation = await db.$transaction(async (tx) => {
+          await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
+          await assertActiveAIScopeAncestorsInTx(tx, scope);
+          return tx.aIConversation.create({
+            data: { userId: user.id, kind, ...fk },
+            include: { messages: { orderBy: { createdAt: "asc" } } },
+          });
+        });
+      } else {
+        conversation = await db.aIConversation.create({
+          data: { userId: user.id, kind, ...fk },
+          include: { messages: { orderBy: { createdAt: "asc" } } },
+        });
+      }
     }
 
     return NextResponse.json({ conversation });
@@ -101,10 +150,20 @@ export async function POST(req: Request) {
 
     const scope = await getAccessibleAIScope(parsed.data, user.id);
 
-    const conversation = await db.aIConversation.create({
-      data: { userId: user.id, kind: parsed.data.kind, ...scopeFkFields(scope) },
-      include: { messages: true },
-    });
+    const conversation =
+      scope.ownerType === "group"
+        ? await db.$transaction(async (tx) => {
+            await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
+            await assertActiveAIScopeAncestorsInTx(tx, scope);
+            return tx.aIConversation.create({
+              data: { userId: user.id, kind: parsed.data.kind, ...scopeFkFields(scope) },
+              include: { messages: true },
+            });
+          })
+        : await db.aIConversation.create({
+            data: { userId: user.id, kind: parsed.data.kind, ...scopeFkFields(scope) },
+            include: { messages: true },
+          });
 
     return NextResponse.json({ conversation }, { status: 201 });
   } catch (err) {

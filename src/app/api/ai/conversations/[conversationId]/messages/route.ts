@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleAIConversation, getAccessibleAIScope, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleAIConversation,
+  getAccessibleAIScope,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { sendAIMessageSchema } from "@/lib/validation/ai";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
 import {
@@ -18,6 +24,7 @@ import { assertWithinAIQuota, assertAiTutorEntitlement, AIQuotaExceededError, AI
 import { recordAIUsage } from "@/lib/ai-usage";
 import { getOrCreateRequestId } from "@/lib/observability/request-id";
 import { sendDatadogMetric } from "@/lib/observability/datadog";
+import { sendAzureMonitorMetric } from "@/lib/observability/azure-monitor";
 
 /**
  * Requests per window for the AI chat endpoint (task §8) — the only AI
@@ -190,33 +197,126 @@ export async function POST(req: Request, { params }: { params: { conversationId:
           `failure_category:${aiErr instanceof AIProviderUnavailableError ? "unavailable" : "unexpected"}`,
         ],
       });
+      void sendAzureMonitorMetric("ai.chat.requests", 1, {
+        properties: {
+          provider: ai.providerName,
+          model: ai.modelName,
+          kind: isTutorConversation ? "tutor" : "chat",
+          outcome: "failure",
+          failureCategory: aiErr instanceof AIProviderUnavailableError ? "unavailable" : "unexpected",
+        },
+      });
       throw aiErr;
     }
+    const latencyMs = Date.now() - aiCallStartedAt;
     void sendDatadogMetric("ai.chat.requests", 1, {
       type: "count",
       tags: [`provider:${ai.providerName}`, `model:${ai.modelName}`, `kind:${isTutorConversation ? "tutor" : "chat"}`, "outcome:success"],
     });
-    void sendDatadogMetric("ai.chat.latency_ms", Date.now() - aiCallStartedAt, {
+    void sendDatadogMetric("ai.chat.latency_ms", latencyMs, {
       type: "gauge",
       tags: [`provider:${ai.providerName}`, `model:${ai.modelName}`, `kind:${isTutorConversation ? "tutor" : "chat"}`],
     });
+    void sendAzureMonitorMetric("ai.chat.requests", 1, {
+      properties: {
+        provider: ai.providerName,
+        model: ai.modelName,
+        kind: isTutorConversation ? "tutor" : "chat",
+        outcome: "success",
+      },
+    });
+    void sendAzureMonitorMetric("ai.chat.latency_ms", latencyMs, {
+      properties: {
+        provider: ai.providerName,
+        model: ai.modelName,
+        kind: isTutorConversation ? "tutor" : "chat",
+      },
+    });
 
-    const [userMessage, assistantMessage] = await db.$transaction([
-      db.aIMessage.create({
-        data: { conversationId: conversation.id, role: "USER", content: parsed.data.content },
-      }),
-      db.aIMessage.create({
-        data: {
-          conversationId: conversation.id,
-          role: "ASSISTANT",
-          content: result.content,
-          sources: chunks.length > 0 ? JSON.parse(JSON.stringify(chunksToSources(chunks))) : undefined,
-          tokensInput: result.tokensInput,
-          tokensOutput: result.tokensOutput,
-        },
-      }),
-    ]);
-    await db.aIConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+    let userMessage: unknown;
+    let assistantMessage: unknown;
+    try {
+      [userMessage, assistantMessage] = await db.$transaction(async (tx) => {
+        if (scope.ownerType === "group" && typeof assertActiveGroupMemberForCreation === "function") {
+          await assertActiveGroupMemberForCreation(tx, scope.groupId, user.id);
+        }
+        const txWithConv = tx as unknown as {
+          topic?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+          chapter?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+          subject?: { findFirst?: (args: unknown) => Promise<{ id: string } | null> };
+          aIConversation?: {
+            findUnique?: (args: unknown) => Promise<{
+              id: string;
+              userId?: string;
+              deletedAt?: Date | null;
+            } | null>;
+            update: typeof db.aIConversation.update;
+          };
+        };
+        if (scope.topicId && typeof txWithConv.topic?.findFirst === "function") {
+          const activeTopic = await txWithConv.topic.findFirst({
+            where: { id: scope.topicId, deletedAt: null },
+            select: { id: true },
+          });
+          if (!activeTopic) throw new NotAuthorizedError();
+        }
+        if (scope.chapterId && typeof txWithConv.chapter?.findFirst === "function") {
+          const activeChapter = await txWithConv.chapter.findFirst({
+            where: { id: scope.chapterId, deletedAt: null },
+            select: { id: true },
+          });
+          if (!activeChapter) throw new NotAuthorizedError();
+        }
+        if (scope.subjectId && typeof txWithConv.subject?.findFirst === "function") {
+          const activeSubject = await txWithConv.subject.findFirst({
+            where: { id: scope.subjectId, deletedAt: null },
+            select: { id: true },
+          });
+          if (!activeSubject) throw new NotAuthorizedError();
+        }
+        if (typeof txWithConv.aIConversation?.findUnique === "function") {
+          const activeConv = await txWithConv.aIConversation.findUnique({
+            where: { id: conversation.id, deletedAt: null },
+            select: { id: true, userId: true, deletedAt: true },
+          });
+          if (
+            !activeConv ||
+            activeConv.deletedAt != null ||
+            (activeConv.userId !== undefined && activeConv.userId !== user.id)
+          ) {
+            throw new NotAuthorizedError();
+          }
+        }
+        const createdUserMessage = await tx.aIMessage.create({
+          data: { conversationId: conversation.id, role: "USER", content: parsed.data.content },
+        });
+        const createdAssistantMessage = await tx.aIMessage.create({
+          data: {
+            conversationId: conversation.id,
+            role: "ASSISTANT",
+            content: result.content,
+            sources: chunks.length > 0 ? JSON.parse(JSON.stringify(chunksToSources(chunks))) : undefined,
+            tokensInput: result.tokensInput,
+            tokensOutput: result.tokensOutput,
+          },
+        });
+        await tx.aIConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+        return [createdUserMessage, createdAssistantMessage];
+      });
+    } catch (persistErr) {
+      await recordAIUsage({
+        userId: user.id,
+        workspaceId: scope.ownerType === "workspace" ? scope.workspaceId : null,
+        groupId: scope.ownerType === "group" ? scope.groupId : null,
+        category: isTutorConversation ? "tutor_chat" : "chat",
+        provider: ai.providerName,
+        model: ai.modelName,
+        tokensInput: result.tokensInput,
+        tokensOutput: result.tokensOutput,
+        context: { conversationId: conversation.id, persistFailed: true },
+      });
+      throw persistErr;
+    }
 
     // Best-effort — never blocks or fails the response (see lib/ai-usage.ts).
     await recordAIUsage({

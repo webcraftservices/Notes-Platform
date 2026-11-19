@@ -113,4 +113,40 @@ describe("Learning scope authorization (Phase 8.1)", () => {
 
     await expect(getAccessibleQuiz("quiz-1", "user-2")).rejects.toThrow(NotAuthorizedError);
   });
+
+  it("returns null (fails closed) when a FlashcardDeck or Quiz has a soft-deleted Group, Subject, Chapter, or Topic ancestor", async () => {
+    db.flashcardDeck.findUnique.mockResolvedValue({
+      id: "deck-deleted-group",
+      ownerId: "user-1",
+      groupId: "group-1",
+      workspaceId: null,
+      group: { deletedAt: new Date() },
+    });
+    await expect(getAccessibleFlashcardDeck("deck-deleted-group", "user-1")).resolves.toBeNull();
+
+    db.flashcardDeck.findUnique.mockResolvedValue({
+      id: "deck-deleted-topic",
+      ownerId: "user-1",
+      groupId: null,
+      workspaceId: "ws-1",
+      topic: {
+        deletedAt: new Date(),
+        chapter: { deletedAt: null, subject: { deletedAt: null } },
+      },
+    });
+    await expect(getAccessibleFlashcardDeck("deck-deleted-topic", "user-1")).resolves.toBeNull();
+
+    db.quiz.findUnique.mockResolvedValue({
+      id: "quiz-deleted-subject",
+      ownerId: "user-1",
+      groupId: "group-1",
+      workspaceId: null,
+      group: { deletedAt: null },
+      topic: {
+        deletedAt: null,
+        chapter: { deletedAt: null, subject: { deletedAt: new Date() } },
+      },
+    });
+    await expect(getAccessibleQuiz("quiz-deleted-subject", "user-1")).resolves.toBeNull();
+  });
 });

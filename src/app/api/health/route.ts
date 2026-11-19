@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { checkRedisHealth } from "@/lib/rate-limit";
+import { checkQueueHealth } from "@/lib/queue/worker";
 import { getStorageService } from "@/lib/services/storage";
 import { getAIService } from "@/lib/services/ai";
 import { logServerError } from "@/lib/api-response";
+import { validateRuntimeConfiguration } from "@/lib/config/production-validation";
 
 /**
  * Phase 9.4 — this route must be evaluated on every request. Next 14
@@ -70,9 +72,10 @@ function withTimeout<T>(operation: Promise<T>): Promise<T> {
  * fixed strings.
  */
 export async function GET() {
-  const [database, redis, storage, ai] = await Promise.all([
+  const [database, redis, queue, storage, ai] = await Promise.all([
     checkDatabase(),
     checkRedisHealth(),
+    checkQueueHealth(),
     Promise.resolve(checkStorageConfig()),
     Promise.resolve(checkAIConfig()),
   ]);
@@ -91,6 +94,12 @@ export async function GET() {
       status,
       database: database.status,
       redis: redis.configured ? (redis.reachable ? "connected" : "unreachable") : "not_configured",
+      queue: {
+        mode: queue.mode,
+        workerMode: queue.workerMode,
+        workerActive: queue.workerActive,
+        ...(queue.counts ? { counts: queue.counts } : {}),
+      },
       storage: storage,
       ai: ai,
       config,
@@ -104,11 +113,12 @@ export async function GET() {
  * a fixed "ok"/"misconfigured" result is ever reported — never which
  * variable is missing (the endpoint is unauthenticated) and never a value.
  * Outside production NextAuth tolerates a missing secret, so this never
- * fails local development. (DATABASE_URL is covered by the database check.)
+ * fails local development. When `CLOUD_PRODUCTION_STRICT=true` or
+ * `ZENOTE_DEPLOYMENT_TARGET=azure`, strict cloud invariants are enforced.
  */
 function checkRequiredConfig(): "ok" | "misconfigured" {
-  if (process.env.NODE_ENV !== "production") return "ok";
-  return process.env.NEXTAUTH_SECRET ? "ok" : "misconfigured";
+  const result = validateRuntimeConfiguration({ role: "web" });
+  return result.ok ? "ok" : "misconfigured";
 }
 
 async function checkDatabase(): Promise<{ status: "connected" | "unreachable" }> {

@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleGroup, getGroupRole, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleGroup,
+  getGroupRole,
+  lockGroupForShare,
+  lockGroupMembersForUpdate,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { canChangeMemberRole, canRemoveMember } from "@/lib/group-role";
 import { updateMemberRoleSchema } from "@/lib/validation/groups";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
@@ -39,12 +46,44 @@ export async function PATCH(
     if (!actorRole) return FORBIDDEN();
 
     const updated = await db.$transaction(async (tx) => {
-      const target = await tx.groupMember.findUnique({
-        where: { groupId_userId: { groupId: group.id, userId: params.userId } },
-      });
+      let effectiveActorRole = actorRole;
+      let target: { role: NonNullable<typeof actorRole> } | null = null;
+      const txAny = tx as unknown as {
+        $queryRaw?: unknown;
+        groupMember?: {
+          findFirst?: (args: unknown) => Promise<{ role: NonNullable<typeof actorRole> } | null>;
+        };
+      };
+      if (typeof txAny.$queryRaw === "function") {
+        // Lock Group FOR SHARE first (top-down), then lock both actor and target GroupMember rows
+        // in canonical ascending userId order FOR UPDATE to prevent AB-BA deadlocks and stale reads.
+        const lockedGroup = await lockGroupForShare(tx, group.id);
+        if (!lockedGroup || lockedGroup.deletedAt !== null) {
+          throw new NotAuthorizedError();
+        }
+        const lockedMembers = await lockGroupMembersForUpdate(tx, group.id, [
+          user.id,
+          params.userId,
+        ]);
+        const callerMember = lockedMembers.find((m) => m.userId === user.id);
+        if (!callerMember) throw new NotAuthorizedError();
+        effectiveActorRole = callerMember.role;
+        target = lockedMembers.find((m) => m.userId === params.userId) ?? null;
+      } else {
+        if (typeof txAny.groupMember?.findFirst === "function") {
+          const callerMember = await txAny.groupMember.findFirst({
+            where: { groupId: group.id, userId: user.id, group: { deletedAt: null } },
+          });
+          if (!callerMember) throw new NotAuthorizedError();
+          effectiveActorRole = callerMember.role;
+        }
+        target = await tx.groupMember.findUnique({
+          where: { groupId_userId: { groupId: group.id, userId: params.userId } },
+        });
+      }
       if (!target) return null;
 
-      if (!canChangeMemberRole(actorRole, target.role, parsed.data.role)) {
+      if (!canChangeMemberRole(effectiveActorRole, target.role, parsed.data.role)) {
         throw new NotAuthorizedError();
       }
 
@@ -121,12 +160,44 @@ export async function DELETE(
     const isSelf = user.id === params.userId;
 
     const removed = await db.$transaction(async (tx) => {
-      const target = await tx.groupMember.findUnique({
-        where: { groupId_userId: { groupId: group.id, userId: params.userId } },
-      });
+      let effectiveActorRole = actorRole;
+      let target: { id?: string; userId?: string; role: NonNullable<typeof actorRole> } | null = null;
+      const txAny = tx as unknown as {
+        $queryRaw?: unknown;
+        groupMember?: {
+          findFirst?: (args: unknown) => Promise<{ role: NonNullable<typeof actorRole> } | null>;
+        };
+      };
+      if (typeof txAny.$queryRaw === "function") {
+        // Lock Group FOR SHARE first (top-down), then lock actor and target GroupMember rows
+        // in canonical ascending userId order FOR UPDATE to prevent AB-BA deadlocks and stale reads.
+        const lockedGroup = await lockGroupForShare(tx, group.id);
+        if (!lockedGroup || lockedGroup.deletedAt !== null) {
+          throw new NotAuthorizedError();
+        }
+        const lockedMembers = await lockGroupMembersForUpdate(tx, group.id, [
+          user.id,
+          params.userId,
+        ]);
+        const callerMember = lockedMembers.find((m) => m.userId === user.id);
+        if (!callerMember) throw new NotAuthorizedError();
+        effectiveActorRole = callerMember.role;
+        target = lockedMembers.find((m) => m.userId === params.userId) ?? null;
+      } else {
+        if (typeof txAny.groupMember?.findFirst === "function") {
+          const callerMember = await txAny.groupMember.findFirst({
+            where: { groupId: group.id, userId: user.id, group: { deletedAt: null } },
+          });
+          if (!callerMember) throw new NotAuthorizedError();
+          effectiveActorRole = callerMember.role;
+        }
+        target = await tx.groupMember.findUnique({
+          where: { groupId_userId: { groupId: group.id, userId: params.userId } },
+        });
+      }
       if (!target) return null;
 
-      if (!canRemoveMember(actorRole, target.role, isSelf)) {
+      if (!canRemoveMember(effectiveActorRole, target.role, isSelf)) {
         throw new NotAuthorizedError();
       }
 

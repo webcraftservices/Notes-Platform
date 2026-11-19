@@ -23,13 +23,24 @@ export function MaterialPreview({
   /** Deep-link entry point (Phase 5 — AI chat source citations with a page number): open the PDF at this page. Ignored for every other material type. */
   page?: number;
 }) {
+  const isNativeGoogleSlides =
+    material.type === "PPTX" &&
+    !material.storageKey &&
+    (material.mimeType === "application/vnd.google-apps.presentation" ||
+      (material.externalRef as { nativeKind?: string; mimeType?: string } | null)?.nativeKind ===
+        "google_slides" ||
+      (material.externalRef as { nativeKind?: string; mimeType?: string } | null)?.mimeType ===
+        "application/vnd.google-apps.presentation");
+  const isStorageLessMaterial =
+    material.type === "LINK" || material.type === "GOOGLE_DOC" || isNativeGoogleSlides;
+
   const [currentMaterial, setCurrentMaterial] = useState(material);
   const [readUrl, setReadUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(material.type !== "LINK" && material.type !== "GOOGLE_DOC");
+  const [loading, setLoading] = useState(!isStorageLessMaterial);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (material.type === "LINK" || material.type === "GOOGLE_DOC") return;
+    if (isStorageLessMaterial) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -65,16 +76,16 @@ export function MaterialPreview({
       disposed = true;
       if (timer) clearTimeout(timer);
     };
-  }, [material]);
+  }, [material, isStorageLessMaterial]);
 
   if (material.type === "LINK") {
     return <LinkViewer url={material.sourceUrl ?? "#"} />;
   }
 
-  // No storageKey to fetch a readUrl for — content lives in extractedText,
+  // No storageKey to fetch a readUrl for — content lives in extractedText / extractedPages,
   // and PROCESSING/FAILED states are handled inside the viewer itself.
-  if (material.type === "GOOGLE_DOC") {
-    return <GoogleDocViewer material={material} />;
+  if (material.type === "GOOGLE_DOC" || isNativeGoogleSlides) {
+    return <GoogleDocViewer material={material} initialSlide={page} />;
   }
 
   if (currentMaterial.status === "UPLOADING") {

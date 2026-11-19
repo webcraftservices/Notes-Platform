@@ -24,19 +24,21 @@ const scopeMocks = vi.hoisted(() => ({ getPrimaryWorkspace: vi.fn(), resolveMate
 vi.mock("@/lib/access", () => ({ getPrimaryWorkspace: scopeMocks.getPrimaryWorkspace }));
 vi.mock("@/lib/materials-scope", () => ({
   resolveMaterialScope: scopeMocks.resolveMaterialScope,
-  ScopeNotFoundError: class ScopeNotFoundError extends Error {},
+  ScopeNotFoundError: class ScopeNotFoundError extends Error { },
 }));
 vi.mock("@/lib/observability/datadog", () => ({ sendDatadogMetric: vi.fn().mockResolvedValue(undefined) }));
 
 const connection = vi.hoisted(() => ({
   getGoogleConnectionStatus: vi.fn(),
   getValidGoogleAccessToken: vi.fn(),
-  GoogleNotConnectedError: class GoogleNotConnectedError extends Error {},
+  GoogleNotConnectedError: class GoogleNotConnectedError extends Error { },
 }));
 vi.mock("@/lib/google-connection", () => connection);
 
 const docs = vi.hoisted(() => ({ extractGoogleDocText: vi.fn() }));
 vi.mock("@/lib/services/google-docs", () => docs);
+const slides = vi.hoisted(() => ({ extractGoogleSlidesPresentation: vi.fn() }));
+vi.mock("@/lib/services/google-slides", () => slides);
 const drive = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 vi.mock("@/lib/services/google-drive", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/services/google-drive")>()),
@@ -153,7 +155,12 @@ describe("runGoogleImportJob — failure and partial-failure handling", () => {
     db.processingJob.findUnique.mockResolvedValue(job);
     db.processingJob.updateMany.mockResolvedValue({ count: 1 });
     db.material.updateMany.mockResolvedValue({ count: 1 });
-    db.$transaction.mockImplementation(async (ops: unknown[]) => (Array.isArray(ops) ? Promise.all(ops) : ops));
+    db.$transaction.mockImplementation(async (fnOrOps: unknown) => {
+      if (typeof fnOrOps === "function") {
+        return (fnOrOps as (client: typeof db) => Promise<unknown>)(db);
+      }
+      return Array.isArray(fnOrOps) ? Promise.all(fnOrOps) : fnOrOps;
+    });
     db.material.update.mockResolvedValue({ ...docMaterial, status: "READY" });
     db.processingJob.update.mockResolvedValue({});
     db.subscription.findUnique.mockResolvedValue({ plan: "PRO" });
@@ -216,7 +223,7 @@ describe("runGoogleImportJob — failure and partial-failure handling", () => {
   });
 
   it("does not report an already-successful import as failed when the post-success activity log throws", async () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => { });
     db.material.findUnique.mockResolvedValue(docMaterial);
     docs.extractGoogleDocText.mockResolvedValue("doc text");
     activity.createActivityLog.mockRejectedValue(new Error("activity table unavailable"));
@@ -248,5 +255,171 @@ describe("runGoogleImportJob — failure and partial-failure handling", () => {
 
     expect(db.material.findUnique).not.toHaveBeenCalled();
     expect(connection.getValidGoogleAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("extracts native Google Slides directly via the Slides v1 API without downloading as PPTX and queues embedding", async () => {
+    const slidesMaterial = {
+      ...docMaterial,
+      type: "PPTX",
+      mimeType: "application/vnd.google-apps.presentation",
+      externalRef: {
+        provider: "google_drive",
+        fileId: "slides-file-1",
+        mimeType: "application/vnd.google-apps.presentation",
+        nativeKind: "google_slides",
+      },
+    };
+    db.material.findUnique.mockResolvedValue(slidesMaterial);
+    slides.extractGoogleSlidesPresentation.mockResolvedValue({
+      presentationId: "slides-file-1",
+      title: "Deck Title",
+      revisionId: "rev-slides-1",
+      text: "Slide 1 text\n\nSpeaker Notes:\nNote 1",
+      pages: [
+        {
+          pageNumber: 1,
+          text: "Slide 1 text\n\nSpeaker Notes:\nNote 1",
+          slideText: "Slide 1 text",
+          speakerNotes: "Note 1",
+        },
+      ],
+    });
+
+    await runGoogleImportJob("job-1");
+
+    expect(slides.extractGoogleSlidesPresentation).toHaveBeenCalledWith({
+      accessToken: "access-token",
+      presentationId: "slides-file-1",
+    });
+    expect(drive.downloadFile).not.toHaveBeenCalled();
+    expect(db.material.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "mat-1" },
+        data: expect.objectContaining({
+          status: "READY",
+          extractedText: "Slide 1 text\n\nSpeaker Notes:\nNote 1",
+          metadata: expect.objectContaining({
+            pageCount: 1,
+            slideCount: 1,
+            revisionId: "rev-slides-1",
+          }),
+        }),
+      })
+    );
+    expect(ingestion.queueEmbeddingJob).toHaveBeenCalledWith("user-1", "mat-1");
+  });
+
+  it("deletes newly written storage bytes and does not mark material READY when a binary Drive import is cancelled by group deletion during download", async () => {
+    const { LocalStorageService } = await import("@/lib/services/storage-local");
+    const { getStorageService } = await import("@/lib/services/storage");
+    const { getStorageUsage } = await import("@/lib/storage-usage");
+    const { extractMetadata } = await import("@/lib/metadata-extraction");
+    const local = Object.create(LocalStorageService.prototype) as InstanceType<typeof LocalStorageService>;
+    local.writeFile = vi.fn().mockResolvedValue(undefined);
+    local.deleteObject = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getStorageService).mockReturnValue(local);
+    vi.mocked(getStorageUsage).mockResolvedValue({ remainingBytes: 10 ** 9 } as never);
+    vi.mocked(extractMetadata).mockResolvedValue({});
+
+    const pdfMaterial = {
+      ...docMaterial,
+      type: "PDF",
+      mimeType: "application/pdf",
+      storageKey: null,
+      deletedAt: null,
+    };
+    // 1st findUnique: initial job lookup; 2nd findUnique: isJobActive check sees CANCELLED
+    db.processingJob.findUnique
+      .mockResolvedValueOnce(job)
+      .mockResolvedValueOnce({ ...job, status: "CANCELLED" });
+    db.material.findUnique.mockResolvedValue(pdfMaterial);
+    drive.downloadFile.mockResolvedValue(Buffer.from("%PDF-1.4 test bytes"));
+
+    await runGoogleImportJob("job-1");
+
+    expect(local.writeFile).toHaveBeenCalledWith(
+      expect.stringMatching(/^materials\/user-1\/mat-1-[A-Za-z0-9_-]+\.pdf$/),
+      expect.any(Buffer)
+    );
+    const writtenKey = vi.mocked(local.writeFile).mock.calls[0]![0];
+    expect(local.deleteObject).toHaveBeenCalledWith(writtenKey);
+    expect(db.material.update).not.toHaveBeenCalled();
+  });
+
+  it("preserves previousStorageKey when replacement upload commit aborts, and deletes newly written object only", async () => {
+    const { LocalStorageService } = await import("@/lib/services/storage-local");
+    const { getStorageService } = await import("@/lib/services/storage");
+    const { getStorageUsage } = await import("@/lib/storage-usage");
+    const { extractMetadata } = await import("@/lib/metadata-extraction");
+    const local = Object.create(LocalStorageService.prototype) as InstanceType<typeof LocalStorageService>;
+    local.writeFile = vi.fn().mockResolvedValue(undefined);
+    local.deleteObject = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getStorageService).mockReturnValue(local);
+    vi.mocked(getStorageUsage).mockResolvedValue({ remainingBytes: 10 ** 9 } as never);
+    vi.mocked(extractMetadata).mockResolvedValue({});
+
+    const pdfMaterial = {
+      ...docMaterial,
+      type: "PDF",
+      mimeType: "application/pdf",
+      storageKey: "materials/user-1/mat-1-prev.pdf",
+      deletedAt: null,
+    };
+    db.processingJob.findUnique.mockResolvedValue(job);
+    // Claim succeeds (1st call), then completeJobWithin fails/cancels (2nd call)
+    db.processingJob.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    db.material.findUnique.mockResolvedValue(pdfMaterial);
+    drive.downloadFile.mockResolvedValue(Buffer.from("%PDF-1.4 replacement"));
+
+    await runGoogleImportJob("job-1");
+
+    const stagedKey = vi.mocked(local.writeFile).mock.calls[0]![0];
+    expect(stagedKey).not.toBe("materials/user-1/mat-1-prev.pdf");
+    // Only the staged key is rolled back; previousStorageKey stays intact
+    expect(local.deleteObject).toHaveBeenCalledTimes(1);
+    expect(local.deleteObject).toHaveBeenCalledWith(stagedKey);
+    expect(local.deleteObject).not.toHaveBeenCalledWith("materials/user-1/mat-1-prev.pdf");
+    expect(db.material.update).not.toHaveBeenCalled();
+  });
+
+  it("deletes previousStorageKey ONLY after versioned replacement import commits", async () => {
+    const { LocalStorageService } = await import("@/lib/services/storage-local");
+    const { getStorageService } = await import("@/lib/services/storage");
+    const { getStorageUsage } = await import("@/lib/storage-usage");
+    const { extractMetadata } = await import("@/lib/metadata-extraction");
+    const local = Object.create(LocalStorageService.prototype) as InstanceType<typeof LocalStorageService>;
+    local.writeFile = vi.fn().mockResolvedValue(undefined);
+    local.deleteObject = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getStorageService).mockReturnValue(local);
+    vi.mocked(getStorageUsage).mockResolvedValue({ remainingBytes: 10 ** 9 } as never);
+    vi.mocked(extractMetadata).mockResolvedValue({ pageCount: 2 });
+
+    const pdfMaterial = {
+      ...docMaterial,
+      type: "PDF",
+      mimeType: "application/pdf",
+      storageKey: "materials/user-1/mat-1-old.pdf",
+      deletedAt: null,
+    };
+    const events: string[] = [];
+    db.processingJob.findUnique.mockResolvedValue(job);
+    db.material.findUnique.mockResolvedValue(pdfMaterial);
+    drive.downloadFile.mockResolvedValue(Buffer.from("%PDF-1.4 replacement"));
+    db.material.update.mockImplementation(async (args: { data: Record<string, unknown> }) => {
+      events.push("db_commit");
+      return { ...pdfMaterial, ...args.data };
+    });
+    local.deleteObject = vi.fn().mockImplementation(async (key: string) => {
+      events.push(`delete:${key}`);
+    });
+
+    await runGoogleImportJob("job-1");
+
+    const stagedKey = vi.mocked(local.writeFile).mock.calls[0]![0];
+    expect(stagedKey).toMatch(/^materials\/user-1\/mat-1-[A-Za-z0-9_-]+\.pdf$/);
+    expect(stagedKey).not.toBe("materials/user-1/mat-1-old.pdf");
+    expect(events).toEqual(["db_commit", "delete:materials/user-1/mat-1-old.pdf"]);
   });
 });

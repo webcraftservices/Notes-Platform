@@ -5,7 +5,13 @@ import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
 import { getSpeechService } from "@/lib/services/speech";
 import { queueEmbeddingJob } from "@/lib/ingestion";
-import { claimJob, completeJobWithin, failJob, isJobActive } from "@/lib/processing-jobs";
+import {
+  claimJob,
+  completeJobWithin,
+  failJob,
+  isJobActive,
+  registerJobContext,
+} from "@/lib/processing-jobs";
 
 /**
  * Resolves raw audio bytes regardless of which storage backend is active.
@@ -48,6 +54,7 @@ export async function runTranscriptionJob(jobId: string): Promise<void> {
   try {
     job = await db.processingJob.findUnique({ where: { id: jobId } });
     if (!job || job.type !== "TRANSCRIPTION" || !job.materialId) return;
+    registerJobContext?.(job);
 
     // Only one runner may execute a given job (see processing-jobs.ts).
     if (!(await claimJob(jobId))) return;

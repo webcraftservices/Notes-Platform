@@ -43,7 +43,11 @@ describe("Gemini provider — Phase 9.4 timeout and retry bounds", () => {
   it("gives note generation (whole transcript in, long structured output) a longer per-request budget than the default", async () => {
     createGeminiAIService();
     const defaultTimeout = (ctor.options as { httpOptions: HttpOptions }).httpOptions.timeout!;
-    const generateContent = vi.fn().mockResolvedValue({ text: "[]", usageMetadata: {} });
+    const generateContent = vi.fn().mockResolvedValue({
+      candidates: [{ finishReason: "STOP" }],
+      text: JSON.stringify([{ kind: "SUMMARY", content: "Summary note" }]),
+      usageMetadata: {},
+    });
     const service = new GeminiAIService({ models: { generateContent } } as never);
 
     await service.generateNotes({ transcriptText: "t", templateKind: "lecture" });

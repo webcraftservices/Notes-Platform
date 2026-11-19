@@ -1,18 +1,23 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 
 export function SearchBox({ initialQuery }: { initialQuery: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [value, setValue] = useState(initialQuery);
 
   function handleChange(next: string) {
     setValue(next);
-    const params = new URLSearchParams();
-    if (next.trim()) params.set("q", next.trim());
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (next.trim()) {
+      params.set("q", next.trim());
+    } else {
+      params.delete("q");
+    }
     router.replace(`/search${params.toString() ? `?${params}` : ""}`);
   }
 
@@ -22,7 +27,7 @@ export function SearchBox({ initialQuery }: { initialQuery: string }) {
       <Input
         value={value}
         onChange={(e) => handleChange(e.target.value)}
-        placeholder="Search subjects, chapters, topics…"
+        placeholder="Search notes, materials, subjects, topics, groups…"
         className="pl-10 text-base"
         autoFocus
       />

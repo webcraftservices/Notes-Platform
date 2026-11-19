@@ -13,12 +13,14 @@ import { fetchWithTimeout } from "@/lib/fetch-timeout";
 import {
   GoogleApiError,
   GoogleFileTooLargeError,
+  GoogleInvalidPageTokenError,
   GOOGLE_RECONNECT_REQUIRED,
   GOOGLE_TEMPORARILY_UNAVAILABLE,
 } from "./google-errors";
 
 export const GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder";
 export const GOOGLE_DOC_MIME = "application/vnd.google-apps.document";
+export const GOOGLE_SLIDES_MIME = "application/vnd.google-apps.presentation";
 
 export interface DriveFile {
   id: string;
@@ -28,6 +30,29 @@ export interface DriveFile {
   webViewLink?: string;
   iconLink?: string;
   size?: string;
+  trashed?: boolean;
+  version?: string;
+  headRevisionId?: string;
+}
+
+export interface DriveChange {
+  fileId: string;
+  removed?: boolean;
+  time?: string;
+  file?: DriveFile;
+}
+
+export interface DriveChangesListResponse {
+  changes: DriveChange[];
+  nextPageToken?: string;
+  newStartPageToken?: string;
+}
+
+export interface DriveWatchChannelResponse {
+  id: string;
+  resourceId: string;
+  resourceUri?: string;
+  expiration?: string;
 }
 
 interface DriveListResponse {
@@ -74,38 +99,60 @@ function driveError(status: number, body: string): GoogleApiError {
 }
 
 /**
- * Reads a response body with a hard byte ceiling. The import job used to
- * `arrayBuffer()` whatever Drive sent and only compare its size to the
- * plan limit afterwards, so a multi-gigabyte Drive file was fully
- * buffered in server memory before being rejected. Declared
- * Content-Length is checked first (cheap, no bytes read); the streaming
- * count backstops a missing or dishonest header.
+ * Reads a response body with a hard byte ceiling.
+ *
+ * For bounded transfers (`maxBytes !== undefined`):
+ * - Declared Content-Length is checked first (cheap, no bytes read).
+ * - A readable stream (`res.body`) is strictly required to enforce chunked byte
+ *   counting. If `res.body` is missing, fails safely rather than falling back
+ *   to an unbounded full-response allocation via `res.arrayBuffer()`.
+ * - Streaming chunks are counted, cancelling the reader immediately if total
+ *   accumulated bytes exceed `maxBytes`.
+ * - Stream reader cleanup is wrapped in a `try/finally` block to guarantee
+ *   explicit reader lock release on success, limit cancellation, or transport failure.
+ *
+ * For unbounded transfers (`maxBytes === undefined`):
+ * - Buffers the entire response body directly via `res.arrayBuffer()`.
  */
 async function readBodyWithLimit(res: Response, maxBytes: number | undefined): Promise<Buffer> {
-  if (maxBytes === undefined || !res.body) {
+  if (maxBytes === undefined) {
     return Buffer.from(await res.arrayBuffer());
   }
 
   const declared = Number(res.headers?.get?.("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
-    await res.body.cancel().catch(() => undefined);
+    if (res.body) {
+      await res.body.cancel().catch(() => undefined);
+    }
     throw new GoogleFileTooLargeError(maxBytes);
+  }
+
+  if (!res.body) {
+    throw new Error("Response body is unavailable and cannot be safely size-limited.");
   }
 
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      throw new GoogleFileTooLargeError(maxBytes);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new GoogleFileTooLargeError(maxBytes);
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+    return Buffer.concat(chunks);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // In case the stream or reader has already been closed/disposed
+    }
   }
-  return Buffer.concat(chunks);
 }
 
 export class GoogleDriveService {
@@ -156,6 +203,134 @@ export class GoogleDriveService {
   }
 
   /**
+   * Fetches extended file metadata including `trashed`, `version`, and
+   * `headRevisionId` for incremental synchronization and conflict checks.
+   */
+  async getFileSyncMetadata(input: { accessToken: string; fileId: string }): Promise<DriveFile> {
+    const params = new URLSearchParams({
+      fields: "id,name,mimeType,modifiedTime,trashed,webViewLink,iconLink,size,version,headRevisionId",
+    });
+    const res = await driveFetch(`files/${encodeURIComponent(input.fileId)}?${params.toString()}`, input.accessToken);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw driveError(res.status, body);
+    }
+    return res.json();
+  }
+
+  /**
+   * Retrieves the initial cursor (`startPageToken`) for the Google Drive Changes API.
+   */
+  async getStartPageToken(input: { accessToken: string }): Promise<string> {
+    const params = new URLSearchParams({ supportsAllDrives: "false" });
+    const res = await driveFetch(`changes/startPageToken?${params.toString()}`, input.accessToken);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw driveError(res.status, body);
+    }
+    const data = (await res.json()) as { startPageToken?: string };
+    if (!data.startPageToken) {
+      throw new GoogleApiError("Google Drive startPageToken response was missing startPageToken.", {
+        status: 502,
+        publicMessage: GOOGLE_TEMPORARILY_UNAVAILABLE,
+      });
+    }
+    return data.startPageToken;
+  }
+
+  /**
+   * Lists incremental changes since `pageToken`. Throws `GoogleInvalidPageTokenError`
+   * if Google reports that the token has expired or is invalid (HTTP 410 or 400 invalid pageToken).
+   */
+  async listChanges(input: {
+    accessToken: string;
+    pageToken: string;
+    pageSize?: number;
+  }): Promise<DriveChangesListResponse> {
+    const params = new URLSearchParams({
+      pageToken: input.pageToken,
+      includeRemoved: "true",
+      spaces: "drive",
+      pageSize: String(input.pageSize ?? 100),
+      fields:
+        "changes(fileId,removed,time,file(id,name,mimeType,modifiedTime,trashed,webViewLink,iconLink,size,version,headRevisionId)),nextPageToken,newStartPageToken",
+    });
+    const res = await driveFetch(`changes?${params.toString()}`, input.accessToken);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (res.status === 410 || (res.status === 400 && /pageToken|Invalid Value/i.test(body))) {
+        throw new GoogleInvalidPageTokenError();
+      }
+      throw driveError(res.status, body);
+    }
+    const data = (await res.json()) as DriveChangesListResponse;
+    return {
+      changes: data.changes ?? [],
+      nextPageToken: data.nextPageToken,
+      newStartPageToken: data.newStartPageToken,
+    };
+  }
+
+  /**
+   * Registers a Google Drive push notification watch channel (`changes.watch`).
+   */
+  async watchChanges(input: {
+    accessToken: string;
+    pageToken: string;
+    channelId: string;
+    webhookAddress: string;
+    channelToken: string;
+    expirationMs?: number;
+  }): Promise<DriveWatchChannelResponse> {
+    const params = new URLSearchParams({ pageToken: input.pageToken });
+    const payload: Record<string, string> = {
+      id: input.channelId,
+      type: "web_hook",
+      address: input.webhookAddress,
+      token: input.channelToken,
+    };
+    if (input.expirationMs !== undefined) {
+      payload.expiration = String(input.expirationMs);
+    }
+    const res = await driveFetch(`changes/watch?${params.toString()}`, input.accessToken, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (res.status === 410) {
+        throw new GoogleInvalidPageTokenError();
+      }
+      throw driveError(res.status, body);
+    }
+    return (await res.json()) as DriveWatchChannelResponse;
+  }
+
+  /**
+   * Stops an active Google Drive push notification watch channel (`channels.stop`).
+   * Treats 404 as already stopped so account disconnect remains idempotent.
+   */
+  async stopWatchChannel(input: {
+    accessToken: string;
+    channelId: string;
+    resourceId: string;
+  }): Promise<void> {
+    const res = await driveFetch("channels/stop", input.accessToken, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: input.channelId,
+        resourceId: input.resourceId,
+      }),
+    });
+    if (!res.ok && res.status !== 404) {
+      const body = await res.text().catch(() => "");
+      throw driveError(res.status, body);
+    }
+  }
+
+  /**
    * Downloads a binary Drive file's raw bytes (not for Google-native files
    * — use exportFile). `maxBytes`, when given, aborts the transfer as soon
    * as the file is known to exceed it (GoogleFileTooLargeError).
@@ -175,7 +350,12 @@ export class GoogleDriveService {
   }
 
   /** Exports a Google-native file (Doc, Sheet, Slide, ...) to a requested MIME type. */
-  async exportFile(input: { accessToken: string; fileId: string; mimeType: string }): Promise<Buffer> {
+  async exportFile(input: {
+    accessToken: string;
+    fileId: string;
+    mimeType: string;
+    maxBytes?: number;
+  }): Promise<Buffer> {
     const params = new URLSearchParams({ mimeType: input.mimeType });
     const res = await driveFetch(
       `files/${encodeURIComponent(input.fileId)}/export?${params.toString()}`,
@@ -187,8 +367,7 @@ export class GoogleDriveService {
       const body = await res.text().catch(() => "");
       throw driveError(res.status, body);
     }
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return readBodyWithLimit(res, input.maxBytes);
   }
 }
 

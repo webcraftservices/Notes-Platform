@@ -1,0 +1,207 @@
+name: CD — Deploy Zenote to Azure Container Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target deployment environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: Immutable image tag (defaults to short commit SHA when blank)
+        required: false
+        type: string
+      run_smoke_check:
+        description: Run post-deploy HTTP readiness & security-header smoke check
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-aca-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, Migrate, Deploy & Smoke Check (${{ github.event.inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.22.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+
+      - name: Run offline pre-flight deployment readiness gate
+        run: npm run verify:readiness
+
+      - name: Determine immutable release tag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_SHA::12}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "env_name=${{ github.event.inputs.environment }}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure OIDC Login (Workload Identity / Federated Credentials)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push migrator, web, and worker images
+        run: |
+          set -euo pipefail
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+
+          docker build --target migrator -t "${ACR}/zenote-migrator:${TAG}" .
+          docker push "${ACR}/zenote-migrator:${TAG}"
+
+          docker build --target web \
+            --build-arg NEXT_PUBLIC_SITE_URL="${{ vars.PUBLIC_BASE_URL }}" \
+            --build-arg STORAGE_ENDPOINT="${{ vars.STORAGE_ENDPOINT }}" \
+            -t "${ACR}/zenote-web:${TAG}" .
+          docker push "${ACR}/zenote-web:${TAG}"
+
+          docker build --target worker -t "${ACR}/zenote-worker:${TAG}" .
+          docker push "${ACR}/zenote-worker:${TAG}"
+
+      - name: Provision/update Azure Container Apps infrastructure & migrator job (before web/worker rollout)
+        run: |
+          set -euo pipefail
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/azure/main.bicep \
+            --parameters \
+              environmentName="${{ steps.meta.outputs.env_name }}" \
+              deployContainerApps=true \
+              deployWorkloadApps=false \
+              acrName="${{ vars.ACR_NAME }}" \
+              migratorImage="${ACR}/zenote-migrator:${TAG}" \
+              publicBaseUrl="${{ vars.PUBLIC_BASE_URL }}" \
+              storageEndpoint="${{ vars.STORAGE_ENDPOINT }}" \
+              storageBucket="${{ vars.STORAGE_BUCKET }}" \
+              storageRegion="${{ vars.STORAGE_REGION || 'auto' }}" \
+              googleCloudProject="${{ vars.GOOGLE_CLOUD_PROJECT }}" \
+              googleCloudLocation="${{ vars.GOOGLE_CLOUD_LOCATION || 'us-central1' }}" \
+              googleWifAudience="${{ vars.GOOGLE_WIF_AUDIENCE }}" \
+              googleWifAzureResource="${{ vars.GOOGLE_WIF_AZURE_RESOURCE || 'api://AzureADTokenExchange' }}" \
+              googleWifServiceAccount="${{ vars.GOOGLE_WIF_SERVICE_ACCOUNT }}" \
+              enableOpenAiSecret=${{ vars.ENABLE_OPENAI_SECRET || 'true' }} \
+              enableGeminiApiKeySecret=${{ vars.ENABLE_GEMINI_API_KEY_SECRET || 'false' }} \
+              enableAssemblyAiSecret=${{ vars.ENABLE_ASSEMBLYAI_SECRET || 'true' }} \
+              enableGoogleOAuthSecrets=${{ vars.ENABLE_GOOGLE_OAUTH_SECRETS || 'false' }} \
+              enableGoogleDriveClientSecrets=${{ vars.ENABLE_GOOGLE_DRIVE_CLIENT_SECRETS || 'false' }} \
+              enableGoogleTokenEncryptionSecret=${{ vars.ENABLE_GOOGLE_TOKEN_ENCRYPTION_SECRET || 'false' }} \
+              enableGoogleWebhookSecret=${{ vars.ENABLE_GOOGLE_WEBHOOK_SECRET || 'false' }} \
+              enableStripeBillingSecrets=${{ vars.ENABLE_STRIPE_BILLING_SECRETS || 'false' }} \
+              enableDatadogSecret=${{ vars.ENABLE_DATADOG_SECRET || 'false' }} \
+              ddSite="${{ vars.DD_SITE || 'datadoghq.com' }}" \
+              allowedRedirectOrigins="${{ vars.ALLOWED_REDIRECT_ORIGINS }}" \
+              googleDriveWebhookUrl="${{ vars.GOOGLE_DRIVE_WEBHOOK_URL }}" \
+              stripePriceIdStudent="${{ vars.STRIPE_PRICE_ID_STUDENT }}" \
+              stripePriceIdPro="${{ vars.STRIPE_PRICE_ID_PRO }}" \
+              stripePriceIdTeam="${{ vars.STRIPE_PRICE_ID_TEAM }}" \
+              stripePriceIdInstitution="${{ vars.STRIPE_PRICE_ID_INSTITUTION }}" \
+              releaseVersion="${TAG}"
+
+      - name: Execute database migration job before traffic cutover
+        run: |
+          set -euo pipefail
+          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          JOB_NAME="zenote-${{ steps.meta.outputs.env_name }}-migrator"
+          EXEC_NAME=$(az containerapp job start --name "$JOB_NAME" --resource-group "$RG" --query name -o tsv)
+          echo "Started migration execution: $EXEC_NAME"
+          for i in $(seq 1 60); do
+            STATUS=$(az containerapp job execution show --name "$JOB_NAME" --resource-group "$RG" --job-execution-name "$EXEC_NAME" --query properties.status -o tsv)
+            echo "Migration status: $STATUS"
+            case "$STATUS" in
+              Succeeded)
+                exit 0
+                ;;
+              Failed|Cancelled|Stopped)
+                echo "Database migration ended with terminal failure status '$STATUS' — aborting web/worker rollout!"
+                exit 1
+                ;;
+              Running|Processing|Scheduled|"" )
+                sleep 5
+                ;;
+              *)
+                echo "Unexpected migration status '$STATUS' — failing closed before web/worker rollout!"
+                exit 1
+                ;;
+            esac
+          done
+          echo "Migration job timed out — aborting web/worker rollout!"
+          exit 1
+
+      - name: Roll out zenote-web and zenote-worker revisions after migration succeeds
+        run: |
+          set -euo pipefail
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/azure/main.bicep \
+            --parameters \
+              environmentName="${{ steps.meta.outputs.env_name }}" \
+              deployContainerApps=true \
+              deployWorkloadApps=true \
+              acrName="${{ vars.ACR_NAME }}" \
+              webImage="${ACR}/zenote-web:${TAG}" \
+              workerImage="${ACR}/zenote-worker:${TAG}" \
+              migratorImage="${ACR}/zenote-migrator:${TAG}" \
+              publicBaseUrl="${{ vars.PUBLIC_BASE_URL }}" \
+              storageEndpoint="${{ vars.STORAGE_ENDPOINT }}" \
+              storageBucket="${{ vars.STORAGE_BUCKET }}" \
+              storageRegion="${{ vars.STORAGE_REGION || 'auto' }}" \
+              googleCloudProject="${{ vars.GOOGLE_CLOUD_PROJECT }}" \
+              googleCloudLocation="${{ vars.GOOGLE_CLOUD_LOCATION || 'us-central1' }}" \
+              googleWifAudience="${{ vars.GOOGLE_WIF_AUDIENCE }}" \
+              googleWifAzureResource="${{ vars.GOOGLE_WIF_AZURE_RESOURCE || 'api://AzureADTokenExchange' }}" \
+              googleWifServiceAccount="${{ vars.GOOGLE_WIF_SERVICE_ACCOUNT }}" \
+              enableOpenAiSecret=${{ vars.ENABLE_OPENAI_SECRET || 'true' }} \
+              enableGeminiApiKeySecret=${{ vars.ENABLE_GEMINI_API_KEY_SECRET || 'false' }} \
+              enableAssemblyAiSecret=${{ vars.ENABLE_ASSEMBLYAI_SECRET || 'true' }} \
+              enableGoogleOAuthSecrets=${{ vars.ENABLE_GOOGLE_OAUTH_SECRETS || 'false' }} \
+              enableGoogleDriveClientSecrets=${{ vars.ENABLE_GOOGLE_DRIVE_CLIENT_SECRETS || 'false' }} \
+              enableGoogleTokenEncryptionSecret=${{ vars.ENABLE_GOOGLE_TOKEN_ENCRYPTION_SECRET || 'false' }} \
+              enableGoogleWebhookSecret=${{ vars.ENABLE_GOOGLE_WEBHOOK_SECRET || 'false' }} \
+              enableStripeBillingSecrets=${{ vars.ENABLE_STRIPE_BILLING_SECRETS || 'false' }} \
+              enableDatadogSecret=${{ vars.ENABLE_DATADOG_SECRET || 'false' }} \
+              ddSite="${{ vars.DD_SITE || 'datadoghq.com' }}" \
+              allowedRedirectOrigins="${{ vars.ALLOWED_REDIRECT_ORIGINS }}" \
+              googleDriveWebhookUrl="${{ vars.GOOGLE_DRIVE_WEBHOOK_URL }}" \
+              stripePriceIdStudent="${{ vars.STRIPE_PRICE_ID_STUDENT }}" \
+              stripePriceIdPro="${{ vars.STRIPE_PRICE_ID_PRO }}" \
+              stripePriceIdTeam="${{ vars.STRIPE_PRICE_ID_TEAM }}" \
+              stripePriceIdInstitution="${{ vars.STRIPE_PRICE_ID_INSTITUTION }}" \
+              releaseVersion="${TAG}"
+
+      - name: Post-deploy HTTP readiness & security header smoke check
+        if: ${{ github.event.inputs.run_smoke_check != false }}
+        run: |
+          npm run smoke:check -- --web-url "${{ vars.PUBLIC_BASE_URL }}" --retries 10 --delay-ms 3000

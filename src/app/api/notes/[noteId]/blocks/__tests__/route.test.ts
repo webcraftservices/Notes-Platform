@@ -33,7 +33,9 @@ describe("PUT /api/notes/[noteId]/blocks", () => {
     access.getAccessibleNote.mockResolvedValue({ id: "note-1", topicId: null });
     db.noteBlock.findMany.mockResolvedValue([]);
     db.noteVersion.findFirst.mockResolvedValue(null);
-    db.$transaction.mockResolvedValue([]);
+    db.$transaction.mockImplementation(async (fnOrOps: unknown) =>
+      typeof fnOrOps === "function" ? fnOrOps(db) : []
+    );
   });
 
   const validBlock = {
@@ -82,6 +84,134 @@ describe("PUT /api/notes/[noteId]/blocks", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  it("preserves existing server-owned provenance metadata during update even if client attempts to alter it", async () => {
+    const existingProvenance = {
+      materialId: "mat-real-123",
+      materialTitle: "Real Lecture.pdf",
+      materialType: "PDF",
+      sourceUnitType: "page",
+      sourcePages: [1, 2],
+      pageNumber: 1,
+    };
+
+    db.noteBlock.findMany.mockResolvedValue([
+      { ...validBlock, id: "block-1", metadata: existingProvenance },
+    ]);
+
+    // Client attempts to tamper with materialId and page numbers, while adding a user tag
+    const clientPayload = {
+      blocks: [
+        {
+          ...validBlock,
+          id: "block-1",
+          metadata: {
+            materialId: "forged-id-999",
+            sourcePages: [999],
+            userAnnotation: "my note",
+          },
+        },
+      ],
+    };
+
+    const res = await PUT(makeRequest(clientPayload), { params: { noteId: "note-1" } });
+    expect(res.status).toBe(200);
+
+    expect(db.noteBlock.update).toHaveBeenCalledWith({
+      where: { id: "block-1" },
+      data: expect.objectContaining({
+        metadata: {
+          materialId: "mat-real-123", // preserved from DB
+          materialTitle: "Real Lecture.pdf", // preserved from DB
+          materialType: "PDF", // preserved from DB
+          sourceUnitType: "page", // preserved from DB
+          sourcePages: [1, 2], // preserved from DB
+          pageNumber: 1, // preserved from DB
+          userAnnotation: "my note", // allowed custom client field
+        },
+      }),
+    });
+  });
+
+  it("preserves existing server-owned provenance metadata when client sends metadata: null or omits metadata", async () => {
+    const existingProvenance = {
+      materialId: "mat-real-123",
+      materialTitle: "Real Lecture.pdf",
+      materialType: "PDF",
+      sourceUnitType: "page",
+      sourcePages: [1, 2],
+      pageNumber: 1,
+    };
+
+    db.noteBlock.findMany.mockResolvedValue([
+      { ...validBlock, id: "block-1", metadata: existingProvenance },
+    ]);
+
+    // Client sends metadata: null
+    const clientPayload = {
+      blocks: [
+        {
+          ...validBlock,
+          id: "block-1",
+          metadata: null,
+        },
+      ],
+    };
+
+    const res = await PUT(makeRequest(clientPayload), { params: { noteId: "note-1" } });
+    expect(res.status).toBe(200);
+
+    expect(db.noteBlock.update).toHaveBeenCalledWith({
+      where: { id: "block-1" },
+      data: expect.objectContaining({
+        metadata: {
+          materialId: "mat-real-123",
+          materialTitle: "Real Lecture.pdf",
+          materialType: "PDF",
+          sourceUnitType: "page",
+          sourcePages: [1, 2],
+          pageNumber: 1,
+        },
+      }),
+    });
+  });
+
+  it("strips server-owned provenance keys when client creates brand new blocks to prevent forgery", async () => {
+    db.noteBlock.findMany.mockResolvedValue([]); // No existing blocks
+
+    const newBlockWithForgedMeta = {
+      ...validBlock,
+      id: "brand-new-client-id",
+      metadata: {
+        materialId: "forged-material-id",
+        materialTitle: "Forged Title",
+        sourcePages: [1, 2],
+        customClientField: "allowed",
+      },
+    };
+
+    const res = await PUT(makeRequest({ blocks: [newBlockWithForgedMeta] }), { params: { noteId: "note-1" } });
+    expect(res.status).toBe(200);
+
+    expect(db.noteBlock.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        metadata: {
+          customClientField: "allowed",
+        },
+      }),
+    });
+  });
+
+  it("rejects a block whose metadata contains prototype pollution", async () => {
+    const malicious = {
+      ...validBlock,
+      metadata: { constructor: { prototype: { polluted: true } } },
+    };
+
+    const res = await PUT(makeRequest({ blocks: [malicious] }), { params: { noteId: "note-1" } });
+    expect(res.status).toBe(400);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
   it("returns 401 when there is no session", async () => {
     access.getSessionUser.mockResolvedValue(null);
     const res = await PUT(makeRequest({ blocks: [validBlock] }), { params: { noteId: "note-1" } });
@@ -94,5 +224,29 @@ describe("PUT /api/notes/[noteId]/blocks", () => {
     });
     const res = await PUT(makeRequest({ blocks: [validBlock] }), { params: { noteId: "note-1" } });
     expect(res.status).toBe(403);
+  });
+
+  it("updates Note.plainText in db.$transaction alongside block changes", async () => {
+    access.getAccessibleNote.mockResolvedValue({ id: "note-1", title: "My Test Note", topicId: null });
+    const block = {
+      id: "block-1",
+      kind: "OVERVIEW",
+      heading: "Summary",
+      content: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Summary text." }] }],
+      },
+      order: 0,
+    };
+
+    const res = await PUT(makeRequest({ blocks: [block] }), { params: { noteId: "note-1" } });
+    expect(res.status).toBe(200);
+
+    expect(db.note.update).toHaveBeenCalledWith({
+      where: { id: "note-1" },
+      data: {
+        plainText: "My Test Note\n\nSummary\nSummary text.",
+      },
+    });
   });
 });

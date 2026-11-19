@@ -7,6 +7,7 @@ import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { TopicActionsMenu } from "@/components/topics/topic-actions-menu";
 import { TopicTabs } from "@/components/topics/topic-tabs";
 import type { TranscribableMaterial } from "@/components/topics/topic-transcripts-panel";
+import { buildNoteEligibleMaterials } from "@/lib/note-eligible-material";
 
 export default async function TopicDetailPage({
   params,
@@ -38,7 +39,12 @@ export default async function TopicDetailPage({
   const audioVideoMaterials = materials.filter((m) => m.type === "AUDIO" || m.type === "VIDEO");
   const materialIds = audioVideoMaterials.map((m) => m.id);
 
-  const [transcripts, jobs] = await Promise.all([
+  const documentMaterials = materials.filter(
+    (m) => m.type === "PDF" || m.type === "DOCX" || m.type === "PPTX" || m.type === "GOOGLE_DOC"
+  );
+  const documentIds = documentMaterials.map((m) => m.id);
+
+  const [transcripts, jobs, readyDocs, activeDocJobs] = await Promise.all([
     materialIds.length > 0
       ? db.transcript.findMany({ where: { materialId: { in: materialIds } }, select: { materialId: true, status: true } })
       : [],
@@ -47,6 +53,28 @@ export default async function TopicDetailPage({
           where: { materialId: { in: materialIds }, type: "TRANSCRIPTION" },
           orderBy: { createdAt: "desc" },
           select: { materialId: true, status: true, createdAt: true },
+        })
+      : [],
+    documentIds.length > 0
+      ? db.material.findMany({
+          where: {
+            id: { in: documentIds },
+            AND: [
+              { extractedText: { not: null } },
+              { NOT: { extractedText: "" } },
+            ],
+          },
+          select: { id: true },
+        })
+      : [],
+    documentIds.length > 0
+      ? db.processingJob.findMany({
+          where: {
+            materialId: { in: documentIds },
+            type: { in: ["DOCUMENT_EXTRACTION", "GOOGLE_SYNC"] },
+            status: { in: ["QUEUED", "RUNNING"] },
+          },
+          select: { materialId: true, status: true },
         })
       : [],
   ]);
@@ -66,6 +94,19 @@ export default async function TopicDetailPage({
     transcriptReady: transcriptByMaterial.get(m.id) === "READY",
     jobStatus: (latestJobByMaterial.get(m.id)?.status as TranscribableMaterial["jobStatus"]) ?? null,
   }));
+
+  const readyDocIdSet = new Set(readyDocs.map((d) => d.id));
+  const processingDocIdSet = new Set(
+    activeDocJobs.map((j) => j.materialId).filter((id): id is string => Boolean(id))
+  );
+
+  const noteEligibleMaterials = buildNoteEligibleMaterials({
+    materials,
+    transcriptByMaterial,
+    latestJobByMaterial,
+    readyDocIdSet,
+    processingDocIdSet,
+  });
 
   return (
     <>
@@ -94,6 +135,7 @@ export default async function TopicDetailPage({
             description={topic.description}
             materials={materials}
             transcribableMaterials={transcribableMaterials}
+            noteEligibleMaterials={noteEligibleMaterials}
             aiTutorEnabled={aiTutorEnabled}
           />
         </div>

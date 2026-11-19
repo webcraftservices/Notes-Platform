@@ -1,8 +1,24 @@
 import { GoogleGenAI, ApiError, Type } from "@google/genai";
-import type { Content, GenerateContentParameters, GenerateContentResponse, Schema } from "@google/genai";
-import type { AIService, AIChatMessage } from "./interfaces";
-import { ServiceNotConfiguredError, AIProviderUnavailableError } from "./interfaces";
+import type { Content, GenerateContentParameters, GenerateContentResponse, GoogleGenAIOptions, Schema } from "@google/genai";
+import type { AIService, AIChatMessage, GenerateNotesInput, GenerateNotesResult, NoteGenerationSourceUnitInfo } from "./interfaces";
+import { ServiceNotConfiguredError, AIProviderUnavailableError, AIGenerationFailedError } from "./interfaces";
 import { NOTE_BLOCK_KIND_LABELS, NOTE_BLOCK_KIND_ORDER } from "@/lib/note-block-style";
+import { AzureIdentityUnavailableError } from "@/lib/cloud/azure-identity";
+import {
+  createGoogleWifAuthClient,
+  GoogleWifAuthError,
+  isGoogleWifConfigured,
+  resolveGoogleWifConfiguration,
+} from "@/lib/cloud/google-wif";
+
+/**
+ * Maximum output tokens configured for Gemini note generation calls.
+ * gemini-2.5-flash-lite supports up to 65,536 output tokens. 8,192 output tokens
+ * provides ~6,000 words of rich structured notes (sufficient for comprehensive
+ * lecture decks and book chapters) while capping single-invocation latency within
+ * the 180-second timeout budget and guarding user credit consumption against runaway generation.
+ */
+export const GEMINI_NOTE_GENERATION_MAX_OUTPUT_TOKENS = 8192;
 
 /**
  * gemini-2.5-flash-lite: Google's cheapest current-generation Gemini model
@@ -18,7 +34,11 @@ import { NOTE_BLOCK_KIND_LABELS, NOTE_BLOCK_KIND_ORDER } from "@/lib/note-block-
  * lived one. Swapping to a newer/cheaper model later is a one-line change
  * to this constant, not a registry-level change.
  */
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite";
+
+function resolveGeminiModel(): string {
+  return process.env.GOOGLE_GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+}
 
 /**
  * Phase 9.4 — explicit request bounds. The SDK's own defaults are: no
@@ -122,6 +142,9 @@ function isUpstreamUnavailableStatus(status: number | undefined): boolean {
  * genuine bug without parsing message strings.
  */
 function wrapGeminiError(err: unknown): Error {
+  if (err instanceof AzureIdentityUnavailableError || err instanceof GoogleWifAuthError) {
+    return new AIProviderUnavailableError(err.message);
+  }
   if (err instanceof ApiError) {
     const message = `Gemini request failed (${err.status}): ${err.message}`;
     return isUpstreamUnavailableStatus(err.status) ? new AIProviderUnavailableError(message) : new Error(message);
@@ -130,26 +153,83 @@ function wrapGeminiError(err: unknown): Error {
 }
 
 const NOTE_BLOCK_KINDS = NOTE_BLOCK_KIND_ORDER as string[];
+const SUPPORTED_NOTE_BLOCK_KINDS = new Set<string>(NOTE_BLOCK_KINDS);
 
 const NOTE_BLOCKS_SCHEMA: Schema = {
   type: Type.ARRAY,
-  description: "Structured educational note sections extracted from the transcript.",
+  description: "Structured educational note sections extracted from the source content.",
   items: {
     type: Type.OBJECT,
     properties: {
       kind: {
         type: Type.STRING,
         enum: NOTE_BLOCK_KINDS,
-        description: "The section type. Only include sections genuinely supported by the transcript content.",
+        description: "The section type. Only include sections genuinely supported by the source content.",
       },
       heading: { type: Type.STRING, description: "Optional short heading for this section." },
       content: { type: Type.STRING, description: "The section's body text." },
+      sourcePageNumbers: {
+        type: Type.ARRAY,
+        items: { type: Type.INTEGER },
+        description:
+          "Array of 1-based integer page or slide numbers directly supporting this section, exactly matching the delimiters in the source (e.g. [1] or [1, 2]). Only include numbers explicitly present in the source headers.",
+      },
+      sourceQuote: {
+        type: Type.STRING,
+        description:
+          "Optional short verbatim excerpt or key phrase (5-20 words) from the referenced page(s) that directly provides the evidence for this block. Must match the text in the source document.",
+      },
     },
     required: ["kind", "content"],
   },
 };
 
-function buildNoteGenerationPrompt(transcriptText: string, templateKind: "lecture" | "meeting"): string {
+/**
+ * Normalizes text for case-insensitive, punctuation-agnostic phrase matching.
+ * Collapses whitespace and strips punctuation to handle minor formatting differences.
+ */
+export function normalizeForGroundingSearch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Extracts the text content of each source unit from delimited source text
+ * (e.g. "--- Page 1 ---\n...").
+ */
+export function extractSourceUnitTexts(sourceText: string): Map<number, string> {
+  const map = new Map<number, string>();
+  const regex = /(?:^|\n)--- (?:Page|Slide) (\d+) ---\n/g;
+  let match: RegExpExecArray | null;
+  const matches: { unitNumber: number; startIndex: number; contentStartIndex: number }[] = [];
+
+  while ((match = regex.exec(sourceText)) !== null) {
+    const numStr = match[1];
+    if (!numStr) continue;
+    const unitNumber = parseInt(numStr, 10);
+    matches.push({
+      unitNumber,
+      startIndex: match.index,
+      contentStartIndex: match.index + match[0].length,
+    });
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const current = matches[i];
+    if (!current) continue;
+    const nextMatch = matches[i + 1];
+    const nextStart = nextMatch ? nextMatch.startIndex : sourceText.length;
+    const content = sourceText.slice(current.contentStartIndex, nextStart).trim();
+    map.set(current.unitNumber, content);
+  }
+
+  return map;
+}
+
+function buildNoteGenerationPrompt(transcriptText: string, templateKind: "lecture" | "meeting" | "study_guide" = "lecture"): string {
   const kindList = NOTE_BLOCK_KINDS.map((k) => `${k} (${NOTE_BLOCK_KIND_LABELS[k]})`).join(", ");
   const guidance =
     templateKind === "meeting"
@@ -166,6 +246,46 @@ Only include a section if the transcript actually contains content supporting it
 Transcript:
 """
 ${transcriptText}
+"""`;
+}
+
+function buildDocumentNoteGenerationPrompt(
+  documentText: string,
+  _templateKind?: string,
+  sourceUnits?: NoteGenerationSourceUnitInfo
+): string {
+  const kindList = NOTE_BLOCK_KINDS.map((k) => `${k} (${NOTE_BLOCK_KIND_LABELS[k]})`).join(", ");
+
+  let unitInstructions = "";
+  if (sourceUnits && sourceUnits.availableUnits.length > 0) {
+    const label = sourceUnits.unitType === "page" ? "Page" : "Slide";
+    unitInstructions = `
+Source attribution instructions:
+- The document content is divided into explicit ${sourceUnits.unitType}s labeled "--- ${label} <number> ---".
+- For every note section, populate "sourcePageNumbers" with the exact integer ${sourceUnits.unitType} number(s) that provide the evidence or explanation for that section.
+- If a section synthesizes information across multiple ${sourceUnits.unitType}s, include all relevant numbers in "sourcePageNumbers" (e.g. [1, 2]).
+- You must ONLY cite ${sourceUnits.unitType} numbers that appear as headers in the document text below. Available ${sourceUnits.unitType} numbers: ${sourceUnits.availableUnits.join(", ")}.
+- If citing a ${sourceUnits.unitType}, you may optionally provide a short verbatim "sourceQuote" (5-20 words) from that specific ${sourceUnits.unitType}'s text directly supporting the section.
+- If a section summarizes general high-level themes not attributable to specific ${sourceUnits.unitType}s, omit "sourcePageNumbers" or provide an empty array [].
+- Never invent, estimate, or extrapolate ${sourceUnits.unitType} numbers.
+`;
+  }
+
+  return `Read the following document and produce structured educational study notes as a JSON array of sections.
+
+Available section kinds: ${kindList}.
+Favor OVERVIEW, DEFINITION, CORE_CONCEPT, EXPLANATION, IMPORTANT_POINTS, EXAMPLE, FORMULA, DERIVATION, APPLICATION, and SUMMARY sections where the document text supports them.
+
+Instructions:
+- Base every section strictly on the provided document text.
+- Capture major headings, fundamental definitions, core concepts, step-by-step explanations, and key takeaways.
+- Preserve formulas, equations, and illustrative examples exactly as presented in the document.
+- Only include a section if the document content genuinely supports it — do not invent concepts, formulas, or examples not present in the text.
+- Only mark a point EXAM_IMPORTANT or add a COMMON_MISTAKE section if the document explicitly highlights it as a critical note, common error, or exam emphasis.
+${unitInstructions}
+Document content:
+"""
+${documentText}
 """`;
 }
 
@@ -192,9 +312,11 @@ interface GeminiClient {
  */
 export class GeminiAIService implements AIService {
   readonly providerName = "gemini";
-  readonly modelName = GEMINI_MODEL;
+  readonly modelName: string;
 
-  constructor(private readonly client: GeminiClient) {}
+  constructor(private readonly client: GeminiClient, modelName: string = resolveGeminiModel()) {
+    this.modelName = modelName;
+  }
 
   async chat(input: {
     messages: AIChatMessage[];
@@ -211,7 +333,7 @@ export class GeminiAIService implements AIService {
     let response: GenerateContentResponse;
     try {
       response = await this.client.models.generateContent({
-        model: GEMINI_MODEL,
+        model: this.modelName,
         contents,
         config: { systemInstruction },
       });
@@ -231,19 +353,30 @@ export class GeminiAIService implements AIService {
     };
   }
 
-  async generateNotes(input: {
-    transcriptText: string;
-    templateKind: "lecture" | "meeting";
-  }): Promise<{ blocks: { kind: string; heading?: string; content: string }[] }> {
+  async generateNotes(input: GenerateNotesInput): Promise<GenerateNotesResult> {
+    const rawText = input.sourceText ?? input.transcriptText ?? "";
+    const textToProcess = typeof rawText === "string" ? rawText.trim() : "";
+    if (textToProcess.length === 0) {
+      throw new Error("Cannot generate notes: source text is empty or missing.");
+    }
+    const sourceType = input.sourceType ?? (input.transcriptText ? "transcript" : "document");
+    const templateKind = input.templateKind ?? (sourceType === "transcript" ? "lecture" : "study_guide");
+
+    const promptText =
+      sourceType === "transcript"
+        ? buildNoteGenerationPrompt(textToProcess, templateKind === "meeting" ? "meeting" : "lecture")
+        : buildDocumentNoteGenerationPrompt(textToProcess, templateKind, input.sourceUnits);
+
     let response: GenerateContentResponse;
     try {
       response = await this.client.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [{ role: "user", parts: [{ text: buildNoteGenerationPrompt(input.transcriptText, input.templateKind) }] }],
+        model: this.modelName,
+        contents: [{ role: "user", parts: [{ text: promptText }] }],
         config: {
           systemInstruction: HALLUCINATION_CONTROL_INSTRUCTION,
           responseMimeType: "application/json",
           responseSchema: NOTE_BLOCKS_SCHEMA,
+          maxOutputTokens: GEMINI_NOTE_GENERATION_MAX_OUTPUT_TOKENS,
           httpOptions: { timeout: GEMINI_NOTE_GENERATION_TIMEOUT_MS },
         },
       });
@@ -251,21 +384,120 @@ export class GeminiAIService implements AIService {
       throw wrapGeminiError(err);
     }
 
+    const tokensInput =
+      typeof response.usageMetadata?.promptTokenCount === "number"
+        ? response.usageMetadata.promptTokenCount
+        : undefined;
+    const tokensOutput =
+      typeof response.usageMetadata?.candidatesTokenCount === "number"
+        ? response.usageMetadata.candidatesTokenCount
+        : undefined;
+
+    if (response.promptFeedback?.blockReason) {
+      const blockReason = response.promptFeedback.blockReason;
+      throw new AIGenerationFailedError(
+        `AI note generation was blocked by safety policy (${blockReason}). Please ensure the source text complies with content guidelines.`,
+        { tokensInput, tokensOutput, finishReason: blockReason }
+      );
+    }
+
+    if (!response.candidates || response.candidates.length === 0) {
+      throw new AIGenerationFailedError(
+        "AI note generation produced no response candidates.",
+        { tokensInput, tokensOutput }
+      );
+    }
+
+    const candidate = response.candidates[0];
+    const finishReason = candidate?.finishReason;
+
+    if (!finishReason) {
+      throw new AIGenerationFailedError(
+        "AI note generation response candidate is missing an explicit finish reason.",
+        { tokensInput, tokensOutput }
+      );
+    }
+
+    if (finishReason === "MAX_TOKENS") {
+      throw new AIGenerationFailedError(
+        "AI note generation was truncated because the response exceeded the maximum output token limit. Please try splitting the document into smaller sections.",
+        { tokensInput, tokensOutput, finishReason: "MAX_TOKENS", isTruncated: true }
+      );
+    }
+
+    if (finishReason === "SAFETY") {
+      throw new AIGenerationFailedError(
+        "AI note generation was blocked by safety filters. Please review the document content.",
+        { tokensInput, tokensOutput, finishReason: "SAFETY" }
+      );
+    }
+
+    if (finishReason === "RECITATION") {
+      throw new AIGenerationFailedError(
+        "AI note generation was blocked due to recitation check.",
+        { tokensInput, tokensOutput, finishReason: "RECITATION" }
+      );
+    }
+
+    if (finishReason === "BLOCKLIST" || finishReason === "PROHIBITED_CONTENT" || finishReason === "SPII") {
+      throw new AIGenerationFailedError(
+        `AI note generation was blocked (${finishReason}).`,
+        { tokensInput, tokensOutput, finishReason }
+      );
+    }
+
+    if (finishReason === "FINISH_REASON_UNSPECIFIED") {
+      throw new AIGenerationFailedError(
+        "AI note generation finished with unspecified finish reason.",
+        { tokensInput, tokensOutput, finishReason: "FINISH_REASON_UNSPECIFIED" }
+      );
+    }
+
+    if (finishReason !== "STOP") {
+      throw new AIGenerationFailedError(
+        `AI note generation failed with unexpected finish reason: ${finishReason}.`,
+        { tokensInput, tokensOutput, finishReason }
+      );
+    }
+
     const text = response.text;
     if (!text || text.trim().length === 0) {
-      throw new Error("Gemini returned an empty response for note generation.");
+      throw new AIGenerationFailedError(
+        "Gemini returned an empty response for note generation.",
+        { tokensInput, tokensOutput, finishReason: "STOP" }
+      );
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new Error("Gemini's note-generation response wasn't valid JSON despite the requested JSON schema.");
+      throw new AIGenerationFailedError(
+        "Gemini's note-generation response wasn't valid JSON despite the requested JSON schema.",
+        { tokensInput, tokensOutput, finishReason: "STOP" }
+      );
     }
 
     if (!Array.isArray(parsed)) {
-      throw new Error("Gemini's note-generation response wasn't a JSON array as requested.");
+      throw new AIGenerationFailedError(
+        "Gemini's note-generation response wasn't a JSON array as requested.",
+        { tokensInput, tokensOutput, finishReason: "STOP" }
+      );
     }
+
+    if (parsed.length === 0) {
+      throw new AIGenerationFailedError(
+        "Gemini returned an empty note array with no sections.",
+        { tokensInput, tokensOutput, finishReason: "STOP" }
+      );
+    }
+
+    const validUnitsSet =
+      sourceType === "document" && input.sourceUnits && input.sourceUnits.availableUnits.length > 0
+        ? new Set(input.sourceUnits.availableUnits)
+        : null;
+
+    const unitTextMap = validUnitsSet ? extractSourceUnitTexts(textToProcess) : null;
 
     const blocks = parsed.map((raw, i) => {
       if (
@@ -274,26 +506,218 @@ export class GeminiAIService implements AIService {
         typeof (raw as Record<string, unknown>).kind !== "string" ||
         typeof (raw as Record<string, unknown>).content !== "string"
       ) {
-        throw new Error(`Gemini's note-generation response item ${i} is missing a required "kind" or "content" string field.`);
+        throw new AIGenerationFailedError(
+          `Gemini's note-generation response item ${i} is missing a required "kind" or "content" string field.`,
+          { tokensInput, tokensOutput, finishReason: "STOP" }
+        );
+      }
+      const rawKind = (raw as Record<string, unknown>).kind as string;
+      if (!SUPPORTED_NOTE_BLOCK_KINDS.has(rawKind)) {
+        throw new AIGenerationFailedError(
+          `Gemini's note-generation response item ${i} has an unsupported kind: "${rawKind}".`,
+          { tokensInput, tokensOutput, finishReason: "STOP" }
+        );
+      }
+      const rawContent = (raw as { content: string }).content;
+      if (rawContent.trim().length === 0) {
+        throw new AIGenerationFailedError(
+          `Gemini's note-generation response item ${i} contains empty content.`,
+          { tokensInput, tokensOutput, finishReason: "STOP" }
+        );
       }
       const heading = (raw as Record<string, unknown>).heading;
+
+      let validatedSourcePages: number[] | undefined = undefined;
+      let validatedSourceQuote: string | undefined = undefined;
+      const rawPages = (raw as Record<string, unknown>).sourcePageNumbers;
+      const rawQuote = (raw as Record<string, unknown>).sourceQuote;
+
+      if (validUnitsSet && Array.isArray(rawPages)) {
+        const filtered: number[] = [];
+        for (const p of rawPages) {
+          if (typeof p === "number" && Number.isInteger(p) && validUnitsSet.has(p)) {
+            filtered.push(p);
+          }
+        }
+        if (filtered.length > 0) {
+          const candidatePages = Array.from(new Set(filtered)).sort((a, b) => a - b);
+
+          // Content grounding verification when sourceQuote is provided
+          if (typeof rawQuote === "string" && rawQuote.trim().length >= 5 && unitTextMap) {
+            const normalizedQuote = normalizeForGroundingSearch(rawQuote);
+            if (normalizedQuote.length >= 5) {
+              const groundedPages = candidatePages.filter((pageNum) => {
+                const unitText = unitTextMap.get(pageNum);
+                if (!unitText) return false;
+                return normalizeForGroundingSearch(unitText).includes(normalizedQuote);
+              });
+
+              if (groundedPages.length > 0) {
+                validatedSourcePages = groundedPages;
+                validatedSourceQuote = rawQuote.trim();
+              } else {
+                // The quote does not appear on any of the cited pages (fabricated or cross-page quotation).
+                // Fail closed: discard ungrounded page attribution rather than guessing.
+                validatedSourcePages = undefined;
+              }
+            } else {
+              validatedSourcePages = candidatePages;
+            }
+          } else {
+            // No verbatim quotation provided: retain candidate pages under reference-membership validation
+            validatedSourcePages = candidatePages;
+          }
+        }
+      }
+
       return {
-        kind: (raw as { kind: string }).kind,
+        kind: rawKind,
         heading: typeof heading === "string" ? heading : undefined,
-        content: (raw as { content: string }).content,
+        content: rawContent,
+        sourcePages: validatedSourcePages,
+        sourceQuote: validatedSourceQuote,
       };
     });
 
-    return { blocks };
+    if (blocks.length === 0) {
+      throw new AIGenerationFailedError(
+        "Gemini returned no valid note blocks.",
+        { tokensInput, tokensOutput, finishReason: "STOP" }
+      );
+    }
+
+    const result: GenerateNotesResult = {
+      blocks,
+      tokensInput,
+      tokensOutput,
+    };
+
+    return result;
   }
 }
 
-export function createGeminiAIService(): GeminiAIService {
-  const apiKey = process.env.GOOGLE_AI_API_KEY;
-  if (!apiKey) {
-    throw new ServiceNotConfiguredError("Gemini AIService", ["GOOGLE_AI_API_KEY"]);
+export type GeminiAuthMode = "auto" | "api_key" | "vertex_wif" | "vertex_adc";
+
+export interface ResolvedGeminiAuthConfig {
+  mode: "api_key" | "vertex_wif" | "vertex_adc";
+  project?: string;
+  location?: string;
+}
+
+/**
+ * Resolves the Gemini authentication mode (preserving existing `GOOGLE_AI_API_KEY`
+ * behavior by default while supporting Vertex AI via Google Workload Identity
+ * Federation / Azure Managed Identity or standard Vertex ADC).
+ */
+export function resolveGeminiAuthConfig(
+  env: Record<string, string | undefined> = process.env
+): ResolvedGeminiAuthConfig {
+  const requested = (env.GEMINI_AUTH_MODE?.trim() || "auto") as GeminiAuthMode;
+  const project =
+    env.GOOGLE_CLOUD_PROJECT?.trim() ||
+    env.GCP_PROJECT_ID?.trim() ||
+    env.GOOGLE_VERTEX_PROJECT?.trim();
+  const location =
+    env.GOOGLE_CLOUD_LOCATION?.trim() ||
+    env.GCP_LOCATION?.trim() ||
+    env.GOOGLE_VERTEX_LOCATION?.trim() ||
+    "us-central1";
+  const vertexFlag = env.GOOGLE_GENAI_USE_VERTEXAI === "true";
+
+  if (requested === "api_key") {
+    if (!env.GOOGLE_AI_API_KEY?.trim()) {
+      throw new ServiceNotConfiguredError("Gemini AIService", ["GOOGLE_AI_API_KEY"]);
+    }
+    return { mode: "api_key" };
   }
+
+  if (requested === "vertex_wif") {
+    const wif = resolveGoogleWifConfiguration(env);
+    if (!wif || !isGoogleWifConfigured(env)) {
+      throw new ServiceNotConfiguredError("Gemini Vertex WIF AIService", [
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_WIF_AUDIENCE",
+        "IDENTITY_ENDPOINT / IDENTITY_HEADER (or AZURE_IMDS_ENABLED=true)",
+      ]);
+    }
+    return { mode: "vertex_wif", project: wif.project, location: wif.location };
+  }
+
+  if (requested === "vertex_adc") {
+    if (!project) {
+      throw new ServiceNotConfiguredError("Gemini Vertex ADC AIService", [
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+      ]);
+    }
+    return { mode: "vertex_adc", project, location };
+  }
+
+  if (requested !== "auto") {
+    throw new ServiceNotConfiguredError("Gemini AIService", [
+      `GEMINI_AUTH_MODE must be one of "auto", "api_key", "vertex_wif", or "vertex_adc" (got "${requested}")`,
+    ]);
+  }
+
+  if (isGoogleWifConfigured(env)) {
+    const wif = resolveGoogleWifConfiguration(env)!;
+    return { mode: "vertex_wif", project: wif.project, location: wif.location };
+  }
+
+  if (vertexFlag) {
+    if (project) {
+      return { mode: "vertex_adc", project, location };
+    }
+    throw new ServiceNotConfiguredError("Gemini Vertex AIService", [
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_WIF_AUDIENCE or GOOGLE_APPLICATION_CREDENTIALS",
+    ]);
+  }
+
+  if (env.GOOGLE_AI_API_KEY?.trim()) {
+    return { mode: "api_key" };
+  }
+
+  throw new ServiceNotConfiguredError("Gemini AIService", ["GOOGLE_AI_API_KEY"]);
+}
+
+export function createGeminiAIService(): GeminiAIService {
+  const authConfig = resolveGeminiAuthConfig(process.env);
+  const httpOptions = { timeout: GEMINI_TIMEOUT_MS, retryOptions: GEMINI_RETRY_OPTIONS };
+  const modelName = resolveGeminiModel();
+
+  if (authConfig.mode === "vertex_wif") {
+    const authClient = createGoogleWifAuthClient();
+    const googleAuthOptions = {
+      authClient,
+    } as unknown as NonNullable<GoogleGenAIOptions["googleAuthOptions"]>;
+    return new GeminiAIService(
+      new GoogleGenAI({
+        vertexai: true,
+        project: authConfig.project,
+        location: authConfig.location,
+        googleAuthOptions,
+        httpOptions,
+      }),
+      modelName
+    );
+  }
+
+  if (authConfig.mode === "vertex_adc") {
+    return new GeminiAIService(
+      new GoogleGenAI({
+        vertexai: true,
+        project: authConfig.project,
+        location: authConfig.location,
+        httpOptions,
+      }),
+      modelName
+    );
+  }
+
+  const apiKey = process.env.GOOGLE_AI_API_KEY!;
   return new GeminiAIService(
-    new GoogleGenAI({ apiKey, httpOptions: { timeout: GEMINI_TIMEOUT_MS, retryOptions: GEMINI_RETRY_OPTIONS } })
+    new GoogleGenAI({ vertexai: false, apiKey, httpOptions }),
+    modelName
   );
 }

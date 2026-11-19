@@ -35,7 +35,10 @@ export class GoogleNotConfiguredError extends Error {
 
 export const GOOGLE_DRIVE_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/documents.readonly",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/presentations.readonly",
   "https://www.googleapis.com/auth/userinfo.email",
   "openid",
 ];

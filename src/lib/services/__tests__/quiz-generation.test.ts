@@ -10,6 +10,7 @@ vi.mock("@/lib/db", () => ({ db }));
 
 const access = vi.hoisted(() => ({
   getAccessibleAIScope: vi.fn(),
+  assertActiveGroupMemberForCreation: vi.fn(),
   NotAuthorizedError: class NotAuthorizedError extends Error {},
 }));
 vi.mock("@/lib/access", () => access);
@@ -89,6 +90,7 @@ describe("generateQuizForTopic", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     access.getAccessibleAIScope.mockResolvedValue(WORKSPACE_SCOPE);
+    access.assertActiveGroupMemberForCreation.mockResolvedValue({ id: "gm-1", role: "MEMBER" });
     db.topic.findUnique.mockResolvedValue({ id: "topic-1", name: "Zeroth Law", description: "Thermal equilibrium" });
     retrieval.retrieveRelevantChunks.mockResolvedValue([SAMPLE_CHUNK]);
     aiServiceRegistry.getAIService.mockReturnValue({
@@ -171,9 +173,20 @@ describe("generateQuizForTopic", () => {
 
     await generateQuizForTopic({ userId: "user-1", topicId: "topic-1" });
 
+    expect(access.assertActiveGroupMemberForCreation).toHaveBeenCalledWith(db, "group-1", "user-1");
     expect(db.quiz.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ groupId: "group-1", workspaceId: null }) })
     );
+  });
+
+  it("aborts quiz creation inside transaction if the group or topic was soft-deleted while AI was generating", async () => {
+    access.getAccessibleAIScope.mockResolvedValue(GROUP_SCOPE);
+    access.assertActiveGroupMemberForCreation.mockRejectedValueOnce(new access.NotAuthorizedError());
+
+    await expect(generateQuizForTopic({ userId: "user-1", topicId: "topic-1" })).rejects.toThrow(
+      access.NotAuthorizedError
+    );
+    expect(db.quiz.create).not.toHaveBeenCalled();
   });
 
   it("persists questions with stable order and attaches real retrieved-chunk provenance to every question", async () => {

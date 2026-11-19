@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import { refreshGoogleAccessToken, revokeGoogleToken, GOOGLE_DRIVE_SCOPES } from "@/lib/services/google-oauth";
 import { GoogleApiError, GOOGLE_RECONNECT_REQUIRED } from "@/lib/services/google-errors";
+import { getGoogleDriveService } from "@/lib/services/google-drive";
 
 /**
  * A single OAuth grant covers both Drive and Docs scopes (see the
@@ -10,6 +11,13 @@ import { GoogleApiError, GOOGLE_RECONNECT_REQUIRED } from "@/lib/services/google
  */
 const PROVIDER = "GOOGLE_DRIVE" as const;
 
+/**
+ * Coalesces concurrent access-token refresh operations for the same userId
+ * within the process so simultaneous webhook notifications, background jobs,
+ * and interactive requests do not race to refresh the same OAuth grant.
+ */
+const inFlightTokenRefreshes = new Map<string, Promise<string>>();
+
 export class GoogleNotConnectedError extends Error {
   constructor() {
     super("Google Drive isn't connected. Connect it in Settings to import files.");
@@ -17,23 +25,39 @@ export class GoogleNotConnectedError extends Error {
   }
 }
 
-/** Connection status for display — never returns token material. */
-export async function getGoogleConnectionStatus(userId: string): Promise<{
+export interface GoogleConnectionStatus {
   connected: boolean;
   email?: string;
   connectedAt?: Date;
   lastSyncedAt?: Date | null;
-}> {
+  syncStatus?: string | null;
+  lastSyncError?: string | null;
+  watchActive?: boolean;
+  watchExpiresAt?: Date | null;
+}
+
+/** Connection status for display — never returns token material. */
+export async function getGoogleConnectionStatus(userId: string): Promise<GoogleConnectionStatus> {
   const account = await db.connectedAccount.findFirst({
     where: { userId, provider: PROVIDER, revokedAt: null },
     orderBy: { connectedAt: "desc" },
   });
   if (!account) return { connected: false };
+  const watchActive = Boolean(
+    account.watchChannelId &&
+      account.watchResourceId &&
+      account.watchExpiresAt &&
+      account.watchExpiresAt.getTime() > Date.now()
+  );
   return {
     connected: true,
     email: account.externalId,
     connectedAt: account.connectedAt,
     lastSyncedAt: account.lastSyncedAt,
+    syncStatus: account.syncStatus ?? "IDLE",
+    lastSyncError: account.lastSyncError ?? null,
+    watchActive,
+    watchExpiresAt: account.watchExpiresAt ?? null,
   };
 }
 
@@ -56,6 +80,8 @@ export async function saveGoogleConnection(input: {
       refreshToken: input.refreshToken ? encryptSecret(input.refreshToken) : null,
       expiresAt,
       scopes: GOOGLE_DRIVE_SCOPES,
+      syncStatus: "IDLE",
+      lastSyncError: null,
     },
     update: {
       accessToken: encryptSecret(input.accessToken),
@@ -67,6 +93,8 @@ export async function saveGoogleConnection(input: {
       expiresAt,
       scopes: GOOGLE_DRIVE_SCOPES,
       revokedAt: null,
+      syncStatus: "IDLE",
+      lastSyncError: null,
     },
   });
 }
@@ -79,38 +107,72 @@ export async function saveGoogleConnection(input: {
  * the refresh itself fails, e.g. because access was revoked at Google.
  */
 export async function getValidGoogleAccessToken(userId: string): Promise<string> {
-  const account = await db.connectedAccount.findFirst({
-    where: { userId, provider: PROVIDER, revokedAt: null },
-    orderBy: { connectedAt: "desc" },
-  });
-  if (!account) throw new GoogleNotConnectedError();
-
-  const stillValid = account.expiresAt && account.expiresAt.getTime() - Date.now() > 60_000;
-  if (stillValid) {
-    return decryptSecret(account.accessToken);
+  const existingRefresh = inFlightTokenRefreshes.get(userId);
+  if (existingRefresh) {
+    return existingRefresh;
   }
 
-  if (!account.refreshToken) {
-    throw new GoogleApiError(GOOGLE_RECONNECT_REQUIRED, { publicMessage: GOOGLE_RECONNECT_REQUIRED });
-  }
+  const refreshPromise = (async () => {
+    const account = await db.connectedAccount.findFirst({
+      where: { userId, provider: PROVIDER, revokedAt: null },
+      orderBy: { connectedAt: "desc" },
+    });
+    if (!account) throw new GoogleNotConnectedError();
 
-  const refreshed = await refreshGoogleAccessToken(decryptSecret(account.refreshToken));
-  await db.connectedAccount.update({
-    where: { id: account.id },
-    data: {
-      accessToken: encryptSecret(refreshed.access_token),
-      expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
-    },
-  });
-  return refreshed.access_token;
+    const stillValid = account.expiresAt && account.expiresAt.getTime() - Date.now() > 60_000;
+    if (stillValid) {
+      return decryptSecret(account.accessToken);
+    }
+
+    if (!account.refreshToken) {
+      await db.connectedAccount
+        .update({
+          where: { id: account.id },
+          data: { syncStatus: "RECONNECT_REQUIRED", lastSyncError: GOOGLE_RECONNECT_REQUIRED },
+        })
+        .catch(() => undefined);
+      throw new GoogleApiError(GOOGLE_RECONNECT_REQUIRED, { status: 401, publicMessage: GOOGLE_RECONNECT_REQUIRED });
+    }
+
+    try {
+      const refreshed = await refreshGoogleAccessToken(decryptSecret(account.refreshToken));
+      await db.connectedAccount.update({
+        where: { id: account.id },
+        data: {
+          accessToken: encryptSecret(refreshed.access_token),
+          expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+          ...(account.syncStatus === "RECONNECT_REQUIRED"
+            ? { syncStatus: "IDLE", lastSyncError: null }
+            : {}),
+        },
+      });
+      return refreshed.access_token;
+    } catch (err) {
+      if (err instanceof GoogleApiError && (err.status === 400 || err.status === 401)) {
+        await db.connectedAccount
+          .update({
+            where: { id: account.id },
+            data: { syncStatus: "RECONNECT_REQUIRED", lastSyncError: GOOGLE_RECONNECT_REQUIRED },
+          })
+          .catch(() => undefined);
+      }
+      throw err;
+    }
+  })();
+
+  inFlightTokenRefreshes.set(userId, refreshPromise);
+  try {
+    return await refreshPromise;
+  } finally {
+    inFlightTokenRefreshes.delete(userId);
+  }
 }
 
 /**
  * Disconnects Google Drive for this user. Imported Materials are never
  * touched (spec §8/§18) — only the ConnectedAccount row is marked revoked.
- * The row itself is kept (rather than deleted) so lastSyncedAt/connectedAt
- * history survives, matching the soft-delete pattern used elsewhere
- * (Material.deletedAt, Subject.archivedAt).
+ * Active Drive push notification watch channels are stopped best-effort and
+ * cleared so stale webhooks for the disconnected channel are rejected.
  */
 export async function disconnectGoogleAccount(userId: string): Promise<void> {
   const account = await db.connectedAccount.findFirst({
@@ -118,9 +180,40 @@ export async function disconnectGoogleAccount(userId: string): Promise<void> {
   });
   if (!account) return;
 
-  await revokeGoogleToken(decryptSecret(account.accessToken));
+  const accessToken = (() => {
+    try {
+      return decryptSecret(account.accessToken);
+    } catch {
+      return null;
+    }
+  })();
+
+  if (accessToken && account.watchChannelId && account.watchResourceId) {
+    await getGoogleDriveService()
+      .stopWatchChannel({
+        accessToken,
+        channelId: account.watchChannelId,
+        resourceId: account.watchResourceId,
+      })
+      .catch(() => undefined);
+  }
+
+  if (accessToken) {
+    await revokeGoogleToken(accessToken);
+  }
+
   await db.connectedAccount.update({
     where: { id: account.id },
-    data: { revokedAt: new Date() },
+    data: {
+      revokedAt: new Date(),
+      watchChannelId: null,
+      watchResourceId: null,
+      watchTokenHash: null,
+      watchExpiresAt: null,
+      changesPageToken: null,
+      lastWebhookMessageNumber: null,
+      syncStatus: null,
+      lastSyncError: null,
+    },
   });
 }

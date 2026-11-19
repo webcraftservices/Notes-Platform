@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleSubject, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleSubject,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { createChapterSchema } from "@/lib/validation/hierarchy";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 
@@ -34,6 +39,35 @@ export async function POST(req: Request, { params }: { params: { subjectId: stri
   try {
     const subject = await getAccessibleSubject(params.subjectId, user.id);
     if (!subject) return NOT_FOUND();
+
+    if (subject.groupId) {
+      const groupId = subject.groupId;
+      const chapter = await db.$transaction(async (tx) => {
+        await assertActiveGroupMemberForCreation(tx, groupId, user.id);
+
+        const activeSubject = await tx.subject.findFirst({
+          where: { id: subject.id, groupId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!activeSubject) return null;
+
+        const lastChapter = await tx.chapter.findFirst({
+          where: { subjectId: subject.id, deletedAt: null },
+          orderBy: { order: "desc" },
+        });
+
+        return tx.chapter.create({
+          data: {
+            ...parsed.data,
+            subjectId: subject.id,
+            order: (lastChapter?.order ?? -1) + 1,
+          },
+        });
+      });
+
+      if (!chapter) return NOT_FOUND();
+      return NextResponse.json({ chapter }, { status: 201 });
+    }
 
     const lastChapter = await db.chapter.findFirst({
       where: { subjectId: subject.id, deletedAt: null },

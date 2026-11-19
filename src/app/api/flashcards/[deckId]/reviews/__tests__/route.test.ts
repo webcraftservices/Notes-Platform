@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   flashcard: { findFirst: vi.fn() },
-  flashcardReview: { create: vi.fn() },
+  flashcardReview: { create: vi.fn(), findFirst: vi.fn() },
+  $transaction: undefined as ReturnType<typeof vi.fn> | undefined,
+  $executeRaw: undefined as ReturnType<typeof vi.fn> | undefined,
 }));
 vi.mock("@/lib/db", () => ({ db }));
 
@@ -38,6 +40,8 @@ describe("POST /api/flashcards/[deckId]/reviews", () => {
       reviewedAt: new Date("2026-01-01"),
       ...data,
     }));
+    db.$transaction = undefined;
+    db.$executeRaw = undefined;
   });
 
   it("rejects with 401 when there is no authenticated user", async () => {
@@ -194,5 +198,496 @@ describe("POST /api/flashcards/[deckId]/reviews", () => {
     const json = await res.json();
 
     expect(json.review).toMatchObject({ id: "review-1", flashcardId: "card-1", wasCorrect: true });
+  });
+
+  it("computes and persists FSRS-4.5 state when a 4-point rating (AGAIN/HARD/GOOD/EASY) is submitted", async () => {
+    db.flashcardReview.findFirst.mockResolvedValue(null);
+
+    const res = await POST(makeRequest({ flashcardId: "card-1", rating: "GOOD" }), {
+      params: { deckId: "deck-1" },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+
+    expect(db.flashcardReview.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          flashcardId: "card-1",
+          userId: "user-1",
+          wasCorrect: true,
+          rating: "GOOD",
+          stateBefore: "NEW",
+          state: "REVIEW",
+          scheduledDays: 2,
+          reps: 1,
+          lapses: 0,
+        }),
+      })
+    );
+    expect(json.schedule).toMatchObject({
+      state: "REVIEW",
+      scheduledDays: 2,
+      reps: 1,
+    });
+    expect(json.duplicate).toBe(false);
+  });
+
+  it("handles SUSPEND and UNSUSPEND actions while preserving stability and difficulty and persisting rating: null", async () => {
+    db.flashcardReview.findFirst.mockResolvedValueOnce({
+      id: "rev-prev",
+      flashcardId: "card-1",
+      userId: "user-1",
+      wasCorrect: true,
+      reviewedAt: new Date("2026-01-05T10:00:00.000Z"),
+      rating: "GOOD",
+      stateBefore: "NEW",
+      state: "REVIEW",
+      stability: 3.17,
+      difficulty: 5.28,
+      elapsedDays: 0,
+      scheduledDays: 2,
+      reps: 1,
+      lapses: 0,
+      dueAt: new Date("2026-01-07T10:00:00.000Z"),
+    });
+
+    const res = await POST(makeRequest({ flashcardId: "card-1", action: "SUSPEND" }), {
+      params: { deckId: "deck-1" },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.schedule.state).toBe("SUSPENDED");
+    expect(json.schedule.stability).toBeCloseTo(3.17, 2);
+    expect(db.flashcardReview.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          rating: null,
+          stateBefore: "REVIEW",
+          state: "SUSPENDED",
+        }),
+      })
+    );
+
+    // Now UNSUSPEND from SUSPENDED state -> persists rating: null, stateBefore: "SUSPENDED", state: "REVIEW"
+    db.flashcardReview.findFirst.mockResolvedValueOnce({
+      id: "rev-suspended",
+      flashcardId: "card-1",
+      userId: "user-1",
+      wasCorrect: true,
+      reviewedAt: new Date("2026-01-05T10:05:00.000Z"),
+      rating: null,
+      stateBefore: "REVIEW",
+      state: "SUSPENDED",
+      stability: 3.17,
+      difficulty: 5.28,
+      elapsedDays: 0,
+      scheduledDays: 2,
+      reps: 1,
+      lapses: 0,
+      dueAt: null,
+    });
+
+    const unsuspendRes = await POST(makeRequest({ flashcardId: "card-1", action: "UNSUSPEND" }), {
+      params: { deckId: "deck-1" },
+    });
+    expect(unsuspendRes.status).toBe(200);
+    const unsuspendJson = await unsuspendRes.json();
+    expect(unsuspendJson.schedule.state).toBe("REVIEW");
+    expect(db.flashcardReview.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          rating: null,
+          stateBefore: "SUSPENDED",
+          state: "REVIEW",
+        }),
+      })
+    );
+  });
+
+  it("returns 409 CARD_NOT_SUSPENDED when UNSUSPEND is called on a non-suspended card", async () => {
+    db.flashcardReview.findFirst.mockResolvedValueOnce({
+      id: "rev-active",
+      flashcardId: "card-1",
+      userId: "user-1",
+      wasCorrect: true,
+      reviewedAt: new Date("2026-01-05T10:00:00.000Z"),
+      rating: "GOOD",
+      stateBefore: "NEW",
+      state: "REVIEW",
+      stability: 2.4,
+      difficulty: 4.93,
+      elapsedDays: 0,
+      scheduledDays: 2,
+      reps: 1,
+      lapses: 0,
+      dueAt: new Date("2026-01-07T10:00:00.000Z"),
+    });
+
+    const res = await POST(makeRequest({ flashcardId: "card-1", action: "UNSUSPEND" }), {
+      params: { deckId: "deck-1" },
+    });
+    expect(res.status).toBe(409);
+    const json = await res.json();
+    expect(json.code).toBe("CARD_NOT_SUSPENDED");
+    expect(db.flashcardReview.create).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates submissions matching an existing idempotencyKey without creating a second row", async () => {
+    db.flashcardReview.findFirst.mockResolvedValueOnce({
+      id: "existing-rev",
+      flashcardId: "card-1",
+      userId: "user-1",
+      wasCorrect: true,
+      reviewedAt: new Date("2026-01-05T10:00:00.000Z"),
+      rating: "EASY",
+      stateBefore: "NEW",
+      state: "REVIEW",
+      stability: 8.5,
+      difficulty: 3.2,
+      elapsedDays: 0,
+      scheduledDays: 6,
+      reps: 1,
+      lapses: 0,
+      dueAt: new Date("2026-01-11T10:00:00.000Z"),
+      idempotencyKey: "idem-key-123",
+    });
+
+    const res = await POST(
+      makeRequest({ flashcardId: "card-1", rating: "EASY", idempotencyKey: "idem-key-123" }),
+      { params: { deckId: "deck-1" } }
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.duplicate).toBe(true);
+    expect(json.review.id).toBe("existing-rev");
+    expect(db.flashcardReview.create).not.toHaveBeenCalled();
+  });
+
+  describe("AUD-13-02: Per-card advisory lock serialization, concurrent submissions, and idempotency conflict handling", () => {
+    interface InMemoryReviewRow {
+      id: string;
+      flashcardId: string;
+      userId: string;
+      wasCorrect: boolean;
+      selfRating: string | null;
+      rating: string | null;
+      stateBefore: string;
+      state: string;
+      stability: number;
+      difficulty: number;
+      elapsedDays: number;
+      scheduledDays: number;
+      reps: number;
+      lapses: number;
+      dueAt: Date | null;
+      algorithmVersion: string;
+      idempotencyKey: string | null;
+      reviewedAt: Date;
+    }
+
+    function createSerializedReviewStore(initialReviews: InMemoryReviewRow[] = []) {
+      const persisted: InMemoryReviewRow[] = [...initialReviews];
+      const advisoryLocksTaken: string[] = [];
+      let lockChain = Promise.resolve();
+      let idSeq = persisted.length + 1;
+
+      db.$transaction = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+        let releaseLock!: () => void;
+        const prevLock = lockChain;
+        lockChain = new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        });
+
+        await prevLock;
+
+        // Stage writes inside transaction so rollback discards uncommitted changes
+        const staged: InMemoryReviewRow[] = persisted.map((r) => ({ ...r }));
+
+        const txClient = {
+          $executeRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+            const rendered = strings.reduce(
+              (acc, str, idx) => acc + str + (idx < values.length ? String(values[idx]) : ""),
+              ""
+            );
+            advisoryLocksTaken.push(rendered);
+            return 1;
+          }),
+          flashcardReview: {
+            findFirst: vi.fn(async (args: { where?: Record<string, unknown>; orderBy?: unknown }) => {
+              const where = args?.where ?? {};
+              const matches = staged.filter((row) => {
+                if (where.userId !== undefined && row.userId !== where.userId) return false;
+                if (where.flashcardId !== undefined && row.flashcardId !== where.flashcardId) return false;
+                if (where.idempotencyKey !== undefined && row.idempotencyKey !== where.idempotencyKey) return false;
+                return true;
+              });
+              if (matches.length === 0) return null;
+              if (args?.orderBy) {
+                matches.sort((a, b) => {
+                  const timeDiff = b.reviewedAt.getTime() - a.reviewedAt.getTime();
+                  if (timeDiff !== 0) return timeDiff;
+                  return b.id.localeCompare(a.id);
+                });
+              }
+              return matches[0];
+            }),
+            create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+              if (data.idempotencyKey) {
+                const dup = staged.find(
+                  (r) => r.userId === data.userId && r.idempotencyKey === data.idempotencyKey
+                );
+                if (dup) {
+                  const err = Object.assign(new Error("Unique constraint failed on the fields: (`userId`,`idempotencyKey`)"), {
+                    code: "P2002",
+                  });
+                  throw err;
+                }
+              }
+              const created: InMemoryReviewRow = {
+                id: `rev-${idSeq++}`,
+                flashcardId: String(data.flashcardId),
+                userId: String(data.userId),
+                wasCorrect: Boolean(data.wasCorrect),
+                selfRating: (data.selfRating as string | null) ?? null,
+                rating: (data.rating as string | null) ?? null,
+                stateBefore: String(data.stateBefore ?? "NEW"),
+                state: String(data.state ?? "REVIEW"),
+                stability: Number(data.stability ?? 0),
+                difficulty: Number(data.difficulty ?? 0),
+                elapsedDays: Number(data.elapsedDays ?? 0),
+                scheduledDays: Number(data.scheduledDays ?? 0),
+                reps: Number(data.reps ?? 0),
+                lapses: Number(data.lapses ?? 0),
+                dueAt: (data.dueAt as Date | null) ?? null,
+                algorithmVersion: String(data.algorithmVersion ?? "fsrs-4.5"),
+                idempotencyKey: (data.idempotencyKey as string | null) ?? null,
+                reviewedAt: (data.reviewedAt as Date) ?? new Date(),
+              };
+              staged.push(created);
+              return created;
+            }),
+          },
+        };
+
+        try {
+          const result = await fn(txClient);
+          persisted.splice(0, persisted.length, ...staged);
+          return result;
+        } finally {
+          releaseLock();
+        }
+      });
+
+      return { persisted, advisoryLocksTaken };
+    }
+
+    it("1. handles two simultaneous requests with the same idempotencyKey without duplicate insert or 500 error", async () => {
+      const { persisted, advisoryLocksTaken } = createSerializedReviewStore();
+
+      const [res1, res2] = await Promise.all([
+        POST(makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "concurrent-same-key" }), {
+          params: { deckId: "deck-1" },
+        }),
+        POST(makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "concurrent-same-key" }), {
+          params: { deckId: "deck-1" },
+        }),
+      ]);
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+
+      const [json1, json2] = await Promise.all([res1.json(), res2.json()]);
+
+      // Exactly 1 review row persisted; one response is original (duplicate: false), the second is duplicate: true
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]!.reps).toBe(1);
+      expect(persisted[0]!.state).toBe("REVIEW");
+      expect([json1.duplicate, json2.duplicate].sort()).toEqual([false, true]);
+      expect(json1.review.id).toBe(json2.review.id);
+      expect(advisoryLocksTaken[0]).toContain("pg_advisory_xact_lock");
+      expect(advisoryLocksTaken[0]).toContain("flashcard_review:user-1:card-1");
+    });
+
+    it("1b. recovers cleanly via fresh query outside aborted transaction when P2002 is raised on concurrent idempotencyKey collision", async () => {
+      const winningRow = {
+        id: "rev-winner",
+        flashcardId: "card-1",
+        userId: "user-1",
+        wasCorrect: true,
+        reviewedAt: new Date("2026-01-05T10:00:00.000Z"),
+        rating: "GOOD",
+        stateBefore: "NEW",
+        state: "REVIEW",
+        stability: 3.17,
+        difficulty: 5.28,
+        elapsedDays: 0,
+        scheduledDays: 2,
+        reps: 1,
+        lapses: 0,
+        dueAt: new Date("2026-01-07T10:00:00.000Z"),
+        idempotencyKey: "race-p2002-key",
+      };
+
+      // Simulate transaction throwing Prisma P2002 after another transaction committed the key
+      db.$transaction = vi.fn().mockRejectedValueOnce(
+        Object.assign(new Error("Unique constraint failed on the fields: (`userId`,`idempotencyKey`)"), {
+          code: "P2002",
+        })
+      );
+      // Outside the aborted transaction, db.flashcardReview.findFirst fetches the committed winning row
+      db.flashcardReview.findFirst.mockResolvedValueOnce(winningRow);
+
+      const res = await POST(
+        makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "race-p2002-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.duplicate).toBe(true);
+      expect(json.review.id).toBe("rev-winner");
+      expect(json.schedule.reps).toBe(1);
+    });
+
+    it("2. serializes two simultaneous requests with different idempotencyKeys for the same card so reps and FSRS state advance sequentially", async () => {
+      const { persisted } = createSerializedReviewStore();
+
+      const [res1, res2] = await Promise.all([
+        POST(makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "key-step-1" }), {
+          params: { deckId: "deck-1" },
+        }),
+        POST(makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "key-step-2" }), {
+          params: { deckId: "deck-1" },
+        }),
+      ]);
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+
+      expect(persisted).toHaveLength(2);
+      expect(persisted[0]!.stateBefore).toBe("NEW");
+      expect(persisted[0]!.state).toBe("REVIEW");
+      expect(persisted[0]!.reps).toBe(1);
+      expect(persisted[0]!.lapses).toBe(0);
+
+      // Second review must build upon the first review's committed state (stateBefore = REVIEW, reps = 2)
+      expect(persisted[1]!.stateBefore).toBe("REVIEW");
+      expect(persisted[1]!.state).toBe("REVIEW");
+      expect(persisted[1]!.reps).toBe(2);
+      expect(persisted[1]!.lapses).toBe(0);
+      expect(persisted[1]!.dueAt).toBeInstanceOf(Date);
+      expect(persisted[1]!.reviewedAt.getTime()).toBeGreaterThan(persisted[0]!.reviewedAt.getTime());
+    });
+
+    it("3. serializes two simultaneous requests without an idempotencyKey for the same card (GOOD followed by AGAIN -> reps=2, lapses=1, RELEARNING)", async () => {
+      const { persisted } = createSerializedReviewStore();
+
+      const [res1, res2] = await Promise.all([
+        POST(makeRequest({ flashcardId: "card-1", rating: "GOOD" }), {
+          params: { deckId: "deck-1" },
+        }),
+        POST(makeRequest({ flashcardId: "card-1", rating: "AGAIN" }), {
+          params: { deckId: "deck-1" },
+        }),
+      ]);
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+
+      expect(persisted).toHaveLength(2);
+      expect(persisted[0]!.reps).toBe(1);
+      expect(persisted[0]!.lapses).toBe(0);
+      expect(persisted[0]!.state).toBe("REVIEW");
+
+      // Second review sees the committed REVIEW state from first review, so AGAIN increments lapses to 1 and enters RELEARNING
+      expect(persisted[1]!.stateBefore).toBe("REVIEW");
+      expect(persisted[1]!.state).toBe("RELEARNING");
+      expect(persisted[1]!.reps).toBe(2);
+      expect(persisted[1]!.lapses).toBe(1);
+      expect(persisted[1]!.dueAt).toBeInstanceOf(Date);
+    });
+
+    it("4. returns HTTP 409 IDEMPOTENCY_KEY_CONFLICT when the same idempotencyKey is reused with a different flashcardId", async () => {
+      db.flashcard.findFirst.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        deckId: "deck-1",
+        front: "Q",
+        back: "A",
+      }));
+
+      const { persisted } = createSerializedReviewStore();
+
+      const firstRes = await POST(
+        makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "shared-idem-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+      expect(firstRes.status).toBe(200);
+
+      const conflictRes = await POST(
+        makeRequest({ flashcardId: "card-2", rating: "GOOD", idempotencyKey: "shared-idem-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+      expect(conflictRes.status).toBe(409);
+      const conflictJson = await conflictRes.json();
+      expect(conflictJson.code).toBe("IDEMPOTENCY_KEY_CONFLICT");
+      expect(persisted).toHaveLength(1);
+    });
+
+    it("5. returns HTTP 409 IDEMPOTENCY_KEY_CONFLICT when the same idempotencyKey is reused with a different rating or action", async () => {
+      const { persisted } = createSerializedReviewStore();
+
+      const firstRes = await POST(
+        makeRequest({ flashcardId: "card-1", rating: "GOOD", idempotencyKey: "rating-conflict-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+      expect(firstRes.status).toBe(200);
+
+      // Reusing same key with rating: "AGAIN"
+      const diffRatingRes = await POST(
+        makeRequest({ flashcardId: "card-1", rating: "AGAIN", idempotencyKey: "rating-conflict-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+      expect(diffRatingRes.status).toBe(409);
+      const diffRatingJson = await diffRatingRes.json();
+      expect(diffRatingJson.code).toBe("IDEMPOTENCY_KEY_CONFLICT");
+
+      // Reusing same key with action: "SUSPEND"
+      const diffActionRes = await POST(
+        makeRequest({ flashcardId: "card-1", action: "SUSPEND", idempotencyKey: "rating-conflict-key" }),
+        { params: { deckId: "deck-1" } }
+      );
+      expect(diffActionRes.status).toBe(409);
+      const diffActionJson = await diffActionRes.json();
+      expect(diffActionJson.code).toBe("IDEMPOTENCY_KEY_CONFLICT");
+
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]!.rating).toBe("GOOD");
+    });
+
+    it("6. rolls back uncommitted review state on transaction failure so prior card state remains intact", async () => {
+      const { persisted } = createSerializedReviewStore();
+
+      // First review succeeds
+      const okRes = await POST(makeRequest({ flashcardId: "card-1", rating: "GOOD" }), {
+        params: { deckId: "deck-1" },
+      });
+      expect(okRes.status).toBe(200);
+      expect(persisted).toHaveLength(1);
+
+      // Simulate unexpected database failure inside the second transaction
+      db.$transaction!.mockRejectedValueOnce(new Error("Simulated database serialization failure"));
+
+      await expect(
+        POST(makeRequest({ flashcardId: "card-1", rating: "AGAIN" }), {
+          params: { deckId: "deck-1" },
+        })
+      ).rejects.toThrow("Simulated database serialization failure");
+
+      // Persisted state remains at the first committed review
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]!.reps).toBe(1);
+      expect(persisted[0]!.lapses).toBe(0);
+      expect(persisted[0]!.state).toBe("REVIEW");
+    });
   });
 });

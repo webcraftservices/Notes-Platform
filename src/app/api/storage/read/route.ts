@@ -3,7 +3,7 @@ import { getAccessibleMaterialByStorageKey, getSessionUser, NotAuthorizedError }
 import { getStorageService } from "@/lib/services/storage";
 import { LocalStorageService } from "@/lib/services/storage-local";
 import { S3StorageService } from "@/lib/services/storage-s3";
-import { parseRangeHeader, resolveRangeHeader } from "@/lib/http-range";
+import { resolveRangeHeader } from "@/lib/http-range";
 import { jsonError, logServerError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN, INTERNAL_ERROR } from "@/lib/api-response";
 import { isS3NotFoundError } from "@/lib/services/storage-s3";
 
@@ -61,7 +61,14 @@ export async function GET(req: Request) {
     }
 
     const fileSize = stats.size;
-    const range = parseRangeHeader(rangeHeader, fileSize);
+    const resolved = resolveRangeHeader(rangeHeader, fileSize);
+    if (resolved.kind === "unsatisfiable") {
+      return new NextResponse(null, {
+        status: 416,
+        headers: { "Content-Range": `bytes */${fileSize}` },
+      });
+    }
+    const range = resolved.kind === "satisfiable" ? { start: resolved.start, end: resolved.end } : null;
 
     if (range) {
       const { start, end } = range;

@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { getSessionUser, getAccessibleProcessingJob, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleMaterial,
+  getAccessibleProcessingJob,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 
 /**
@@ -17,6 +22,10 @@ export async function GET(_req: Request, { params }: { params: { jobId: string }
   try {
     const job = await getAccessibleProcessingJob(params.jobId, user.id);
     if (!job) return NOT_FOUND();
+    if (job.materialId) {
+      const mat = await getAccessibleMaterial(job.materialId, user.id);
+      if (!mat) return NOT_FOUND();
+    }
     return NextResponse.json({ job });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();

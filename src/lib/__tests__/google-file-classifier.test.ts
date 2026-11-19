@@ -1,46 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { classifyGoogleFile } from "@/lib/google-file-classifier";
+import { classifyGoogleFile } from "../google-file-classifier";
 
 describe("classifyGoogleFile", () => {
-  it("classifies a native Google Doc as google_doc", () => {
-    expect(classifyGoogleFile("application/vnd.google-apps.document")).toEqual({ kind: "google_doc" });
+  it("routes native Google Docs to the Docs export path", () => {
+    expect(classifyGoogleFile("application/vnd.google-apps.document")).toEqual({
+      kind: "google_doc",
+    });
   });
 
-  it("classifies a PDF as the concrete PDF material type", () => {
-    expect(classifyGoogleFile("application/pdf")).toEqual({ kind: "concrete", materialType: "PDF" });
+  it("routes native Google Slides to the native Google Slides v1 parser path (Phase 14)", () => {
+    expect(classifyGoogleFile("application/vnd.google-apps.presentation")).toEqual({
+      kind: "google_slides",
+    });
   });
 
-  it("classifies a plain-text file as the concrete TEXT material type", () => {
-    expect(classifyGoogleFile("text/plain")).toEqual({ kind: "concrete", materialType: "TEXT" });
+  it.each([
+    ["application/pdf", "PDF"],
+    ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "DOCX"],
+    ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "PPTX"],
+    ["text/plain", "TEXT"],
+    ["text/markdown", "TEXT"],
+    ["image/png", "IMAGE"],
+    ["audio/mpeg", "AUDIO"],
+    ["video/mp4", "VIDEO"],
+  ] as const)("maps accepted MIME %s to concrete MaterialType %s", (mimeType, expected) => {
+    expect(classifyGoogleFile(mimeType)).toEqual({
+      kind: "concrete",
+      materialType: expected,
+    });
   });
 
-  it("classifies an image as the concrete IMAGE material type", () => {
-    expect(classifyGoogleFile("image/png")).toEqual({ kind: "concrete", materialType: "IMAGE" });
-  });
-
-  it("classifies audio as the concrete AUDIO material type (transcribable like an upload)", () => {
-    expect(classifyGoogleFile("audio/mpeg")).toEqual({ kind: "concrete", materialType: "AUDIO" });
-  });
-
-  it("marks native Google Sheets as unsupported with a clear reason", () => {
-    const result = classifyGoogleFile("application/vnd.google-apps.spreadsheet");
+  it.each([
+    ["application/vnd.google-apps.spreadsheet", "Google Sheets"],
+    ["application/vnd.google-apps.form", "Google Forms"],
+    ["application/vnd.google-apps.drawing", "Google Drawings"],
+    ["application/vnd.google-apps.folder", "Folders"],
+    ["application/vnd.google-apps.shortcut", "Shortcuts"],
+  ])("rejects unsupported Google-native MIME %s with a specific reason mentioning %s", (mimeType, label) => {
+    const result = classifyGoogleFile(mimeType);
     expect(result.kind).toBe("unsupported");
-    if (result.kind === "unsupported") expect(result.reason).toMatch(/sheets/i);
+    if (result.kind === "unsupported") {
+      expect(result.reason).toContain(label);
+    }
   });
 
-  it("marks native Google Slides as unsupported with a clear reason", () => {
-    const result = classifyGoogleFile("application/vnd.google-apps.presentation");
-    expect(result.kind).toBe("unsupported");
-    if (result.kind === "unsupported") expect(result.reason).toMatch(/slides/i);
-  });
-
-  it("marks folders as unsupported", () => {
-    const result = classifyGoogleFile("application/vnd.google-apps.folder");
-    expect(result.kind).toBe("unsupported");
-  });
-
-  it("falls back to the generic GOOGLE_DRIVE_FILE type for an unrecognized binary MIME type", () => {
-    expect(classifyGoogleFile("application/x-some-unknown-format")).toEqual({
+  it("falls back to GOOGLE_DRIVE_FILE for arbitrary binary MIME types so real bytes still import", () => {
+    expect(classifyGoogleFile("application/zip")).toEqual({
+      kind: "concrete",
+      materialType: "GOOGLE_DRIVE_FILE",
+    });
+    expect(classifyGoogleFile("application/octet-stream")).toEqual({
       kind: "concrete",
       materialType: "GOOGLE_DRIVE_FILE",
     });

@@ -49,7 +49,11 @@ export interface VisionService {
 }
 
 export interface DocumentProcessingService {
-  extractText(input: { storageKey: string; mimeType: string }): Promise<{
+  extractText(input: {
+    storageKey: string;
+    mimeType: string;
+    signal?: AbortSignal;
+  }): Promise<{
     text: string;
     pages?: { pageNumber: number; text: string }[];
   }>;
@@ -80,6 +84,41 @@ export interface AIChatMessage {
   content: string;
 }
 
+export interface NoteGenerationSourceUnitInfo {
+  unitType: "page" | "slide";
+  availableUnits: number[];
+}
+
+export type GenerateNotesInput =
+  | {
+      sourceText: string;
+      sourceType: "transcript" | "document";
+      /** @deprecated legacy alias; ignored when sourceText is provided */
+      transcriptText?: string;
+      templateKind?: "lecture" | "meeting" | "study_guide";
+      sourceUnits?: NoteGenerationSourceUnitInfo;
+    }
+  | {
+      /** @deprecated pass sourceText and sourceType instead */
+      transcriptText: string;
+      sourceText?: string;
+      sourceType?: "transcript";
+      templateKind?: "lecture" | "meeting" | "study_guide";
+      sourceUnits?: NoteGenerationSourceUnitInfo;
+    };
+
+export interface GenerateNotesResult {
+  blocks: {
+    kind: string;
+    heading?: string;
+    content: string;
+    sourcePages?: number[];
+    sourceQuote?: string;
+  }[];
+  tokensInput?: number;
+  tokensOutput?: number;
+}
+
 export interface AIService {
   chat(input: {
     messages: AIChatMessage[];
@@ -87,9 +126,7 @@ export interface AIService {
     stream?: boolean;
   }): Promise<{ content: string; tokensInput: number; tokensOutput: number }>;
 
-  generateNotes(input: { transcriptText: string; templateKind: "lecture" | "meeting" }): Promise<{
-    blocks: { kind: string; heading?: string; content: string }[];
-  }>;
+  generateNotes(input: GenerateNotesInput): Promise<GenerateNotesResult>;
 
   /** Short identifiers used only for AI usage accounting (spec §61 / Phase 5 Task 6) — e.g. "gemini" / "gemini-2.5-flash-lite". Never used for branching logic. */
   readonly providerName: string;
@@ -125,5 +162,36 @@ export class AIProviderUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AIProviderUnavailableError";
+  }
+}
+
+/**
+ * Thrown by an AIService implementation when generation fails due to model response
+ * truncation (e.g. MAX_TOKENS), content safety blocks, recitation checks, or
+ * malformed/invalid structured note output. Preserves reported token usage and
+ * finish reason so failed attempts can still be accounted for without persisting
+ * corrupted note structures.
+ */
+export class AIGenerationFailedError extends Error {
+  readonly tokensInput?: number;
+  readonly tokensOutput?: number;
+  readonly finishReason?: string;
+  readonly isTruncated?: boolean;
+
+  constructor(
+    message: string,
+    options?: {
+      tokensInput?: number;
+      tokensOutput?: number;
+      finishReason?: string;
+      isTruncated?: boolean;
+    }
+  ) {
+    super(message);
+    this.name = "AIGenerationFailedError";
+    this.tokensInput = options?.tokensInput;
+    this.tokensOutput = options?.tokensOutput;
+    this.finishReason = options?.finishReason;
+    this.isTruncated = options?.isTruncated;
   }
 }

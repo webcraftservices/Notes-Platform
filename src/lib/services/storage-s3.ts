@@ -16,6 +16,55 @@ import type { StorageService } from "./storage";
 const S3_METADATA_TIMEOUT_MS = 15_000; // head/delete — tiny requests
 const S3_TRANSFER_TIMEOUT_MS = 10 * 60 * 1000; // whole-object get/put
 
+/**
+ * Composes multiple AbortSignals safely into a single signal.
+ * - Uses native AbortSignal.any() when available (Node 20+).
+ * - Implements a leak-free fallback with one-shot listeners for Node 18 environments.
+ * - Preserves the original abort reason.
+ * - Handles already-aborted signals synchronously before listener registration.
+ */
+export function combineAbortSignals(signals: (AbortSignal | undefined | null)[]): AbortSignal {
+  const activeSignals = signals.filter((s): s is AbortSignal => Boolean(s));
+  if (activeSignals.length === 0) {
+    return new AbortController().signal;
+  }
+  if (activeSignals.length === 1) {
+    return activeSignals[0]!;
+  }
+
+  for (const sig of activeSignals) {
+    if (sig.aborted) {
+      if (typeof AbortSignal.abort === "function") {
+        return AbortSignal.abort(sig.reason);
+      }
+      const c = new AbortController();
+      c.abort(sig.reason);
+      return c.signal;
+    }
+  }
+
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any(activeSignals);
+  }
+
+  const controller = new AbortController();
+  const cleanupFns: (() => void)[] = [];
+
+  const onAbort = (sig: AbortSignal) => {
+    controller.abort(sig.reason);
+    for (const cleanup of cleanupFns) cleanup();
+    cleanupFns.length = 0;
+  };
+
+  for (const sig of activeSignals) {
+    const handler = () => onAbort(sig);
+    sig.addEventListener("abort", handler, { once: true });
+    cleanupFns.push(() => sig.removeEventListener("abort", handler));
+  }
+
+  return controller.signal;
+}
+
 /** True for the "object does not exist" outcome of a HEAD/GET, across AWS S3 and S3-compatible providers. */
 export function isS3NotFoundError(err: unknown): boolean {
   const e = err as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
@@ -116,19 +165,35 @@ export class S3StorageService implements StorageService {
    * (seeking playback, PDF byte-range viewers), use getObjectRange instead
    * — it never buffers more than what was actually requested.
    */
-  async getObjectBuffer(key: string): Promise<Buffer> {
+  async getObjectBuffer(key: string, signal?: AbortSignal): Promise<Buffer> {
+    const timeoutSignal = AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS);
+    const combinedSignal = signal ? combineAbortSignals([signal, timeoutSignal]) : timeoutSignal;
+
+    combinedSignal.throwIfAborted();
+
     const res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), {
-      abortSignal: AbortSignal.timeout(S3_TRANSFER_TIMEOUT_MS),
+      abortSignal: combinedSignal,
     });
     const body = res.Body;
     if (!body) throw new Error(`Object ${key} has no body`);
     const chunks: Uint8Array[] = [];
-    // AWS SDK v3's Body is a web/node ReadableStream depending on runtime;
-    // both expose an async iterator.
-    for await (const chunk of body as AsyncIterable<Uint8Array>) {
-      chunks.push(chunk);
+    try {
+      // AWS SDK v3's Body is a web/node ReadableStream depending on runtime;
+      // both expose an async iterator.
+      for await (const chunk of body as AsyncIterable<Uint8Array>) {
+        combinedSignal.throwIfAborted();
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      if (combinedSignal.aborted && typeof (body as any).destroy === "function") {
+        try {
+          (body as any).destroy();
+        } catch {
+          // ignore stream close errors on aborted exit
+        }
+      }
     }
-    return Buffer.concat(chunks);
   }
 
   /**

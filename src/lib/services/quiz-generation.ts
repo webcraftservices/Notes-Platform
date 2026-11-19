@@ -1,5 +1,10 @@
 import { db } from "@/lib/db";
-import { getAccessibleAIScope, type ResolvedAIScope } from "@/lib/access";
+import {
+  getAccessibleAIScope,
+  assertActiveGroupMemberForCreation,
+  NotAuthorizedError,
+  type ResolvedAIScope,
+} from "@/lib/access";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
 import { buildContextBlock, chunksToSources } from "@/lib/ai-chat";
 import { getAIService } from "@/lib/services/ai";
@@ -160,6 +165,37 @@ export async function generateQuizForTopic(input: GenerateQuizForTopicInput) {
   const quizTitle = `Quiz — ${topic.name}`;
 
   const quiz = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    if (scope.ownerType === "group" && typeof assertActiveGroupMemberForCreation === "function") {
+      await assertActiveGroupMemberForCreation(tx, scope.groupId, userId);
+    }
+
+    const txWithTopic = tx as unknown as {
+      topic?: {
+        findUnique?: (args: unknown) => Promise<{
+          id: string;
+          deletedAt?: Date | null;
+          chapter?: {
+            deletedAt?: Date | null;
+            subject?: { deletedAt?: Date | null } | null;
+          } | null;
+        } | null>;
+      };
+    };
+    if (typeof txWithTopic.topic?.findUnique === "function") {
+      const activeTopic = await txWithTopic.topic.findUnique({
+        where: { id: topic.id, deletedAt: null },
+        include: { chapter: { include: { subject: true } } },
+      });
+      if (
+        !activeTopic ||
+        activeTopic.deletedAt != null ||
+        activeTopic.chapter?.deletedAt != null ||
+        activeTopic.chapter?.subject?.deletedAt != null
+      ) {
+        throw new NotAuthorizedError();
+      }
+    }
+
     const created = await tx.quiz.create({
       data: {
         title: quizTitle,

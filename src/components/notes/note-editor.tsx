@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { nanoid } from "nanoid";
-import { Plus, Loader2 } from "lucide-react";
+import { Plus, Loader2, ExternalLink, RefreshCw, AlertTriangle } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -18,6 +18,7 @@ import { SaveStatusIndicator } from "@/components/notes/save-status-indicator";
 import { VersionHistoryDialog } from "@/components/notes/version-history-dialog";
 import { Button } from "@/components/ui/button";
 import { EMPTY_TIPTAP_DOC } from "@/lib/note-block-style";
+import { toSafeHttpUrl } from "@/lib/safe-url";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -27,6 +28,18 @@ interface ApiBlock {
   heading: string | null;
   content: unknown;
   order: number;
+  metadata?: Record<string, unknown> | null;
+}
+
+interface NoteGoogleDocRefClient {
+  provider: "google_docs";
+  documentId: string;
+  webViewLink: string | null;
+  revisionId: string | null;
+  modifiedTime: string | null;
+  lastSyncedAt: string;
+  syncStatus: "SYNCED" | "CONFLICT" | "ERROR" | "REMOTE_DELETED";
+  lastSyncError: string | null;
 }
 
 function toLocal(blocks: ApiBlock[]): LocalBlock[] {
@@ -39,6 +52,7 @@ function toLocal(blocks: ApiBlock[]): LocalBlock[] {
       heading: b.heading,
       content: (b.content ?? EMPTY_TIPTAP_DOC) as Record<string, unknown>,
       order: b.order,
+      metadata: b.metadata ?? null,
     }));
 }
 
@@ -46,22 +60,34 @@ export function NoteEditor({ topicId }: { topicId: string }) {
   const [noteId, setNoteId] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<LocalBlock[] | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [googleRef, setGoogleRef] = useState<NoteGoogleDocRefClient | null>(null);
+  const [googleSyncing, setGoogleSyncing] = useState(false);
   const blocksRef = useRef<LocalBlock[]>([]);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
-  useEffect(() => {
-    fetch(`/api/topics/${topicId}/note`)
-      .then((r) => r.json())
-      .then((d) => {
-        setNoteId(d.note.id);
-        const local = toLocal(d.note.blocks);
-        setBlocks(local);
-        blocksRef.current = local;
-      })
-      .catch(() => toast.error("Couldn't load notes for this topic."));
+  const loadTopicNote = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/topics/${topicId}/note`);
+      const d = await r.json();
+      setNoteId(d.note.id);
+      const local = toLocal(d.note.blocks);
+      setBlocks(local);
+      blocksRef.current = local;
+      if (d.note.externalRef?.provider === "google_docs") {
+        setGoogleRef(d.note.externalRef as NoteGoogleDocRefClient);
+      } else {
+        setGoogleRef(null);
+      }
+    } catch {
+      toast.error("Couldn't load notes for this topic.");
+    }
   }, [topicId]);
+
+  useEffect(() => {
+    void loadTopicNote();
+  }, [loadTopicNote]);
 
   const performSave = useCallback(
     async (explicit = false) => {
@@ -88,6 +114,58 @@ export function NoteEditor({ topicId }: { topicId: string }) {
     },
     [noteId]
   );
+
+  async function handleGoogleSync(options?: {
+    direction?: "auto" | "push" | "pull";
+    forceResolution?: "keep_local" | "accept_remote";
+  }) {
+    if (!noteId) return;
+    setGoogleSyncing(true);
+    try {
+      // Flush any pending local edits before exporting/syncing.
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+        await performSave(false);
+      }
+
+      const res = await fetch(`/api/notes/${noteId}/google-sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options ?? { direction: "auto" }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 409 && data?.status === "conflict") {
+        setGoogleRef(data.externalRef ?? null);
+        toast.warning(
+          "Sync conflict detected: both Zenote and Google Docs changed. Choose which version to keep."
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        toast.error(data?.error ?? "Google Docs synchronization failed.");
+        return;
+      }
+
+      setGoogleRef(data.externalRef ?? null);
+      if (data.status === "exported") {
+        toast.success("Note exported to Google Docs");
+      } else if (data.status === "pushed") {
+        toast.success("Changes pushed to Google Docs");
+      } else if (data.status === "pulled") {
+        toast.success("Updated from Google Docs");
+        await loadTopicNote();
+      } else if (data.status === "unchanged") {
+        toast.success("Google Doc is already up to date");
+      } else if (data.status === "remote_deleted") {
+        toast.error("The linked Google Doc was deleted in Google Drive.");
+      }
+    } finally {
+      setGoogleSyncing(false);
+    }
+  }
 
   const scheduleSave = useCallback(() => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
@@ -151,9 +229,32 @@ export function NoteEditor({ topicId }: { topicId: string }) {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <SaveStatusIndicator status={saveStatus} />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {(() => {
+            const safeGoogleLink = toSafeHttpUrl(googleRef?.webViewLink);
+            return safeGoogleLink ? (
+              <a
+                href={safeGoogleLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+              >
+                Open in Google Docs
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            ) : null;
+          })()}
+          <Button
+            variant="secondary"
+            className="px-2.5 py-1 text-xs"
+            loading={googleSyncing}
+            onClick={() => handleGoogleSync({ direction: "auto" })}
+          >
+            <RefreshCw className="h-3 w-3" />
+            {googleRef ? "Sync with Google Docs" : "Export to Google Docs"}
+          </Button>
           <VersionHistoryDialog noteId={noteId} onRestore={handleRestore} />
           <button
             onClick={() => performSave(true)}
@@ -163,6 +264,36 @@ export function NoteEditor({ topicId }: { topicId: string }) {
           </button>
         </div>
       </div>
+
+      {googleRef?.syncStatus === "CONFLICT" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {googleRef.lastSyncError ??
+                "Both this Zenote note and the linked Google Doc were modified since the last sync."}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              className="px-2.5 py-1 text-xs"
+              loading={googleSyncing}
+              onClick={() => handleGoogleSync({ forceResolution: "keep_local" })}
+            >
+              Keep Zenote version
+            </Button>
+            <Button
+              variant="secondary"
+              className="px-2.5 py-1 text-xs"
+              loading={googleSyncing}
+              onClick={() => handleGoogleSync({ forceResolution: "accept_remote" })}
+            >
+              Accept Google Doc version
+            </Button>
+          </div>
+        </div>
+      )}
 
       {blocks.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line px-6 py-14 text-center dark:border-line-dark">

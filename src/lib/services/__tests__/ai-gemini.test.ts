@@ -11,7 +11,10 @@ function fakeClient(generateContent: (params: GenerateContentParameters) => Prom
 }
 
 function fakeResponse(overrides: Partial<GenerateContentResponse> & { text?: string }): GenerateContentResponse {
-  return overrides as GenerateContentResponse;
+  return {
+    candidates: [{ finishReason: "STOP" as any }],
+    ...overrides,
+  } as GenerateContentResponse;
 }
 
 describe("GeminiAIService", () => {
@@ -220,7 +223,9 @@ describe("GeminiAIService.generateNotes", () => {
   });
 
   it("requests JSON output with a schema, and includes the hallucination-control instruction", async () => {
-    const generateContent = vi.fn().mockResolvedValue(fakeResponse({ text: "[]", usageMetadata: {} }));
+    const generateContent = vi.fn().mockResolvedValue(
+      fakeResponse({ text: JSON.stringify([{ kind: "SUMMARY", content: "Meeting summary." }]), usageMetadata: {} })
+    );
     const service = new GeminiAIService(fakeClient(generateContent));
 
     await service.generateNotes({ transcriptText: "transcript text", templateKind: "meeting" });
@@ -259,6 +264,457 @@ describe("GeminiAIService.generateNotes", () => {
     const service = new GeminiAIService(fakeClient(generateContent));
 
     await expect(service.generateNotes({ transcriptText: "t", templateKind: "lecture" })).rejects.toThrow(/empty response/i);
+  });
+
+  describe("Source unit attribution and validation", () => {
+    it("includes explicit source attribution instructions in prompt when sourceUnits is provided", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "OVERVIEW", content: "Overview content", sourcePageNumbers: [1] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      await service.generateNotes({
+        sourceText: "--- Page 1 ---\nContent on page 1\n\n--- Page 2 ---\nContent on page 2",
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1, 2] },
+      });
+
+      const params = generateContent.mock.calls[0]![0] as GenerateContentParameters;
+      const promptText = (params.contents as Array<{ parts: Array<{ text: string }> }>)[0]?.parts[0]?.text;
+      expect(promptText).toContain("Source attribution instructions:");
+      expect(promptText).toContain('labeled "--- Page <number> ---"');
+      expect(promptText).toContain("Available page numbers: 1, 2");
+      expect(promptText).toContain('"sourcePageNumbers"');
+    });
+
+    it("validates and attaches valid sourcePageNumbers returned by Gemini", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "OVERVIEW", heading: "First", content: "Page 1 content", sourcePageNumbers: [1] },
+            { kind: "APPLICATION", heading: "Multi", content: "Spans 1 and 2", sourcePageNumbers: [1, 2] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "--- Slide 1 ---\nSlide 1\n\n--- Slide 2 ---\nSlide 2",
+        sourceType: "document",
+        sourceUnits: { unitType: "slide", availableUnits: [1, 2] },
+      });
+
+      expect(res.blocks).toEqual([
+        { kind: "OVERVIEW", heading: "First", content: "Page 1 content", sourcePages: [1] },
+        { kind: "APPLICATION", heading: "Multi", content: "Spans 1 and 2", sourcePages: [1, 2] },
+      ]);
+    });
+
+    it("deduplicates and sorts sourcePageNumbers ascending", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "CORE_CONCEPT", content: "Concept", sourcePageNumbers: [3, 1, 3] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "--- Page 1 ---\n1\n\n--- Page 2 ---\n2\n\n--- Page 3 ---\n3",
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1, 2, 3] },
+      });
+
+      expect(res.blocks[0]?.sourcePages).toEqual([1, 3]);
+    });
+
+    it("filters out out-of-range, negative, or non-integer page numbers", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "DEFINITION", content: "Def", sourcePageNumbers: [2, 999, -1, 1.5] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "--- Page 1 ---\n1\n\n--- Page 2 ---\n2",
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1, 2] },
+      });
+
+      expect(res.blocks[0]?.sourcePages).toEqual([2]);
+    });
+
+    it("omits sourcePages when all returned page numbers are invalid or out-of-range", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "SUMMARY", content: "Summary", sourcePageNumbers: [999, -5] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "--- Page 1 ---\n1",
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1] },
+      });
+
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+    });
+
+    it("omits sourcePages when Gemini returns no sourcePageNumbers or an empty array", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "SUMMARY", content: "Summary without pages" },
+            { kind: "OVERVIEW", content: "Overview with empty array", sourcePageNumbers: [] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "--- Page 1 ---\n1",
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1] },
+      });
+
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+      expect(res.blocks[1]?.sourcePages).toBeUndefined();
+    });
+
+    it("discards model-generated sourcePageNumbers when sourceUnits was not supplied (e.g. DOCX)", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            { kind: "OVERVIEW", content: "Docx overview", sourcePageNumbers: [1, 2] },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: "DOCX text with no page units.",
+        sourceType: "document",
+      });
+
+      // Model returned [1, 2], but since no sourceUnits were provided, attribution is safely discarded
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+
+      const params = generateContent.mock.calls[0]![0] as GenerateContentParameters;
+      const promptText = (params.contents as Array<{ parts: Array<{ text: string }> }>)[0]?.parts[0]?.text;
+      expect(promptText).not.toContain("Source attribution instructions:");
+    });
+  });
+
+  describe("Phase 11.3.5C: Source Grounding and Adversarial Citation Verification", () => {
+    const multiPageSourceText = [
+      "--- Page 1 ---",
+      "Photosynthesis converts light energy into chemical energy within chloroplasts.",
+      "",
+      "--- Page 2 ---",
+      "Cellular respiration breaks down glucose to produce ATP in the mitochondria.",
+      "",
+      "--- Page 3 ---",
+      "DNA replication occurs in the five prime to three prime direction via DNA polymerase.",
+      "",
+      "--- Page 4 ---",
+      "Mitosis consists of prophase metaphase anaphase and telophase.",
+    ].join("\n");
+
+    const sourceUnits = { unitType: "page" as const, availableUnits: [1, 2, 3, 4] };
+
+    it("verifies grounding when block references a page with an authentic verbatim sourceQuote", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "DEFINITION",
+              content: "Respiration creates ATP in mitochondria.",
+              sourcePageNumbers: [2],
+              sourceQuote: "produce ATP in the mitochondria",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      expect(res.blocks[0]?.sourcePages).toEqual([2]);
+      expect(res.blocks[0]?.sourceQuote).toBe("produce ATP in the mitochondria");
+    });
+
+    it("fails closed and drops sourcePages when block references Page 4 but quotes text from Page 2 (cross-page misattribution)", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "DEFINITION",
+              content: "Respiration creates ATP in mitochondria.",
+              sourcePageNumbers: [4], // Adversarial: citations point to page 4
+              sourceQuote: "produce ATP in the mitochondria", // Quote is actually from page 2
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      // Grounding check failed on Page 4 because Page 4 does not contain the quote.
+      // Must drop sourcePages and must NOT silently reassign to Page 2.
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+      expect(res.blocks[0]?.sourceQuote).toBeUndefined();
+      expect(res.blocks[0]?.content).toBe("Respiration creates ATP in mitochondria.");
+    });
+
+    it("fails closed and drops sourcePages when block provides a completely fabricated quotation not in the document", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "DEFINITION",
+              content: "Mitochondria fly in outer space.",
+              sourcePageNumbers: [2],
+              sourceQuote: "mitochondria fly through quantum portals",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+    });
+
+    it("filters multi-page references to only those pages where the quotation actually appears", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "EXPLANATION",
+              content: "Energy processes in cells.",
+              sourcePageNumbers: [2, 4], // Cites 2 and 4, but quote is only in 2
+              sourceQuote: "Cellular respiration breaks down glucose",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      // Retains only page 2, excludes page 4
+      expect(res.blocks[0]?.sourcePages).toEqual([2]);
+    });
+
+    it("retains multi-page references when quotation appears across cited units", async () => {
+      const multiSource = [
+        "--- Page 1 ---",
+        "ATP is produced in stage one.",
+        "",
+        "--- Page 2 ---",
+        "ATP is produced in stage two.",
+      ].join("\n");
+
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "SUMMARY",
+              content: "ATP synthesis across stages.",
+              sourcePageNumbers: [1, 2],
+              sourceQuote: "ATP is produced",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiSource,
+        sourceType: "document",
+        sourceUnits: { unitType: "page", availableUnits: [1, 2] },
+      });
+
+      expect(res.blocks[0]?.sourcePages).toEqual([1, 2]);
+    });
+
+    it("preserves valid in-range reference under structural membership validation when no quote is supplied", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "OVERVIEW",
+              content: "Overview of cell biology.",
+              sourcePageNumbers: [3],
+              // sourceQuote omitted
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      // Structural membership succeeds because 3 is in [1, 2, 3, 4]
+      expect(res.blocks[0]?.sourcePages).toEqual([3]);
+    });
+
+    it("accepts block with empty sourcePageNumbers as an unattributed summary block", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "SUMMARY",
+              content: "High level summary of the entire chapter.",
+              sourcePageNumbers: [],
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+      expect(res.blocks[0]?.content).toBe("High level summary of the entire chapter.");
+    });
+
+    it("rejects out-of-range reference (e.g. Page 99) regardless of quotation", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "DEFINITION",
+              content: "Photosynthesis def.",
+              sourcePageNumbers: [99],
+              sourceQuote: "Photosynthesis converts light energy",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+    });
+
+    it("accepts citation when block content is semantically unrelated to the page but sourceQuote is genuinely present on that page (lexical presence vs semantic entailment)", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "DEFINITION",
+              // Content is completely fabricated / unrelated to biology on Page 2
+              content: "Quantum gravity fluctuations generate electromagnetic anomalies.",
+              sourcePageNumbers: [2],
+              // Quote is genuinely present on Page 2
+              sourceQuote: "produce ATP in the mitochondria",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      // The citation is accepted because "produce ATP in the mitochondria" is lexically present on Page 2.
+      // This proves that quotation matching verifies lexical presence on the page, not semantic entailment
+      // or factual accuracy of the block's text.
+      expect(res.blocks[0]?.sourcePages).toEqual([2]);
+      expect(res.blocks[0]?.sourceQuote).toBe("produce ATP in the mitochondria");
+      expect(res.blocks[0]?.content).toBe("Quantum gravity fluctuations generate electromagnetic anomalies.");
+    });
+
+    it("fails closed and drops sourcePages when a quotation spans across the boundary of two consecutive pages so neither page independently contains it", async () => {
+      const generateContent = vi.fn().mockResolvedValue(
+        fakeResponse({
+          candidates: [{ finishReason: "STOP" as any }],
+          text: JSON.stringify([
+            {
+              kind: "EXPLANATION",
+              content: "Coupled cellular bioenergetics.",
+              sourcePageNumbers: [1, 2],
+              // Quote straddles Page 1 and Page 2 boundary:
+              sourceQuote: "within chloroplasts Cellular respiration breaks down",
+            },
+          ]),
+        })
+      );
+      const service = new GeminiAIService(fakeClient(generateContent));
+
+      const res = await service.generateNotes({
+        sourceText: multiPageSourceText,
+        sourceType: "document",
+        sourceUnits,
+      });
+
+      // Neither Page 1 nor Page 2 independently contains the complete cross-page quotation string.
+      // The implementation ensures it does NOT falsely claim both pages (or either page) are grounded;
+      // it fails closed and discards sourcePages.
+      expect(res.blocks[0]?.sourcePages).toBeUndefined();
+    });
   });
 });
 

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
+  $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
+  groupMember: { findFirst: vi.fn() },
   aIConversation: { findFirst: vi.fn(), create: vi.fn() },
 }));
 
@@ -9,10 +12,18 @@ vi.mock("@/lib/db", () => ({ db }));
 const access = vi.hoisted(() => ({
   getSessionUser: vi.fn(),
   getAccessibleAIScope: vi.fn(),
-  NotAuthorizedError: class NotAuthorizedError extends Error {},
 }));
 
-vi.mock("@/lib/access", () => access);
+vi.mock("@/lib/access", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/access")>();
+  return {
+    ...actual,
+    getSessionUser: access.getSessionUser,
+    getAccessibleAIScope: access.getAccessibleAIScope,
+  };
+});
+
+import { NotAuthorizedError } from "@/lib/access";
 
 const quotaModule = vi.hoisted(() => {
   class AITutorNotEnabledError extends Error {
@@ -111,7 +122,7 @@ describe("GET /api/ai/conversations", () => {
   });
 
   it("A. TUTOR creation requires valid Topic authorization — an inaccessible Topic is rejected before any conversation is touched", async () => {
-    access.getAccessibleAIScope.mockRejectedValue(new access.NotAuthorizedError());
+    access.getAccessibleAIScope.mockRejectedValue(new NotAuthorizedError());
 
     const res = await GET(makeGetRequest("topicId=cktopic0000000000000000000&kind=TUTOR"));
 
@@ -201,7 +212,7 @@ describe("POST /api/ai/conversations", () => {
   });
 
   it("returns 403 when the underlying Topic isn't accessible, and never creates a conversation", async () => {
-    access.getAccessibleAIScope.mockRejectedValue(new access.NotAuthorizedError());
+    access.getAccessibleAIScope.mockRejectedValue(new NotAuthorizedError());
 
     const res = await POST(makePostRequest({ topicId: "cktopic0000000000000000000", kind: "TUTOR" }));
 
@@ -219,6 +230,53 @@ describe("POST /api/ai/conversations", () => {
 
     expect(res.status).toBe(403);
     expect(json.code).toBe("AI_TUTOR_NOT_ENABLED");
+    expect(db.aIConversation.create).not.toHaveBeenCalled();
+  });
+
+  it("serializes group-scoped conversation creation with FOR SHARE inside $transaction", async () => {
+    access.getAccessibleAIScope.mockResolvedValue({
+      ownerType: "group",
+      workspaceId: null,
+      groupId: "grp-1",
+      subjectId: "subj-1",
+      chapterId: null,
+      topicId: null,
+    });
+    db.$transaction.mockImplementation(async (cb: (tx: typeof db) => Promise<unknown>) => cb(db));
+    db.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("?") : String(strings);
+      if (sql.includes('FROM "GroupMember"')) {
+        return [{ id: "gm-1", groupId: "grp-1", userId: "user-1", role: "MEMBER", joinedAt: new Date() }];
+      }
+      return [{ id: "grp-1", deletedAt: null }];
+    });
+    db.aIConversation.create.mockResolvedValue({ id: "conv-grp", kind: "CHAT", messages: [] });
+
+    const res = await POST(makePostRequest({ subjectId: "cksubj00000000000000000000" }));
+    expect(res.status).toBe(201);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(db.aIConversation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ userId: "user-1", subjectId: "subj-1", groupId: null }),
+      })
+    );
+  });
+
+  it("aborts group-scoped conversation creation cleanly when FOR SHARE sees deletedAt !== null", async () => {
+    access.getAccessibleAIScope.mockResolvedValue({
+      ownerType: "group",
+      workspaceId: null,
+      groupId: "grp-1",
+      subjectId: null,
+      chapterId: null,
+      topicId: null,
+    });
+    db.$transaction.mockImplementation(async (cb: (tx: typeof db) => Promise<unknown>) => cb(db));
+    db.$queryRaw.mockResolvedValue([{ id: "grp-1", deletedAt: new Date() }]);
+
+    const res = await POST(makePostRequest({ groupId: "ckgrp000000000000000000000" }));
+    expect(res.status).toBe(403);
     expect(db.aIConversation.create).not.toHaveBeenCalled();
   });
 });

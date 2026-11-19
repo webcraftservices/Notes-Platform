@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import type { UploadScope } from "@/lib/hooks/use-material-upload";
+import { toSafeHttpUrl } from "@/lib/safe-url";
 
 interface DriveFile {
   id: string;
@@ -226,17 +227,20 @@ export function GoogleDriveBrowser({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {file.webViewLink && (
-                  <a
-                    href={file.webViewLink}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-ink-faint hover:text-ink dark:hover:text-white"
-                    title="Open in Google Drive"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
+                {(() => {
+                  const safeLink = toSafeHttpUrl(file.webViewLink);
+                  return safeLink ? (
+                    <a
+                      href={safeLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-ink-faint hover:text-ink dark:hover:text-white"
+                      title="Open in Google Drive"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  ) : null;
+                })()}
                 {file.supported ? (
                   <Button
                     variant="secondary"

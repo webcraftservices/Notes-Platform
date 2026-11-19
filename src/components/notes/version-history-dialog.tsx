@@ -42,13 +42,23 @@ export function VersionHistoryDialog({
       }
       const { blocks } = await res.json();
       onRestore(
-        blocks.map((b: { id: string; kind: string; heading: string | null; content: unknown; order: number }) => ({
-          id: b.id,
-          kind: b.kind,
-          heading: b.heading,
-          content: b.content,
-          order: b.order,
-        }))
+        blocks.map(
+          (b: {
+            id: string;
+            kind: string;
+            heading: string | null;
+            content: unknown;
+            order: number;
+            metadata?: unknown;
+          }) => ({
+            id: b.id,
+            kind: b.kind,
+            heading: b.heading,
+            content: b.content,
+            order: b.order,
+            metadata: (b.metadata as Record<string, unknown>) ?? null,
+          })
+        )
       );
       toast.success("Version restored");
       setOpen(false);

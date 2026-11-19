@@ -16,6 +16,9 @@ vi.mock("@/lib/transcription", () => runner);
 const rl = vi.hoisted(() => ({ rateLimit: vi.fn() }));
 vi.mock("@/lib/rate-limit", () => rl);
 
+const recordingUsage = vi.hoisted(() => ({ getRecordingUsage: vi.fn() }));
+vi.mock("@/lib/recording-usage", () => recordingUsage);
+
 vi.mock("@/lib/observability/datadog", () => ({ sendDatadogMetric: vi.fn(), sendDatadogLog: vi.fn() }));
 
 import { POST } from "@/app/api/materials/[materialId]/transcribe/route";
@@ -31,6 +34,7 @@ describe("POST /api/materials/[id]/transcribe", () => {
     access.getSessionUser.mockResolvedValue({ id: "user-1" });
     access.getAccessibleMaterial.mockResolvedValue({ id: "mat-1", type: "AUDIO", status: "READY" });
     rl.rateLimit.mockResolvedValue({ success: true, remaining: 9 });
+    recordingUsage.getRecordingUsage.mockResolvedValue({ remainingSeconds: 600 });
     jobs.createJobIfNoneActive.mockResolvedValue({ job: { id: "job-1" }, created: true });
   });
 
@@ -78,5 +82,26 @@ describe("POST /api/materials/[id]/transcribe", () => {
     expect((await call()).status).toBe(409);
 
     expect(jobs.createJobIfNoneActive).not.toHaveBeenCalled();
+  });
+
+  it("enforces monthly recording/transcription minute quota before queuing a paid transcription job", async () => {
+    recordingUsage.getRecordingUsage.mockResolvedValueOnce({ remainingSeconds: 0 });
+    const resZero = await call();
+    expect(resZero.status).toBe(429);
+    expect((await resZero.json()).code).toBe("RECORDING_QUOTA_EXCEEDED");
+
+    access.getAccessibleMaterial.mockResolvedValueOnce({
+      id: "mat-1",
+      type: "AUDIO",
+      status: "READY",
+      durationSeconds: 300,
+    });
+    recordingUsage.getRecordingUsage.mockResolvedValueOnce({ remainingSeconds: 120 });
+    const resTooLong = await call();
+    expect(resTooLong.status).toBe(429);
+    expect((await resTooLong.json()).code).toBe("RECORDING_QUOTA_EXCEEDED");
+
+    expect(jobs.createJobIfNoneActive).not.toHaveBeenCalled();
+    expect(runner.runTranscriptionJob).not.toHaveBeenCalled();
   });
 });

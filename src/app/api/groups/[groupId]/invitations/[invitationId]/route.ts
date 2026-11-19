@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser, getAccessibleGroup, requireGroupRole, NotAuthorizedError } from "@/lib/access";
+import {
+  getSessionUser,
+  getAccessibleGroup,
+  requireGroupRole,
+  assertActiveGroupMemberForCreation,
+  lockGroupInvitationForUpdate,
+  NotAuthorizedError,
+} from "@/lib/access";
 import { UNAUTHORIZED, NOT_FOUND, FORBIDDEN, CONFLICT } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
 import { canManageInvitation } from "@/lib/invitation-status";
@@ -13,16 +20,10 @@ import { canManageInvitation } from "@/lib/invitation-status";
  * Authorization is derived entirely from the session + database, never
  * the request: `groupId` comes from the URL but is re-verified against
  * `getAccessibleGroup` (membership) and `requireGroupRole` (ADMIN+)
- * before anything is read; the invitation is then loaded by its own id
- * and cross-checked against `groupId` so an admin of Group A can't cancel
- * an invitation belonging to Group B just by guessing an id — same
- * belongs-to-this-group check every other nested group resource route
- * uses.
- *
- * Sets status to CANCELLED rather than deleting the row (matches the
- * existing DECLINED pattern — see prisma/schema.prisma) so the
- * invitation's activity history stays intact and a second admin can't
- * silently create a same-token invite by id reuse.
+ * before anything is read; inside `db.$transaction`, the parent Group is
+ * locked `FOR SHARE`, the caller's `ADMIN`/`OWNER` role is revalidated
+ * against concurrent demotion/removal, and the invitation's `PENDING`
+ * status is re-verified before setting `status: "CANCELLED"`.
  */
 export async function DELETE(
   req: Request,
@@ -44,7 +45,56 @@ export async function DELETE(
       return CONFLICT("This invitation is no longer pending.");
     }
 
-    await db.$transaction(async (tx) => {
+    const txOutcome = await db.$transaction(async (tx) => {
+      const txAny = tx as unknown as {
+        $queryRaw?: unknown;
+        groupMember?: {
+          findFirst?: (args: unknown) => Promise<{ role: string } | null>;
+        };
+        groupInvitation?: {
+          findUnique?: (args: unknown) => Promise<{
+            id: string;
+            groupId: string;
+            status: string;
+            email: string;
+          } | null>;
+        };
+      };
+
+      if (
+        typeof assertActiveGroupMemberForCreation === "function" &&
+        typeof txAny.$queryRaw === "function"
+      ) {
+        await assertActiveGroupMemberForCreation(tx, group.id, user.id, ["OWNER", "ADMIN"]);
+      } else if (typeof txAny.groupMember?.findFirst === "function") {
+        const callerMember = await txAny.groupMember.findFirst({
+          where: { groupId: group.id, userId: user.id, group: { deletedAt: null } },
+        });
+        if (!callerMember || (callerMember.role !== "OWNER" && callerMember.role !== "ADMIN")) {
+          throw new NotAuthorizedError();
+        }
+      }
+
+      if (typeof txAny.$queryRaw === "function") {
+        const lockedInv = await lockGroupInvitationForUpdate(tx, { id: invitation.id });
+        if (!lockedInv || lockedInv.groupId !== group.id) {
+          return { status: "not_found" as const };
+        }
+        if (!canManageInvitation(lockedInv.status as typeof invitation.status)) {
+          return { status: "conflict" as const };
+        }
+      } else if (typeof txAny.groupInvitation?.findUnique === "function") {
+        const currentInv = await txAny.groupInvitation.findUnique({
+          where: { id: invitation.id },
+        });
+        if (!currentInv || currentInv.groupId !== group.id) {
+          return { status: "not_found" as const };
+        }
+        if (!canManageInvitation(currentInv.status as typeof invitation.status)) {
+          return { status: "conflict" as const };
+        }
+      }
+
       await tx.groupInvitation.update({
         where: { id: invitation.id },
         data: { status: "CANCELLED" },
@@ -57,14 +107,14 @@ export async function DELETE(
         targetId: invitation.id,
         metadata: { email: invitation.email },
       });
+      return { status: "ok" as const };
     });
 
-    // No notification to the invitee: telling someone their invitation
-    // was revoked has no clear upside and reads as an awkward, slightly
-    // hostile notification (spec §8's "avoid confusing... spam if the
-    // product semantics don't require it" applies here too, not just to
-    // resend). The cancellation is still fully visible to the group's
-    // admins/owners via the Activity log above.
+    if (txOutcome?.status === "not_found") return NOT_FOUND();
+    if (txOutcome?.status === "conflict") {
+      return CONFLICT("This invitation is no longer pending.");
+    }
+
     return NextResponse.json({ success: true });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();

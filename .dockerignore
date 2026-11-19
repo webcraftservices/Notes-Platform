@@ -1,0 +1,39 @@
+# Environment files & secrets (NEVER include in Docker build context)
+.env
+.env.*
+
+# Dependencies & build artifacts
+node_modules
+.next
+dist
+build
+coverage
+tsconfig.tsbuildinfo
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local runtime & developer caches
+.git
+.gitignore
+.storage
+.chrome-test-profile
+.vscode
+.agents
+.DS_Store
+
+# Documentation & standalone test suites
+docs
+tests
+**/*.test.ts
+**/*.test.tsx
+vitest.config.ts
+ARCHITECTURE.md
+CLAUDE.md
+PROJECT.md
+PROJECT_STATE.md
+README.md
+TEST_INFRA.md
+TEST_READY.md
+

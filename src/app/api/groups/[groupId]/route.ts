@@ -5,6 +5,7 @@ import {
   getAccessibleGroup,
   getGroupRole,
   requireGroupRole,
+  assertActiveGroupMemberForCreation,
   lockGroupForUpdate,
   NotAuthorizedError,
 } from "@/lib/access";
@@ -12,6 +13,7 @@ import { updateGroupSchema } from "@/lib/validation/groups";
 import { zodError, UNAUTHORIZED, NOT_FOUND, FORBIDDEN } from "@/lib/api-response";
 import { ActivityAction, createActivityLog } from "@/lib/activity";
 import { createNotifications } from "@/lib/notifications";
+import { cancelActiveDocumentExtractionForMaterial } from "@/lib/document-extraction";
 
 export async function GET(_req: Request, { params }: { params: { groupId: string } }) {
   const user = await getSessionUser();
@@ -47,10 +49,42 @@ export async function PATCH(req: Request, { params }: { params: { groupId: strin
     if (!existing) return NOT_FOUND();
     await requireGroupRole(params.groupId, user.id, "ADMIN");
 
-    const group = await db.group.update({
-      where: { id: params.groupId },
-      data: parsed.data,
-    });
+    const dbWithTx = db as unknown as {
+      $transaction?: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T>;
+    };
+    const updateInClient = async (client: typeof db) => {
+      const txAny = client as unknown as {
+        $queryRaw?: unknown;
+        groupMember?: {
+          findFirst?: (args: unknown) => Promise<{ role: string } | null>;
+        };
+      };
+      if (
+        typeof assertActiveGroupMemberForCreation === "function" &&
+        typeof txAny.$queryRaw === "function"
+      ) {
+        await assertActiveGroupMemberForCreation(client as never, params.groupId, user.id, [
+          "ADMIN",
+          "OWNER",
+        ]);
+      } else if (typeof txAny.groupMember?.findFirst === "function") {
+        const callerMember = await txAny.groupMember.findFirst({
+          where: { groupId: params.groupId, userId: user.id, group: { deletedAt: null } },
+        });
+        if (!callerMember || (callerMember.role !== "OWNER" && callerMember.role !== "ADMIN")) {
+          throw new NotAuthorizedError();
+        }
+      }
+      return client.group.update({
+        where: { id: params.groupId },
+        data: parsed.data,
+      });
+    };
+
+    const group =
+      typeof dbWithTx.$transaction === "function"
+        ? await dbWithTx.$transaction((tx) => updateInClient((tx ?? db) as typeof db))
+        : await updateInClient(db);
     return NextResponse.json({ group });
   } catch (err) {
     if (err instanceof NotAuthorizedError) return FORBIDDEN();
@@ -137,13 +171,28 @@ export async function DELETE(_req: Request, { params }: { params: { groupId: str
         data: { deletedAt: now },
       });
 
+      const groupMaterials = typeof tx.material?.findMany === "function"
+        ? await tx.material.findMany({
+            where: { groupId: group.id, deletedAt: null },
+            select: { id: true },
+          })
+        : [];
+
       await tx.material.updateMany({
         where: { groupId: group.id, deletedAt: null },
         data: { deletedAt: now },
       });
 
       await tx.aIConversation.updateMany({
-        where: { groupId: group.id, deletedAt: null },
+        where: {
+          deletedAt: null,
+          OR: [
+            { groupId: group.id },
+            { subject: { groupId: group.id } },
+            { chapter: { subject: { groupId: group.id } } },
+            { topic: { chapter: { subject: { groupId: group.id } } } },
+          ],
+        },
         data: { deletedAt: now },
       });
 
@@ -180,11 +229,18 @@ export async function DELETE(_req: Request, { params }: { params: { groupId: str
         });
       }
 
-      return { status: "success" as const };
+      return {
+        status: "success" as const,
+        materialIds: (groupMaterials ?? []).map((m) => m.id),
+      };
     });
 
     if (result.status === "not_found") return NOT_FOUND();
     if (result.status === "forbidden") return FORBIDDEN();
+
+    for (const matId of result.materialIds ?? []) {
+      cancelActiveDocumentExtractionForMaterial(matId, "Parent group was deleted.");
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

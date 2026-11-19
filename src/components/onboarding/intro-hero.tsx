@@ -7,8 +7,9 @@ import { ArrowRight, Download } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ShineBorder } from "@/registry/magicui/shine-border";
+import { toSafeHttpUrl } from "@/lib/safe-url";
 
-const DOWNLOAD_URL = process.env.NEXT_PUBLIC_ZENOTE_DOWNLOAD_URL?.trim() || null;
+const DOWNLOAD_URL = toSafeHttpUrl(process.env.NEXT_PUBLIC_ZENOTE_DOWNLOAD_URL);
 const EASE = [0.25, 0.1, 0.25, 1.0] as const;
 
 export function IntroHero() {

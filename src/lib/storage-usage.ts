@@ -16,7 +16,11 @@ export async function getStorageUsage(userId: string) {
     }),
   ]);
 
-  const plan = getPlanLimits(subscription?.plan ?? "FREE");
+  const effectiveTier =
+    !subscription || subscription.status === "CANCELLED"
+      ? "FREE"
+      : (subscription.plan ?? "FREE");
+  const plan = getPlanLimits(effectiveTier);
   const usedBytes = aggregate._sum.sizeBytes ?? 0;
 
   return {

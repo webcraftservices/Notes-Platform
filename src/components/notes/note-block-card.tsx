@@ -17,6 +17,35 @@ export interface LocalBlock {
   heading: string | null;
   content: Record<string, unknown>;
   order: number;
+  metadata?: Record<string, unknown> | null;
+}
+
+function formatSourceAttribution(meta: Record<string, unknown> | null | undefined): string | null {
+  if (!meta) return null;
+  const unitType = typeof meta.sourceUnitType === "string" ? meta.sourceUnitType : null;
+  const pages = Array.isArray(meta.sourcePages)
+    ? meta.sourcePages.filter((n): n is number => typeof n === "number")
+    : null;
+  const singlePage = typeof meta.pageNumber === "number" ? meta.pageNumber : null;
+  const title = typeof meta.materialTitle === "string" ? meta.materialTitle : null;
+
+  let unitStr = "";
+  if (pages && pages.length > 0) {
+    const label = unitType === "slide" ? (pages.length > 1 ? "slides" : "slide") : pages.length > 1 ? "pp." : "p.";
+    unitStr = `${label} ${pages.join(", ")}`;
+  } else if (singlePage) {
+    const label = unitType === "slide" ? "slide" : "p.";
+    unitStr = `${label} ${singlePage}`;
+  }
+
+  if (title && unitStr) {
+    return `${title} (${unitStr})`;
+  } else if (title) {
+    return title;
+  } else if (unitStr) {
+    return unitStr;
+  }
+  return null;
 }
 
 export function NoteBlockCard({
@@ -71,6 +100,18 @@ export function NoteBlockCard({
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <BlockKindSelect value={block.kind} onChange={(kind) => onChange(block.id, { kind })} />
+          {(() => {
+            const sourceText = formatSourceAttribution(block.metadata);
+            if (!sourceText) return null;
+            return (
+              <span
+                className="inline-flex items-center rounded bg-ink-faint/10 px-1.5 py-0.5 text-[11px] font-medium text-ink-muted dark:bg-white/10 dark:text-white/60 max-w-[200px] truncate"
+                title={sourceText}
+              >
+                {sourceText}
+              </span>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-1">
           {editor && <BlockToolbar editor={editor} />}

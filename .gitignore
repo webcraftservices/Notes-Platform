@@ -10,3 +10,5 @@ build
 next-env.d.ts
 .storage/
 tsconfig.tsbuildinfo
+.vscode/
+.agents/

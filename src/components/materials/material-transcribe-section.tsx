@@ -72,7 +72,9 @@ export function MaterialTranscribeSection({
       if (pollRef.current) clearInterval(pollRef.current);
       return;
     }
-    pollRef.current = setInterval(async () => {
+
+    let es: EventSource | null = null;
+    const refreshMaterial = async () => {
       const res = await fetch(`/api/materials/${materialId}`);
       if (!res.ok) return;
       const data = await res.json();
@@ -80,11 +82,57 @@ export function MaterialTranscribeSection({
       if (data.transcript) {
         setTranscript({ language: data.transcript.language, segments: data.transcript.segments });
       }
+    };
+
+    if (typeof EventSource === "function" && job?.id) {
+      try {
+        es = new EventSource(
+          `/api/processing-jobs/stream?jobId=${encodeURIComponent(job.id)}`
+        );
+        es.addEventListener("job-status", (event: MessageEvent) => {
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed?.job?.status) {
+              setJob({
+                id: parsed.job.id ?? job.id,
+                status: parsed.job.status,
+                error: parsed.job.error ?? null,
+              });
+              if (parsed.job.status === "SUCCEEDED") {
+                void refreshMaterial();
+              }
+            }
+          } catch {
+            // Fallback polling handles state recovery
+          }
+        });
+        es.onerror = () => {
+          try {
+            es?.close();
+          } catch {
+            // Ignore
+          }
+          es = null;
+        };
+      } catch {
+        es = null;
+      }
+    }
+
+    pollRef.current = setInterval(() => {
+      void refreshMaterial();
     }, POLL_MS);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      if (es) {
+        try {
+          es.close();
+        } catch {
+          // Ignore
+        }
+      }
     };
-  }, [isActive, materialId]);
+  }, [isActive, job?.id, materialId]);
 
   async function handleTranscribe() {
     setStarting(true);
