@@ -98,6 +98,23 @@ const nextConfig = {
       { protocol: "https", hostname: "assets.aceternity.com" },
     ],
   },
+  webpack(config, { webpack }) {
+    // pptx2html@0.3.4 contains an import of './txml' with lowercase 'x' in
+    // src/process_pptx.js, but the file on disk is 'tXml.js'. On case-sensitive
+    // filesystems (Linux CI/production Docker), Webpack fails to resolve './txml'.
+    // NormalModuleReplacementPlugin redirects './txml' to './tXml' within pptx2html.
+    config.plugins.push(
+      new webpack.NormalModuleReplacementPlugin(
+        /^\.\/txml$/,
+        (resource) => {
+          if (resource.context && resource.context.includes("pptx2html")) {
+            resource.request = "./tXml";
+          }
+        }
+      )
+    );
+    return config;
+  },
   async headers() {
     return [{ source: "/:path*", headers: buildSecurityHeaders() }];
   },

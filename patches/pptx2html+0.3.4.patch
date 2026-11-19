@@ -1,7 +1,16 @@
 diff --git a/node_modules/pptx2html/src/process_pptx.js b/node_modules/pptx2html/src/process_pptx.js
-index bcb9651..8afee4d 100644
+index bcb9651..7255eea 100644
 --- a/node_modules/pptx2html/src/process_pptx.js
 +++ b/node_modules/pptx2html/src/process_pptx.js
+@@ -1,7 +1,7 @@
+ /* global btoa, JSZip */
+ 'use strict'
+ 
+-import tXml from './txml'
++import tXml from './tXml'
+ import * as colz from 'colz'
+ 
+ function base64ArrayBuffer (arrayBuff) {
 @@ -370,7 +370,7 @@ export default function processPptx (setOnMessage = () => {}, postMessage) {
          result = processCxnSpNode(nodeValue, warpObj)
          break
