@@ -1,4 +1,4 @@
-import { PrismaClient, type MemberRole } from "@prisma/client";
+import { PrismaClient, type MemberRole, type Prisma } from "@prisma/client";
 import {
   lockGroupForUpdate,
   lockGroupForShare,
@@ -49,6 +49,16 @@ function appendApplicationName(rawUrl: string, appName: string): string {
   return u.toString();
 }
 
+/**
+ * Parameterized, transaction-local application_name configuration.
+ * Uses PostgreSQL set_config($1, $2, true) (equivalent to SET LOCAL) so
+ * the setting is strictly bounded to the transaction and updates pg_stat_activity
+ * without persistent pool connection pollution or raw string interpolation.
+ */
+async function setTxApplicationName(tx: Prisma.TransactionClient, appName: string) {
+  await tx.$executeRaw`SELECT set_config('application_name', ${appName}, true)`;
+}
+
 function sendIpc(msg: Record<string, unknown>) {
   if (typeof process.send === "function") {
     process.send(msg);
@@ -87,6 +97,7 @@ async function main() {
     if (cfg.mode === "hold_for_update_then_delete") {
       const goPromise = waitForGo();
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const locked = await lockGroupForUpdate(tx, cfg.groupId);
         sendIpc({ type: "LOCK_ACQUIRED", mode: cfg.mode, locked });
         await goPromise;
@@ -159,6 +170,7 @@ async function main() {
       let rolledBack = false;
       try {
         await prisma.$transaction(async (tx) => {
+          await setTxApplicationName(tx, cfg.applicationName);
           const locked = await lockGroupForUpdate(tx, cfg.groupId);
           await tx.subject.updateMany({
             where: { groupId: cfg.groupId, deletedAt: null },
@@ -186,6 +198,7 @@ async function main() {
     if (cfg.mode === "hold_for_share_then_create_subject") {
       const goPromise = waitForGo();
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         await assertActiveGroupMemberForCreation(tx, cfg.groupId, cfg.userId, ["ADMIN", "OWNER"]);
         sendIpc({ type: "LOCK_ACQUIRED", mode: cfg.mode });
         await goPromise;
@@ -206,6 +219,7 @@ async function main() {
     if (cfg.mode === "contend_create_subject") {
       try {
         const result = await prisma.$transaction(async (tx) => {
+          await setTxApplicationName(tx, cfg.applicationName);
           await assertActiveGroupMemberForCreation(tx, cfg.groupId, cfg.userId, ["ADMIN", "OWNER"]);
           const created = await tx.subject.create({
             data: {
@@ -229,6 +243,7 @@ async function main() {
 
     if (cfg.mode === "contend_delete_group") {
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const locked = await lockGroupForUpdate(tx, cfg.groupId);
         if (!locked || locked.deletedAt !== null) {
           return { outcome: "not_found" };
@@ -264,6 +279,7 @@ async function main() {
       if (!cfg.targetUserId) throw new Error("Missing targetUserId");
       const goPromise = waitForGo();
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const lockedGroup = await lockGroupForShare(tx, cfg.groupId);
         if (!lockedGroup || lockedGroup.deletedAt !== null) {
           return { outcome: "group_deleted" };
@@ -294,6 +310,7 @@ async function main() {
     if (cfg.mode === "contend_member_demote") {
       if (!cfg.targetUserId) throw new Error("Missing targetUserId");
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const lockedGroup = await lockGroupForShare(tx, cfg.groupId);
         if (!lockedGroup || lockedGroup.deletedAt !== null) {
           return { outcome: "group_deleted" };
@@ -322,6 +339,7 @@ async function main() {
       if (!cfg.invitationToken) throw new Error("Missing invitationToken");
       const goPromise = waitForGo();
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         await assertActiveGroupMemberForCreation(tx, cfg.groupId, cfg.userId, ["ADMIN", "OWNER"]);
         const inv = await lockGroupInvitationForUpdate(tx, { token: cfg.invitationToken! });
         sendIpc({ type: "LOCK_ACQUIRED", mode: cfg.mode });
@@ -343,6 +361,7 @@ async function main() {
     if (cfg.mode === "contend_invitation_accept") {
       if (!cfg.invitationToken) throw new Error("Missing invitationToken");
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const lockedGroup = await lockGroupForShare(tx, cfg.groupId);
         if (!lockedGroup || lockedGroup.deletedAt !== null) {
           return { outcome: "group_deleted" };
@@ -368,6 +387,7 @@ async function main() {
       if (!cfg.materialId) throw new Error("Missing materialId");
       const goPromise = waitForGo();
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         await assertActiveGroupMemberForCreation(tx, cfg.groupId, cfg.userId);
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`job:DOCUMENT_EXTRACTION:${cfg.materialId}`}, 0))`;
         sendIpc({ type: "LOCK_ACQUIRED", mode: cfg.mode });
@@ -391,6 +411,8 @@ async function main() {
     if (cfg.mode === "contend_complete_job") {
       if (!cfg.materialId || !cfg.jobId) throw new Error("Missing materialId or jobId");
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`job:DOCUMENT_EXTRACTION:${cfg.materialId}`}, 0))`;
         const completed = await completeJobWithin(tx, cfg.jobId!, cfg.materialId!);
         if (!completed) {
           return { outcome: "aborted_deleted" };
@@ -408,6 +430,7 @@ async function main() {
     if (cfg.mode === "contend_sync_note_chunk") {
       if (!cfg.noteId) throw new Error("Missing noteId");
       const result = await prisma.$transaction(async (tx) => {
+        await setTxApplicationName(tx, cfg.applicationName);
         const lockedGroup = await lockGroupForShare(tx, cfg.groupId);
         if (!lockedGroup || lockedGroup.deletedAt !== null) {
           return { outcome: "aborted_group_deleted" };

@@ -34,13 +34,19 @@ interface SpawnedWorkerHandle {
   kill: () => void;
 }
 
+function sanitizeDiagnostics(text: string): string {
+  return text.replace(/:\/\/([^:]+):([^@]+)@/g, "://$1:***@");
+}
+
 function spawnWorkerProcess(
   bundlePath: string,
   config: Record<string, unknown>
 ): SpawnedWorkerHandle {
   const child = spawn(process.execPath, [bundlePath], {
+    cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_PATH: path.resolve(process.cwd(), "node_modules"),
       LIM01_WORKER_CONFIG: JSON.stringify(config),
     },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -49,6 +55,12 @@ function spawnWorkerProcess(
   const messages: Array<Record<string, unknown>> = [];
   const waiters: Array<(msg: Record<string, unknown>) => void> = [];
   let stderr = "";
+  let spawnError: Error | null = null;
+
+  child.on("error", (err) => {
+    spawnError = err;
+  });
+
   child.stderr?.on("data", (chunk) => {
     stderr += chunk.toString();
   });
@@ -66,28 +78,83 @@ function spawnWorkerProcess(
   });
 
   function nextMatching(type: string, timeoutMs = 15_000): Promise<Record<string, unknown>> {
+    if (spawnError) {
+      return Promise.reject(
+        new Error(`Worker process failed to spawn: ${spawnError.message} (stderr: ${sanitizeDiagnostics(stderr)})`)
+      );
+    }
+
+    if (child.exitCode !== null && child.exitCode !== 0) {
+      return Promise.reject(
+        new Error(
+          `Worker process already exited with code ${child.exitCode} (signal ${child.signalCode}). stderr=${sanitizeDiagnostics(stderr)}`
+        )
+      );
+    }
+
     const existingIdx = messages.findIndex((m) => m.type === type || m.type === "ERROR");
     if (existingIdx >= 0) {
       const [found] = messages.splice(existingIdx, 1);
       if (found?.type === "ERROR") {
-        return Promise.reject(new Error(`Worker error: ${found.message} (stderr: ${stderr})`));
+        return Promise.reject(
+          new Error(`Worker error: ${found.message} (stderr: ${sanitizeDiagnostics(stderr)})`)
+        );
       }
       return Promise.resolve(found!);
     }
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for worker IPC '${type}'. stderr=${stderr}`));
+      let timer: NodeJS.Timeout | null = null;
+      let onExit: ((code: number | null, signal: string | null) => void) | null = null;
+      let onError: ((err: Error) => void) | null = null;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (onExit) child.off("exit", onExit);
+        if (onError) child.off("error", onError);
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `Timed out waiting for worker IPC '${type}'. stderr=${sanitizeDiagnostics(stderr)}`
+          )
+        );
       }, timeoutMs);
+
+      onExit = (code: number | null, signal: string | null) => {
+        if (code !== 0 && code !== null) {
+          cleanup();
+          reject(
+            new Error(
+              `Worker process exited prematurely with code ${code} (signal ${signal}). stderr=${sanitizeDiagnostics(stderr)}`
+            )
+          );
+        }
+      };
+      child.once("exit", onExit);
+
+      onError = (err: Error) => {
+        cleanup();
+        reject(
+          new Error(
+            `Worker process error: ${err.message}. stderr=${sanitizeDiagnostics(stderr)}`
+          )
+        );
+      };
+      child.once("error", onError);
 
       const handler = (msg: Record<string, unknown>) => {
         if (msg.type === "ERROR") {
-          clearTimeout(timer);
-          reject(new Error(`Worker error: ${msg.message} (stderr: ${stderr})`));
+          cleanup();
+          reject(
+            new Error(`Worker error: ${msg.message} (stderr: ${sanitizeDiagnostics(stderr)})`)
+          );
           return;
         }
         if (msg.type === type) {
-          clearTimeout(timer);
+          cleanup();
           resolve(msg);
           return;
         }
@@ -259,7 +326,9 @@ describe.skipIf(!hasIsolatedTestDb)(
       ownerId = owner.id;
       adminId = admin.id;
 
-      bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), "zenote-lim01-"));
+      const cacheRoot = path.join(process.cwd(), "node_modules", ".cache");
+      if (!fs.existsSync(cacheRoot)) fs.mkdirSync(cacheRoot, { recursive: true });
+      bundleDir = fs.mkdtempSync(path.join(cacheRoot, "zenote-lim01-"));
       workerBundlePath = path.join(bundleDir, "lim01-worker.cjs");
       await build({
         entryPoints: [path.resolve(__dirname, "group-deletion-pg-worker.ts")],

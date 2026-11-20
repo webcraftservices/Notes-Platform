@@ -209,7 +209,7 @@ jobs:
           REDIS_URL="redis://127.0.0.1:6380" \
           BULLMQ_REDIS_URL="redis://127.0.0.1:6380" \
           ENABLE_LIVE_BULLMQ_TESTS="true" \
-          npx vitest run \
+          npx vitest run --no-file-parallelism \
             src/app/api/groups/\[groupId\]/__tests__/group-deletion-postgres-integration.test.ts \
             src/lib/search/__tests__/search-postgres-integration.test.ts \
             src/lib/srs/__tests__/study-postgres-integration.test.ts \
@@ -344,9 +344,24 @@ jobs:
               }
               console.log("Verified real BullMQ DOCUMENT_EXTRACTION SUCCEEDED:", job.id);
 
-              await q.close();
-              await conn.quit();
-              await db.$disconnect();
+              try {
+                await db.processingJob.deleteMany({ where: { materialId: mat.id } });
+                await db.material.deleteMany({ where: { id: mat.id } });
+                await db.topic.deleteMany({ where: { id: topic.id } });
+                await db.chapter.deleteMany({ where: { id: chap.id } });
+                await db.subject.deleteMany({ where: { id: subj.id } });
+                await db.workspace.deleteMany({ where: { id: ws.id } });
+                await db.user.deleteMany({ where: { id: user.id } });
+                fs.rmSync(path.join(baseDir, "ci-smoke"), { recursive: true, force: true });
+                console.log("Verified smoke-test entity cleanup succeeded in leaf-to-root order.");
+              } catch (cleanupErr) {
+                console.error("CRITICAL: Failed to clean up BullMQ smoke-test entities:", cleanupErr);
+                throw cleanupErr;
+              } finally {
+                await q.close().catch(() => undefined);
+                await conn.quit().catch(() => undefined);
+                await db.$disconnect().catch(() => undefined);
+              }
             })().catch((err) => { console.error(err); process.exit(1); });
           '
 
