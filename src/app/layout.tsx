@@ -1,27 +1,43 @@
 import type { Metadata, Viewport } from "next";
-import { Source_Serif_4, Inter, IBM_Plex_Mono, Manrope, Plus_Jakarta_Sans } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import { Providers } from "./providers";
 import { siteConfig } from "@/lib/site-config";
 import { WebsiteJsonLd } from "@/components/seo/json-ld";
 
-const display = Source_Serif_4({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+const display = localFont({
+  src: "../../public/fonts/SourceSerif4-Variable.woff2",
   variable: "--font-display",
   display: "swap",
 });
-const sans = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
-const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-mono", display: "swap" });
-const manrope = Manrope({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
+const sans = localFont({
+  src: "../../public/fonts/Inter-Variable.woff2",
+  variable: "--font-sans",
+  display: "swap",
+});
+const mono = localFont({
+  src: [
+    {
+      path: "../../public/fonts/IBMPlexMono-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../../public/fonts/IBMPlexMono-Medium.woff2",
+      weight: "500",
+      style: "normal",
+    },
+  ],
+  variable: "--font-mono",
+  display: "swap",
+});
+const manrope = localFont({
+  src: "../../public/fonts/Manrope-Variable.woff2",
   variable: "--font-manrope",
   display: "swap",
 });
-const jakarta = Plus_Jakarta_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
+const jakarta = localFont({
+  src: "../../public/fonts/PlusJakartaSans-Variable.woff2",
   variable: "--font-jakarta",
   display: "swap",
 });
