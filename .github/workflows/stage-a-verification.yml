@@ -320,7 +320,7 @@ jobs:
                 jobId: job.id,
                 type: "DOCUMENT_EXTRACTION",
                 enqueuedAt: new Date().toISOString(),
-              }, { jobId: "DOCUMENT_EXTRACTION:" + job.id });
+              }, { jobId: "DOCUMENT_EXTRACTION_" + job.id });
 
               let finishedJob = null;
               let updatedMat = null;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tx = vi.hoisted(() => ({
   $executeRaw: vi.fn().mockResolvedValue(1),
@@ -81,7 +81,11 @@ import {
   isBullMqEnabled,
   resolveBullMqRedisConfig,
 } from "@/lib/queue/connection";
-import { dispatchProcessingJob } from "@/lib/queue/dispatcher";
+import {
+  buildQueueJobId,
+  dispatchProcessingJob,
+  setProcessingQueueForTests,
+} from "@/lib/queue/dispatcher";
 import {
   pruneCompletedProcessingJobs,
   reconcileStrandedProcessingJobs,
@@ -378,6 +382,124 @@ describe("Phase 15 — Queue Connection, Dispatcher, and Crash Recovery (LIM-18)
       });
       expect(res.mode).toBe("in_process");
       expect(ran).toEqual(["job-unit-1"]);
+    });
+  });
+
+  describe("BullMQ Custom Job ID Format & Option Validation (Phase 2 Stage A Remediation)", () => {
+    afterEach(() => {
+      setProcessingQueueForTests(null);
+    });
+
+    it("constructs colon-free custom job IDs across all JobType variants with underscore delimiter", () => {
+      const jobTypes = [
+        "DOCUMENT_EXTRACTION",
+        "EMBEDDING",
+        "TRANSCRIPTION",
+        "AI_NOTE_GENERATION",
+        "GOOGLE_SYNC",
+      ] as const;
+
+      for (const type of jobTypes) {
+        const queueJobId = buildQueueJobId(type, "clx-test-cuid-123");
+        expect(queueJobId).toBe(`${type}_clx-test-cuid-123`);
+        expect(queueJobId).not.toContain(":");
+      }
+    });
+
+    it("validates that buildQueueJobId passes BullMQ validateOptions while colon format is rejected", async () => {
+      const { Job } = await import("bullmq");
+      const fakeQueue = { toKey: (k: string) => k, opts: { prefix: "bull" } };
+      const validJobId = buildQueueJobId("DOCUMENT_EXTRACTION", "cly987654321");
+
+      // Valid underscore custom ID must NOT throw
+      const validJob = new (Job as any)(
+        fakeQueue,
+        "DOCUMENT_EXTRACTION",
+        { data: "test" },
+        { jobId: validJobId }
+      );
+      expect(() => validJob.validateOptions({ data: "test" })).not.toThrow();
+
+      // Legacy colon custom ID MUST throw 'Custom Id cannot contain :'
+      const legacyColonJob = new (Job as any)(
+        fakeQueue,
+        "DOCUMENT_EXTRACTION",
+        { data: "test" },
+        { jobId: "DOCUMENT_EXTRACTION:cly987654321" }
+      );
+      expect(() => legacyColonJob.validateOptions({ data: "test" })).toThrow(
+        "Custom Id cannot contain :"
+      );
+    });
+
+    it("passes custom underscore jobId to queue.add and queue.getJob when BullMQ queue is active", async () => {
+      const mockJob = {
+        isCompleted: vi.fn().mockResolvedValue(true),
+        isFailed: vi.fn().mockResolvedValue(false),
+        remove: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockQueue = {
+        getJob: vi.fn().mockResolvedValue(mockJob),
+        add: vi.fn().mockResolvedValue({ id: "DOCUMENT_EXTRACTION_job-test-456" }),
+      };
+
+      setProcessingQueueForTests(mockQueue as any);
+
+      const inProcessCalls: string[] = [];
+      const result = await dispatchProcessingJob("job-test-456", "DOCUMENT_EXTRACTION", {
+        replaceStaleQueueJob: true,
+        awaitInProcess: false,
+        inProcessRunner: (id) => {
+          inProcessCalls.push(id);
+        },
+      });
+
+      expect(result).toEqual({
+        jobId: "job-test-456",
+        type: "DOCUMENT_EXTRACTION",
+        mode: "bullmq",
+        queueJobId: "DOCUMENT_EXTRACTION_job-test-456",
+      });
+
+      // Verify queue.getJob was called with the underscore queueJobId
+      expect(mockQueue.getJob).toHaveBeenCalledWith("DOCUMENT_EXTRACTION_job-test-456");
+      expect(mockJob.remove).toHaveBeenCalled();
+
+      // Verify queue.add was called with the underscore queueJobId in options
+      expect(mockQueue.add).toHaveBeenCalledWith(
+        "DOCUMENT_EXTRACTION",
+        expect.objectContaining({
+          jobId: "job-test-456",
+          type: "DOCUMENT_EXTRACTION",
+        }),
+        expect.objectContaining({
+          jobId: "DOCUMENT_EXTRACTION_job-test-456",
+        })
+      );
+    });
+
+    it("falls back to in-process execution when queue.add rejects in non-dedicated worker mode", async () => {
+      const mockQueue = {
+        getJob: vi.fn().mockResolvedValue(null),
+        add: vi.fn().mockRejectedValue(new Error("Simulated Redis connection failure")),
+      };
+
+      setProcessingQueueForTests(mockQueue as any);
+
+      const inProcessCalls: string[] = [];
+      const result = await dispatchProcessingJob("job-fallback-1", "EMBEDDING", {
+        awaitInProcess: true,
+        inProcessRunner: (id) => {
+          inProcessCalls.push(id);
+        },
+      });
+
+      expect(result).toEqual({
+        jobId: "job-fallback-1",
+        type: "EMBEDDING",
+        mode: "in_process",
+      });
+      expect(inProcessCalls).toEqual(["job-fallback-1"]);
     });
   });
 });

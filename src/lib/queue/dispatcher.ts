@@ -60,8 +60,8 @@ let lastQueueInitFailureAt: number | null = null;
  * Retries automatically after `QUEUE_INIT_RETRY_COOLDOWN_MS` if initialization failed previously.
  */
 export function getProcessingQueue(): Queue<QueuedProcessingJobPayload> | null {
-  if (!isBullMqEnabled()) return null;
   if (sharedQueue) return sharedQueue;
+  if (!isBullMqEnabled()) return null;
   if (
     lastQueueInitFailureAt !== null &&
     Date.now() - lastQueueInitFailureAt < QUEUE_INIT_RETRY_COOLDOWN_MS
@@ -199,6 +199,24 @@ export async function executeProcessingJobByType(
 }
 
 /**
+ * Constructs a BullMQ-compliant custom job ID.
+ *
+ * BullMQ's `Job.validateOptions` rejects custom job IDs containing colons (`:`)
+ * unless they match internal repeatable job formats (split(':').length === 3).
+ * An underscore delimiter (`_`) guarantees safe custom job IDs that support
+ * deterministic deduplication, stale job retrieval, and worker execution.
+ */
+export function buildQueueJobId(type: JobType, jobId: string): string {
+  return `${type}_${jobId}`;
+}
+
+export function setProcessingQueueForTests(
+  queue: Queue<QueuedProcessingJobPayload> | null
+): void {
+  sharedQueue = queue;
+}
+
+/**
  * Dispatches a `ProcessingJob` for background execution.
  *
  * - When BullMQ is enabled AND either a dedicated worker (`BULLMQ_DEDICATED_WORKER=true`)
@@ -227,7 +245,7 @@ export async function dispatchProcessingJob(
   };
 
   const queue = getProcessingQueue();
-  const queueJobId = `${type}:${jobId}`;
+  const queueJobId = buildQueueJobId(type, jobId);
   const dedicatedWorkerOnly =
     options.forceBullMqOnly === true || isDedicatedWorkerMode();
 
